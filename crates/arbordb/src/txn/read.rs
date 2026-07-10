@@ -1,12 +1,14 @@
 //! The opaque read transaction: a consistent snapshot of one table.
 
+use super::query::IndexQuery;
 use crate::{
     access::{ArchivedReader, Reader},
     cache::PathCache,
     codec::{decode, ArchivedDir, ArchivedValue},
     data::{AData, ARef, AValue, Scalar},
-    engine::{data_def, split, EntryBytes, EntryKind},
+    engine::{data_def, split, EntryBytes, EntryKind, INDEX_TABLE, META_TABLE},
     error::{AdbError, AdbResult},
+    index::{registry, scan, Pattern},
     node::NodeKind,
     path::{APath, VPath},
     value::Value,
@@ -14,6 +16,7 @@ use crate::{
 };
 
 use redb::{ReadOnlyTable, ReadTransaction, ReadableTable, TableError};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// A read transaction over one table — a consistent, concurrent snapshot.
@@ -239,6 +242,113 @@ impl ReadTxn {
     /// Whether a file or directory exists at `path`.
     pub fn exists(&self, path: impl AsRef<str>) -> AdbResult<bool> {
         Ok(self.kind(path)?.is_some())
+    }
+
+    /// Finds the entities an index points at, recomposing each as a `T`.
+    ///
+    /// `values` are matched against the index's leading columns (in column order):
+    /// the full set is an exact lookup, fewer is a prefix lookup, and an empty
+    /// slice matches every indexed entity. Results come back in index order
+    /// (ascending by the encoded key, honoring each column's ASC/DESC). For reverse
+    /// order or a subtree scope use [`query`](Self::query). Errors with
+    /// [`IndexNotFound`](AdbError::IndexNotFound) for an unknown index and
+    /// [`IndexArity`](AdbError::IndexArity) for more values than the index has columns.
+    pub fn find<T: AData>(&self, index: &str, values: &[Scalar]) -> AdbResult<Vec<T>> {
+        self.query(index).prefixed(values).run()
+    }
+
+    /// Starts an [`IndexQuery`] against `index` — a builder for prefix matches,
+    /// reverse order, and subtree scoping.
+    pub fn query(&self, index: &str) -> IndexQuery<'_> {
+        IndexQuery::new(self, index)
+    }
+
+    /// Runs a built index query: a prefix scan (exact = full prefix), optional
+    /// subtree scoping, optional reversal, then recomposes each hit as a `T`.
+    pub(crate) fn execute_query<T: AData>(
+        &self,
+        index: &str,
+        prefix: &[Scalar],
+        reverse: bool,
+        root: &APath,
+    ) -> AdbResult<Vec<T>> {
+        let entry = {
+            let meta = self.txn.open_table(META_TABLE)?;
+
+            registry::lookup(&meta, &self.table, index)?
+        }
+        .ok_or_else(|| AdbError::IndexNotFound {
+            index: index.to_string(),
+        })?;
+
+        let def = entry.def();
+        if prefix.len() > def.columns().len() {
+            return Err(AdbError::IndexArity {
+                index:    index.to_string(),
+                expected: def.columns().len(),
+                got:      prefix.len(),
+            });
+        }
+
+        // `encode_columns` zips with the columns, so a short `prefix` encodes only
+        // its leading columns — exactly the byte prefix a prefix scan needs.
+        let cols = def.encode_columns(prefix);
+
+        let index_table = match self.txn.open_table(INDEX_TABLE) {
+            Ok(table) => table,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(err) => return Err(err.into()),
+        };
+
+        let mut entities = scan::scan_prefix(&index_table, entry.id(), &cols, def.unique())?;
+
+        let Some(data) = self.open()? else {
+            return Ok(Vec::new());
+        };
+
+        // Restrict to entities at or under `root` (a rooted view scopes here).
+        if !root.is_empty() {
+            let pattern = Pattern::parse(def.pattern())?;
+            if pattern.depth() < root.len() {
+                return Ok(Vec::new());
+            }
+
+            let under: HashSet<AKey> = pattern.affected_entities(&data, root)?.into_iter().collect();
+            entities.retain(|entity| under.contains(entity));
+        }
+
+        // The scan yields ascending index order; reverse the materialized hits for
+        // descending order.
+        if reverse {
+            entities.reverse();
+        }
+
+        // Each match is addressed by its stable key; recompose it from its own blob.
+        let mut out = Vec::with_capacity(entities.len());
+        for entity in entities {
+            if let Some(value) = self.load_entity::<T>(&data, entity)? {
+                out.push(value);
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Recomposes the file stored under `entity` as a `T`, or `None` when the
+    /// entity is absent or is a directory (not a decodable value).
+    fn load_entity<T: AData>(&self, table: &ReadOnlyTable<u128, EntryBytes>, entity: AKey) -> AdbResult<Option<T>> {
+        let Some(blob) = self.entry_blob(table, entity)? else {
+            return Ok(None);
+        };
+
+        match split(&blob)?.0 {
+            EntryKind::File => {
+                let reader = ArchivedReader::new(blob, 1);
+
+                Ok(Some(T::load(&reader, &VPath::root())?))
+            }
+            EntryKind::Dir => Ok(None),
+        }
     }
 
     /// Lists the direct children of the directory at `path`, as `(name, kind)`

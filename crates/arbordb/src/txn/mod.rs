@@ -1,6 +1,7 @@
 //! Opaque read and write transactions over a table.
 
+mod query;
 mod read;
 mod write;
 
-pub use self::{read::ReadTxn, write::WriteTxn};
+pub use self::{query::IndexQuery, read::ReadTxn, write::WriteTxn};

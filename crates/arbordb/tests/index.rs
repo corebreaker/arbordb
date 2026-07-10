@@ -2,11 +2,12 @@
 
 #![cfg(feature = "derive")]
 
+use arbordb::data::Scalar;
 use arbordb::index::{IndexColumn, IndexDef};
 use arbordb::path::VPath;
 use arbordb::{AData, AdbError, ArborDb};
 
-#[derive(AData)]
+#[derive(AData, Debug, Clone, PartialEq)]
 #[arbor(index(name = "by_age", columns(age)))]
 struct Member {
     handle: String,
@@ -114,4 +115,94 @@ fn a_unique_index_over_duplicate_data_fails_to_back_fill() {
 
     // The failed creation left no index registered.
     assert!(!table.has_index("u_age").unwrap());
+}
+
+#[test]
+fn find_and_query_return_entities_in_index_order() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+    table.create_indexes::<Member>("members/*").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Member>("members/c", &member("c", 30)).unwrap();
+        w.store::<Member>("members/a", &member("a", 10)).unwrap();
+        w.store::<Member>("members/b", &member("b", 20)).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // Exact match on the age column.
+    assert_eq!(
+        r.find::<Member>("by_age", &[Scalar::I64(20)]).unwrap(),
+        vec![member("b", 20)]
+    );
+
+    // Empty prefix: every indexed entity, ascending by age.
+    assert_eq!(
+        r.find::<Member>("by_age", &[]).unwrap(),
+        vec![member("a", 10), member("b", 20), member("c", 30)],
+    );
+
+    // Reversed: descending by age.
+    assert_eq!(
+        r.query("by_age").reversed().run::<Member>().unwrap(),
+        vec![member("c", 30), member("b", 20), member("a", 10)],
+    );
+
+    // An unknown index and an over-long prefix are reported.
+    assert!(matches!(
+        r.find::<Member>("nope", &[]),
+        Err(AdbError::IndexNotFound { .. })
+    ));
+    assert!(matches!(
+        r.find::<Member>("by_age", &[Scalar::I64(1), Scalar::I64(2)]),
+        Err(AdbError::IndexArity { .. })
+    ));
+}
+
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(index(name = "by_city_age", columns(city, age)))]
+struct Resident {
+    city: String,
+    age:  i64,
+}
+
+fn resident(city: &str, age: i64) -> Resident {
+    Resident {
+        city: city.into(),
+        age,
+    }
+}
+
+#[test]
+fn prefix_match_on_a_composite_index() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+    table.create_indexes::<Resident>("residents/*").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Resident>("residents/1", &resident("paris", 40)).unwrap();
+        w.store::<Resident>("residents/2", &resident("lyon", 25)).unwrap();
+        w.store::<Resident>("residents/3", &resident("paris", 30)).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // A one-column prefix matches every resident of that city, ordered by age.
+    assert_eq!(
+        r.find::<Resident>("by_city_age", &[Scalar::Str(String::from("paris"))])
+            .unwrap(),
+        vec![resident("paris", 30), resident("paris", 40)],
+    );
+
+    // The full column tuple is an exact match.
+    assert_eq!(
+        r.find::<Resident>("by_city_age", &[Scalar::Str(String::from("lyon")), Scalar::I64(25)])
+            .unwrap(),
+        vec![resident("lyon", 25)],
+    );
 }

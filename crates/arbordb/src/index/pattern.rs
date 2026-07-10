@@ -64,6 +64,13 @@ impl Pattern {
         })
     }
 
+    /// The depth (number of access-path levels) at which this pattern's entities
+    /// sit. An entity can lie at or under a root only if this is at least the
+    /// root's length.
+    pub(crate) fn depth(&self) -> usize {
+        self.segs.len()
+    }
+
     /// The keys of the entities this pattern matches that lie on the same
     /// root-to-node line as `scope` (the path a mutation touched).
     pub(crate) fn affected_entities<R>(&self, data: &R, scope: &APath) -> AdbResult<Vec<AKey>>

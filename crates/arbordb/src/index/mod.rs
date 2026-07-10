@@ -14,8 +14,9 @@ mod pattern;
 
 pub(crate) mod maintenance;
 pub(crate) mod registry;
+pub(crate) mod scan;
 
-pub(crate) use self::id::IndexId;
+pub(crate) use self::{id::IndexId, pattern::Pattern};
 
 pub use self::{
     definitions::{Direction, IndexColumn, IndexDef},
