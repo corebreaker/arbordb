@@ -40,7 +40,7 @@ impl Reader for MemWriter {
     }
 
     fn kind_at(&self, at: &VPath) -> AdbResult<Option<NodeKind>> {
-        Ok(self.value.borrow().subtree(at).map(kind_of))
+        Ok(self.value.borrow().subtree(at).map(Value::node_kind))
     }
 
     fn len_at(&self, at: &VPath) -> AdbResult<usize> {
@@ -88,14 +88,5 @@ impl Writer for MemWriter {
 
     fn remove(&self, at: &VPath) -> AdbResult<bool> {
         Ok(self.value.borrow_mut().remove_value(at))
-    }
-}
-
-/// The [`NodeKind`] of an in-memory value node.
-fn kind_of(value: &Value) -> NodeKind {
-    match value {
-        Value::Leaf(_) => NodeKind::Leaf,
-        Value::List(_) => NodeKind::List,
-        Value::Node(_) => NodeKind::Object,
     }
 }

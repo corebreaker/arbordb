@@ -146,6 +146,15 @@ impl Value {
         }
     }
 
+    /// The [`NodeKind`](crate::NodeKind) of this value's root.
+    pub fn node_kind(&self) -> crate::NodeKind {
+        match self {
+            Value::Leaf(_) => crate::NodeKind::Leaf,
+            Value::List(_) => crate::NodeKind::List,
+            Value::Node(_) => crate::NodeKind::Object,
+        }
+    }
+
     /// Empties the value in place: a leaf becomes [`Null`](Scalar::Null), a list
     /// or node drops its children (keeping its kind).
     pub fn clear(&mut self) {

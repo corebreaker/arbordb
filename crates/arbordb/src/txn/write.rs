@@ -1,9 +1,9 @@
 //! The opaque write transaction: serialized mutation of one table.
 
 use crate::{
-    access::MemWriter,
-    codec::{encode, encode_dir, ArchivedDir},
-    data::AData,
+    access::{MemWriter, MutCursor, Writer},
+    codec::{decode, encode, encode_dir, ArchivedDir},
+    data::{AData, AMut},
     db::DbInner,
     engine::{
         child_of,
@@ -59,7 +59,11 @@ impl WriteTxn {
     /// as needed. Replaces whatever was there: a file overwrite keeps the node's
     /// identity; a directory is removed with its whole subtree first.
     pub fn store_value(&self, path: impl AsRef<str>, value: &Value) -> AdbResult<()> {
-        let path = APath::parse(path.as_ref())?;
+        self.store_value_at(&APath::parse(path.as_ref())?, value)
+    }
+
+    /// Stores `value` as a file at an already-parsed access path.
+    pub(crate) fn store_value_at(&self, path: &APath, value: &Value) -> AdbResult<()> {
         let Some((parent_path, name)) = path.split_last() else {
             return Err(AdbError::CannotAccess(String::from("cannot store a file at the root")));
         };
@@ -90,6 +94,41 @@ impl WriteTxn {
         table.insert(u128::from(akey), entry.as_slice())?;
 
         Ok(())
+    }
+
+    /// Opens a mutable accessor over the file at `path`, or `None` if absent. Each
+    /// mutation through the accessor re-encodes and rewrites the file's blob (the
+    /// accepted O(blob) cost of a partial write). The accessor borrows the
+    /// transaction, so drop it before `commit`.
+    pub fn fetch_mut<'t, A: AMut<'t>>(&'t self, path: impl AsRef<str>) -> AdbResult<Option<A>> {
+        let apath = APath::parse(path.as_ref())?;
+        if self.load_value_at(&apath)?.is_none() {
+            return Ok(None);
+        }
+
+        let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath));
+
+        Ok(Some(A::open(cursor, VPath::root())))
+    }
+
+    /// Loads the current (uncommitted) value of the file at `path`, or `None` if
+    /// absent. Errors if `path` names a directory.
+    pub(crate) fn load_value_at(&self, path: &APath) -> AdbResult<Option<Value>> {
+        let table = self.txn.open_table(data_def(&self.table))?;
+
+        let Some(akey) = resolve(&table, path)? else {
+            return Ok(None);
+        };
+
+        let Some(entry) = read_entry(&table, akey)? else {
+            return Ok(None);
+        };
+
+        let (kind, payload) = split(&entry)?;
+        match kind {
+            EntryKind::File => Ok(Some(decode(payload)?)),
+            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
+        }
     }
 
     /// Creates the directory at `path` (and any missing ancestors). Idempotent;

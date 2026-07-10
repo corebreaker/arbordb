@@ -7,8 +7,9 @@
 
 mod archived;
 mod mem;
+mod mut_cursor;
 mod reader;
 mod writer;
 
-pub(crate) use self::{archived::ArchivedReader, mem::MemWriter};
+pub(crate) use self::{archived::ArchivedReader, mem::MemWriter, mut_cursor::MutCursor};
 pub use self::{reader::Reader, writer::Writer};
