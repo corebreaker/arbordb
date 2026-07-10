@@ -1,24 +1,16 @@
 //! The opaque write transaction: serialized mutation of one table.
 
-use super::rooted::RootedWrite;
+use super::{
+    context::{table, Context},
+    rooted::RootedWrite,
+};
+
 use crate::{
     access::{MemWriter, MutCursor, Writer},
-    codec::{decode, encode, encode_dir, ArchivedDir, ArchivedValue},
+    codec::decode,
     data::{AData, AMut, Scalar},
     db::DbInner,
-    engine::{
-        data_def,
-        dir_entry,
-        fetch_entry_kind,
-        file_entry,
-        read_entry,
-        resolve,
-        entry_split,
-        EntryBytes,
-        EntryKind,
-        INDEX_TABLE,
-        META_TABLE,
-    },
+    engine::{data_def, fetch_entry_kind, read_entry, resolve, entry_split, EntryKind, INDEX_TABLE, META_TABLE},
     error::{AdbError, AdbResult},
     index::{
         maintenance,
@@ -26,756 +18,21 @@ use crate::{
     },
     path::{APath, IntoArborPath, VPath},
     value::Value,
-    AKey,
-};
-
-#[cfg(feature = "entry-timestamps")]
-use crate::{
-    inode::{self, InodeTable, INODES_TABLE},
-    time::timestamp_now,
-};
-
-#[cfg(feature = "permissions")]
-use crate::{
-    inode::{mode_to_bits, read_acl, read_mac, seal_mac, seal_sig, set_acl, set_default_acl, Acl, Right},
-    perm::{self, Principal},
 };
 
 use redb::WriteTransaction;
-use std::{collections::BTreeMap, sync::Arc};
-
-/// The per-transaction data table (borrows the write transaction).
-type DataTable<'txn> = redb::Table<'txn, u128, EntryBytes>;
-
-/// The virtual-filesystem write helpers backing the public [`WriteTxn`] ops.
-///
-/// These routines operate directly on the raw [`DataTable`] — resolving,
-/// linking, rewriting, and cascading over directory and file nodes — rather
-/// than on `&self`. Grouping them here keeps them off [`WriteTxn`]'s surface
-/// while letting each public op compose them.
-mod table {
-    use super::*;
-
-    /// The tables a mutation writes through. Bundling the data table with the
-    /// (optional) per-vnode metadata table lets every vnode write keep that vnode's
-    /// `$inodes` entry — its timestamps — in step within the same transaction.
-    pub(super) struct Ctx<'txn, 'a> {
-        /// The data table this mutation writes vnode entries through.
-        data: &'a mut DataTable<'txn>,
-
-        /// The per-vnode metadata table, kept in step with `data`.
-        #[cfg(feature = "entry-timestamps")]
-        inodes: &'a mut InodeTable<'txn>,
-
-        /// The table name, part of every `$inodes` key.
-        #[cfg(feature = "entry-timestamps")]
-        table: &'a str,
-
-        /// One timestamp shared by every vnode this mutation touches.
-        #[cfg(feature = "entry-timestamps")]
-        now: i64,
-
-        /// The identity performing the mutation; drives ACL enforcement.
-        #[cfg(feature = "permissions")]
-        principal: &'a Principal,
-    }
-
-    impl<'txn, 'a> Ctx<'txn, 'a> {
-        /// Bundles the data table with the per-vnode metadata table and one
-        /// timestamp shared by every vnode this mutation touches.
-        #[cfg(feature = "permissions")]
-        pub(super) fn new(
-            data: &'a mut DataTable<'txn>,
-            inodes: &'a mut InodeTable<'txn>,
-            table: &'a str,
-            principal: &'a Principal,
-        ) -> Self {
-            Self {
-                data,
-                inodes,
-                table,
-                now: timestamp_now(),
-                principal,
-            }
-        }
-
-        /// Bundles the data table with the per-vnode metadata table (this build has
-        /// timestamps but no permission system, so there is no principal).
-        #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-        pub(super) fn new(data: &'a mut DataTable<'txn>, inodes: &'a mut InodeTable<'txn>, table: &'a str) -> Self {
-            Self {
-                data,
-                inodes,
-                table,
-                now: timestamp_now(),
-            }
-        }
-
-        /// Bundles the data table alone (the metadata table exists only under the
-        /// `entry-timestamps` feature).
-        #[cfg(not(feature = "entry-timestamps"))]
-        pub(super) fn new(data: &'a mut DataTable<'txn>) -> Self {
-            Self {
-                data,
-            }
-        }
-
-        /// Writes a vnode's entry blob and refreshes its inode — on creation all
-        /// three times are set; on overwrite only `modified` moves.
-        fn put_entry(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
-            self.data.insert(u128::from(akey), entry)?;
-
-            #[cfg(feature = "entry-timestamps")]
-            inode::touch(self.inodes, self.table, akey, self.now)?;
-
-            #[cfg(feature = "permissions")]
-            {
-                self.stamp_default_acl(akey)?;
-                self.seal_integrity(akey, entry)?;
-            }
-
-            Ok(())
-        }
-
-        /// Removes a vnode's entry blob together with its inode.
-        fn remove_entry(&mut self, akey: AKey) -> AdbResult<()> {
-            self.data.remove(u128::from(akey))?;
-
-            #[cfg(feature = "entry-timestamps")]
-            inode::forget(self.inodes, self.table, akey)?;
-
-            Ok(())
-        }
-
-        /// Reads `akey`'s entry, first verifying its integrity tag (for a keyed
-        /// principal), so a writer never trusts — nor launders into a fresh tag —
-        /// a blob altered outside the library. `None` if the vnode is absent.
-        fn read_verified(&self, akey: AKey) -> AdbResult<Option<Vec<u8>>> {
-            let entry = read_entry(&*self.data, akey)?;
-
-            #[cfg(feature = "permissions")]
-            if let Some(ref bytes) = entry {
-                self.verify_integrity(akey, bytes)?;
-            }
-
-            Ok(entry)
-        }
-
-        /// The child of directory `parent` named `name`, verifying `parent`'s
-        /// integrity first. `None` if `parent` is absent, is a file, or has no such child.
-        fn child(&self, parent: AKey, name: &str) -> AdbResult<Option<AKey>> {
-            let Some(entry) = self.read_verified(parent)? else {
-                return Ok(None);
-            };
-
-            let (kind, payload) = entry_split(&entry)?;
-            if kind != EntryKind::Dir {
-                return Ok(None);
-            }
-
-            ArchivedDir::new(payload)?.get(name)
-        }
-
-        /// The filesystem kind of `akey`, verifying its integrity first. `None` if
-        /// the vnode is absent.
-        fn kind(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
-            match self.read_verified(akey)? {
-                Some(entry) => Ok(Some(entry_split(&entry)?.0)),
-                None => Ok(None),
-            }
-        }
-
-        /// Directory `akey`'s children as an owned map, verifying its integrity first
-        /// (empty if the vnode is absent). Errors if `akey` is a file.
-        fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<String, AKey>> {
-            let Some(entry) = self.read_verified(akey)? else {
-                return Ok(BTreeMap::new());
-            };
-
-            let (kind, payload) = entry_split(&entry)?;
-            if kind != EntryKind::Dir {
-                return Err(AdbError::CannotAccess(String::from(
-                    "a path component is a file, not a directory",
-                )));
-            }
-
-            Ok(ArchivedDir::new(payload)?
-                .entries()?
-                .into_iter()
-                .map(|(name, child)| (name.to_string(), child))
-                .collect())
-        }
-
-        /// Verifies `akey`'s integrity tag over `entry` and its current ACL, erroring
-        /// with [`AdbError::Tampered`] on a mismatch. A no-op for an unrestricted
-        /// handle or the keyless guest (a non-protected database has no integrity key).
-        #[cfg(feature = "permissions")]
-        fn verify_integrity(&self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
-            let Principal::User(session) = self.principal else {
-                return Ok(());
-            };
-
-            let acl = read_acl(&*self.inodes, self.table, akey)?
-                .map(|acl| acl.encode())
-                .unwrap_or_default();
-            let stored = read_mac(&*self.inodes, self.table, akey)?;
-            let expected = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
-
-            match stored {
-                Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
-                _ => Err(AdbError::Tampered(format!(
-                    "integrity check failed for a vnode in table '{}'",
-                    self.table
-                ))),
-            }
-        }
-
-        /// Reads `akey`'s ACL — a missing one (e.g. a vnode predating protection)
-        /// defaults to master-owned — and checks the principal holds `right`.
-        #[cfg(feature = "permissions")]
-        fn check(&self, akey: AKey, right: Right) -> AdbResult<()> {
-            let acl = read_acl(&*self.inodes, self.table, akey)?;
-
-            perm::access::authorize(self.principal, akey, acl.as_ref(), right)
-        }
-
-        /// Resolves `path` to a vnode key, checking `walk` on every directory
-        /// traversed. `None` if a component along the way is missing.
-        #[cfg(feature = "permissions")]
-        fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
-            let mut akey = AKey::ROOT;
-            for name in path.names() {
-                self.check(akey, Right::Walk)?;
-                match self.child(akey, name.as_str())? {
-                    Some(child) => akey = child,
-                    None => return Ok(None),
-                }
-            }
-
-            Ok(Some(akey))
-        }
-
-        /// Resolves `path` with no access checks (this build has no permission system).
-        #[cfg(not(feature = "permissions"))]
-        fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
-            crate::engine::resolve(&*self.data, path)
-        }
-
-        /// Stamps the default ACL (owner = the authenticated user, its first group)
-        /// on a freshly created vnode; a no-op for an unrestricted handle or when an
-        /// ACL is already present, so an overwrite preserves it.
-        #[cfg(feature = "permissions")]
-        fn stamp_default_acl(&mut self, akey: AKey) -> AdbResult<()> {
-            // The root is special and carries no ACL.
-            if akey == AKey::ROOT {
-                return Ok(());
-            }
-
-            if let Principal::User(session) = self.principal {
-                set_default_acl(self.inodes, self.table, akey, session.uid())?;
-            }
-
-            Ok(())
-        }
-
-        /// Reads `akey`'s ACL, if it has one.
-        #[cfg(feature = "permissions")]
-        fn acl(&self, akey: AKey) -> AdbResult<Option<Acl>> {
-            read_acl(&*self.inodes, self.table, akey)
-        }
-
-        /// Replaces `akey`'s ACL.
-        #[cfg(feature = "permissions")]
-        fn write_acl(&mut self, akey: AKey, acl: Acl) -> AdbResult<()> {
-            set_acl(self.inodes, self.table, akey, acl)
-        }
-
-        /// Seals `akey`'s integrity tags over its entry bytes and current ACL: the
-        /// keyed MAC an authenticated reader verifies *and* the signature a guest
-        /// verifies. A no-op for an unrestricted handle — a non-protected database has
-        /// no keys, so nothing is sealed. Only an authenticated user reaches here (a
-        /// guest cannot write).
-        #[cfg(feature = "permissions")]
-        fn seal_integrity(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
-            if let Principal::User(session) = self.principal {
-                let acl = read_acl(&*self.inodes, self.table, akey)?
-                    .map(|acl| acl.encode())
-                    .unwrap_or_default();
-
-                let mac = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
-                seal_mac(self.inodes, self.table, akey, mac)?;
-
-                let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, entry, &acl);
-                seal_sig(self.inodes, self.table, akey, sig)?;
-            }
-
-            Ok(())
-        }
-
-        /// Re-seals `akey`'s integrity tags after an ACL change: the entry bytes are
-        /// unchanged, but both tags also bind the ACL, so each must be recomputed.
-        #[cfg(feature = "permissions")]
-        fn reseal_integrity(&mut self, akey: AKey) -> AdbResult<()> {
-            if let Principal::User(session) = self.principal {
-                let Some(entry) = read_entry(&*self.data, akey)? else {
-                    return Ok(());
-                };
-
-                let acl = read_acl(&*self.inodes, self.table, akey)?
-                    .map(|acl| acl.encode())
-                    .unwrap_or_default();
-
-                let mac = perm::integrity::mac_value(session.key(), self.table, akey, &entry, &acl);
-                seal_mac(self.inodes, self.table, akey, mac)?;
-
-                let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, &entry, &acl);
-                seal_sig(self.inodes, self.table, akey, sig)?;
-            }
-
-            Ok(())
-        }
-
-        /// Deletes every value owned by `uid` in this table, bypassing ACL checks
-        /// (the caller must already be an authorized administrator).
-        #[cfg(feature = "permissions")]
-        pub(super) fn reap_owned(&mut self, uid: u32) -> AdbResult<()> {
-            let mut victims: Vec<(AKey, String)> = Vec::new();
-            collect_owned(self, AKey::ROOT, uid, &mut victims)?;
-
-            for (parent, name) in victims {
-                if let Some(child) = self.child(parent, &name)? {
-                    cascade_delete(self, child)?;
-                    unlink_child(self, parent, &name)?;
-                }
-            }
-
-            Ok(())
-        }
-    }
-
-    /// Stores `value` as a file at `path` (a non-root path), creating parents and
-    /// replacing whatever was there.
-    pub(super) fn store_value_into(ctx: &mut Ctx, path: &APath, value: &Value) -> AdbResult<()> {
-        let (parent_path, name) = path.split_last().expect("a non-root path has a parent and a name");
-        let parent = ensure_dir(ctx, &parent_path)?;
-
-        #[cfg(feature = "permissions")]
-        ctx.check(parent, Right::Walk)?;
-
-        let akey = match ctx.child(parent, name)? {
-            Some(node) => {
-                if ctx.kind(node)? == Some(EntryKind::File) {
-                    #[cfg(feature = "permissions")]
-                    ctx.check(node, Right::Write)?;
-
-                    node
-                } else {
-                    #[cfg(feature = "permissions")]
-                    ctx.check(parent, Right::Write)?;
-
-                    cascade_delete(ctx, node)?;
-                    let fresh = AKey::generate();
-                    link_child(ctx, parent, name, fresh)?;
-                    fresh
-                }
-            }
-            None => {
-                #[cfg(feature = "permissions")]
-                ctx.check(parent, Right::Write)?;
-
-                let fresh = AKey::generate();
-                link_child(ctx, parent, name, fresh)?;
-                fresh
-            }
-        };
-
-        let entry = file_entry(&encode(value));
-        ctx.put_entry(akey, entry.as_slice())?;
-
-        Ok(())
-    }
-
-    /// Sets the scalar at `at` inside the file at `path`. When the new scalar keeps the
-    /// current leaf's byte width the blob is patched in place — no decode, no
-    /// re-encode; otherwise the value is decoded, updated, and re-encoded. Creates the
-    /// file (and its parents) when it does not exist yet.
-    pub(super) fn put_scalar_into(ctx: &mut Ctx, path: &APath, at: &VPath, scalar: &Scalar) -> AdbResult<()> {
-        let akey = ctx.resolve(path)?;
-        let entry = match akey {
-            Some(akey) => ctx.read_verified(akey)?,
-            None => None,
-        };
-
-        let mut value = match (akey, entry) {
-            (Some(akey), Some(mut entry)) => {
-                #[cfg(feature = "permissions")]
-                ctx.check(akey, Right::Write)?;
-
-                // Fast path: a leaf that keeps its width is patched in place — every
-                // other offset in the blob stays valid, so nothing is re-encoded.
-                if patch_scalar(&mut entry, at, scalar)? {
-                    ctx.put_entry(akey, entry.as_slice())?;
-
-                    return Ok(());
-                }
-
-                // Slow path: decode the (untouched) blob to re-encode it below.
-                let (kind, payload) = entry_split(&entry)?;
-                match kind {
-                    EntryKind::File => decode(payload)?,
-                    EntryKind::Dir => {
-                        return Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file")));
-                    }
-                }
-            }
-            _ => Value::default(),
-        };
-
-        value.set_value(at, Value::Leaf(scalar.clone()));
-
-        store_value_into(ctx, path, &value)
-    }
-
-    /// Patches `entry` in place when its file's leaf at `at` keeps its encoded width
-    /// under `scalar`, overwriting just that leaf's bytes and returning `true`. Returns
-    /// `false`, leaving `entry` untouched, when the fast path does not apply (a
-    /// directory, an absent or non-leaf path, or a width change) — the caller then
-    /// re-encodes.
-    pub(super) fn patch_scalar(entry: &mut [u8], at: &VPath, scalar: &Scalar) -> AdbResult<bool> {
-        let mut encoded = Vec::new();
-        scalar.encode(&mut encoded);
-
-        // Locate the leaf's bytes, then drop the borrow before overwriting them.
-        let start = {
-            let (kind, payload) = entry_split(entry)?;
-            if kind != EntryKind::File {
-                return Ok(false);
-            }
-
-            let Some((scalar_off, current_len)) = ArchivedValue::new(payload)?.leaf_scalar_span(at)? else {
-                return Ok(false);
-            };
-
-            if encoded.len() != current_len {
-                return Ok(false);
-            }
-
-            // `scalar_off` is relative to the payload; the entry prefixes it with a
-            // one-byte kind tag, so shift past that header.
-            (entry.len() - payload.len()) + scalar_off
-        };
-
-        entry[start..start + encoded.len()].copy_from_slice(&encoded);
-
-        Ok(true)
-    }
-
-    /// Removes the vnode at `path` (a non-root path) and its subtree. Returns whether
-    /// anything was removed.
-    pub(super) fn rm_into(ctx: &mut Ctx, path: &APath) -> AdbResult<bool> {
-        let (parent_path, name) = path.split_last().expect("a non-root path has a parent and a name");
-
-        let Some(parent) = ctx.resolve(&parent_path)? else {
-            return Ok(false);
-        };
-
-        #[cfg(feature = "permissions")]
-        ctx.check(parent, Right::Walk)?;
-
-        let Some(akey) = ctx.child(parent, name)? else {
-            return Ok(false);
-        };
-
-        #[cfg(feature = "permissions")]
-        ctx.check(parent, Right::Write)?;
-
-        cascade_delete(ctx, akey)?;
-        unlink_child(ctx, parent, name)?;
-
-        Ok(true)
-    }
-
-    /// Relinks the vnode at `src` to `dst`, keeping its identity.
-    pub(super) fn mv_into(ctx: &mut Ctx, src: &APath, dst: &APath) -> AdbResult<()> {
-        let (src_parent_path, src_name) = src.split_last().expect("a non-root path has a parent and a name");
-        let (dst_parent_path, dst_name) = dst.split_last().expect("a non-root path has a parent and a name");
-
-        let Some(src_parent) = ctx.resolve(&src_parent_path)? else {
-            return Err(AdbError::ValueNotFound(src.clone()));
-        };
-
-        #[cfg(feature = "permissions")]
-        ctx.check(src_parent, Right::Walk)?;
-
-        let Some(akey) = ctx.child(src_parent, src_name)? else {
-            return Err(AdbError::ValueNotFound(src.clone()));
-        };
-
-        let dst_parent = ensure_dir(ctx, &dst_parent_path)?;
-
-        #[cfg(feature = "permissions")]
-        ctx.check(dst_parent, Right::Write)?;
-
-        if let Some(existing) = ctx.child(dst_parent, dst_name)? {
-            cascade_delete(ctx, existing)?;
-        }
-
-        link_child(ctx, dst_parent, dst_name, akey)?;
-
-        #[cfg(feature = "permissions")]
-        ctx.check(src_parent, Right::Write)?;
-
-        unlink_child(ctx, src_parent, src_name)?;
-
-        Ok(())
-    }
-
-    /// Deep-copies the subtree at `src` to `dst` under fresh identities.
-    pub(super) fn cp_into(ctx: &mut Ctx, src: &APath, dst: &APath) -> AdbResult<()> {
-        let (dst_parent_path, dst_name) = dst.split_last().expect("a non-root path has a parent and a name");
-
-        let Some(src_akey) = ctx.resolve(src)? else {
-            return Err(AdbError::ValueNotFound(src.clone()));
-        };
-
-        let dst_parent = ensure_dir(ctx, &dst_parent_path)?;
-
-        #[cfg(feature = "permissions")]
-        ctx.check(dst_parent, Right::Write)?;
-
-        if let Some(existing) = ctx.child(dst_parent, dst_name)? {
-            cascade_delete(ctx, existing)?;
-        }
-
-        let copy = deep_copy(ctx, src_akey)?;
-        link_child(ctx, dst_parent, dst_name, copy)?;
-
-        Ok(())
-    }
-
-    /// Writes `map` as directory `akey`'s children.
-    pub(super) fn put_dir(ctx: &mut Ctx, akey: AKey, map: &BTreeMap<String, AKey>) -> AdbResult<()> {
-        let entry = dir_entry(&encode_dir(map));
-        ctx.put_entry(akey, entry.as_slice())?;
-
-        Ok(())
-    }
-
-    /// Adds (or replaces) a `name → child` link in directory `parent`.
-    pub(super) fn link_child(ctx: &mut Ctx, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
-        let mut map = ctx.dir_children(parent)?;
-        map.insert(name.to_string(), child);
-
-        put_dir(ctx, parent, &map)
-    }
-
-    /// Removes the `name` link from directory `parent`.
-    pub(super) fn unlink_child(ctx: &mut Ctx, parent: AKey, name: &str) -> AdbResult<()> {
-        let mut map = ctx.dir_children(parent)?;
-        map.remove(name);
-
-        put_dir(ctx, parent, &map)
-    }
-
-    /// Ensures the root directory exists.
-    pub(super) fn ensure_root(ctx: &mut Ctx) -> AdbResult<()> {
-        if ctx.read_verified(AKey::ROOT)?.is_none() {
-            put_dir(ctx, AKey::ROOT, &BTreeMap::new())?;
-        }
-
-        Ok(())
-    }
-
-    /// Ensures every directory along `path` exists, returning the deepest one's key.
-    pub(super) fn ensure_dir(ctx: &mut Ctx, path: &APath) -> AdbResult<AKey> {
-        ensure_root(ctx)?;
-
-        let mut akey = AKey::ROOT;
-        for name in path.names() {
-            #[cfg(feature = "permissions")]
-            ctx.check(akey, Right::Walk)?;
-
-            match ctx.child(akey, name.as_str())? {
-                Some(child) => {
-                    if ctx.kind(child)? != Some(EntryKind::Dir) {
-                        return Err(AdbError::CannotAccess(format!("'{name}' is a file, not a directory")));
-                    }
-
-                    akey = child;
-                }
-                None => {
-                    #[cfg(feature = "permissions")]
-                    ctx.check(akey, Right::Write)?;
-
-                    let child = AKey::generate();
-                    put_dir(ctx, child, &BTreeMap::new())?;
-                    link_child(ctx, akey, name.as_str(), child)?;
-                    akey = child;
-                }
-            }
-        }
-
-        Ok(akey)
-    }
-
-    /// Removes vnode `akey` and, if it is a directory, its whole subtree.
-    pub(super) fn cascade_delete(ctx: &mut Ctx, akey: AKey) -> AdbResult<()> {
-        let children = match ctx.read_verified(akey)? {
-            Some(entry) => {
-                let (kind, payload) = entry_split(&entry)?;
-                match kind {
-                    EntryKind::Dir => ArchivedDir::new(payload)?
-                        .entries()?
-                        .into_iter()
-                        .map(|(_, child)| child)
-                        .collect::<Vec<_>>(),
-                    EntryKind::File => Vec::new(),
-                }
-            }
-            None => return Ok(()),
-        };
-
-        for child in children {
-            cascade_delete(ctx, child)?;
-        }
-
-        ctx.remove_entry(akey)?;
-
-        Ok(())
-    }
-
-    /// Deep-copies vnode `akey` (a file's blob verbatim, a directory recursively) under
-    /// a freshly generated key, returning that key.
-    pub(super) fn deep_copy(ctx: &mut Ctx, akey: AKey) -> AdbResult<AKey> {
-        #[cfg(feature = "permissions")]
-        ctx.check(akey, Right::Read)?;
-
-        let entry = ctx
-            .read_verified(akey)?
-            .ok_or_else(|| AdbError::Corrupt("copying a missing vnode".into()))?;
-        let (kind, payload) = entry_split(&entry)?;
-        let fresh = AKey::generate();
-
-        match kind {
-            EntryKind::File => {
-                ctx.put_entry(fresh, entry.as_slice())?;
-            }
-            EntryKind::Dir => {
-                let children: Vec<(String, AKey)> = ArchivedDir::new(payload)?
-                    .entries()?
-                    .into_iter()
-                    .map(|(name, child)| (name.to_string(), child))
-                    .collect();
-
-                let mut copied = BTreeMap::new();
-                for (name, child) in children {
-                    copied.insert(name, deep_copy(ctx, child)?);
-                }
-
-                put_dir(ctx, fresh, &copied)?;
-            }
-        }
-
-        Ok(fresh)
-    }
-
-    /// Changes the owner of the vnode at `path` to `new_uid`.
-    #[cfg(feature = "permissions")]
-    pub(super) fn chown_into(ctx: &mut Ctx, path: &APath, new_uid: u32) -> AdbResult<()> {
-        let akey = ctx
-            .resolve(path)?
-            .ok_or_else(|| AdbError::ValueNotFound(path.clone()))?;
-        if akey == AKey::ROOT {
-            return Err(AdbError::PermissionDenied(String::from(
-                "the root ACL cannot be changed",
-            )));
-        }
-
-        // Verify the target before its ACL changes: the value MAC binds the ACL, so
-        // re-sealing afterwards must not launder a blob altered outside the library.
-        ctx.read_verified(akey)?;
-
-        let mut acl = ctx
-            .acl(akey)?
-            .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
-
-        perm::access::authorize_chown(ctx.principal, &acl)?;
-        acl.set_owner(new_uid);
-
-        ctx.write_acl(akey, acl)?;
-        ctx.reseal_integrity(akey)
-    }
-
-    /// Changes the group of the vnode at `path` to `new_gid` (`None` clears it).
-    #[cfg(feature = "permissions")]
-    pub(super) fn chgrp_into(ctx: &mut Ctx, path: &APath, new_gid: Option<u32>) -> AdbResult<()> {
-        let akey = ctx
-            .resolve(path)?
-            .ok_or_else(|| AdbError::ValueNotFound(path.clone()))?;
-        if akey == AKey::ROOT {
-            return Err(AdbError::PermissionDenied(String::from(
-                "the root ACL cannot be changed",
-            )));
-        }
-
-        // Verify the target before its ACL changes: the value MAC binds the ACL, so
-        // re-sealing afterwards must not launder a blob altered outside the library.
-        ctx.read_verified(akey)?;
-
-        let mut acl = ctx
-            .acl(akey)?
-            .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
-
-        perm::access::authorize_chgrp(ctx.principal, &acl, new_gid)?;
-        acl.set_group(new_gid);
-
-        ctx.write_acl(akey, acl)?;
-        ctx.reseal_integrity(akey)
-    }
-
-    /// Sets the mode bits of the vnode at `path`. Requires `write` on the vnode.
-    #[cfg(feature = "permissions")]
-    pub(super) fn chmod_into(ctx: &mut Ctx, path: &APath, mode: u16) -> AdbResult<()> {
-        let akey = ctx
-            .resolve(path)?
-            .ok_or_else(|| AdbError::ValueNotFound(path.clone()))?;
-        if akey == AKey::ROOT {
-            return Err(AdbError::PermissionDenied(String::from(
-                "the root ACL cannot be changed",
-            )));
-        }
-
-        // Verify the target before its ACL changes: the value MAC binds the ACL, so
-        // re-sealing afterwards must not launder a blob altered outside the library.
-        ctx.read_verified(akey)?;
-
-        let mut acl = ctx
-            .acl(akey)?
-            .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
-
-        perm::access::authorize(ctx.principal, akey, Some(&acl), Right::Write)?;
-        acl.set_mode(mode);
-
-        ctx.write_acl(akey, acl)?;
-        ctx.reseal_integrity(akey)
-    }
-
-    /// Recursively collects the `(parent, name)` of every top-most vnode owned by
-    /// `uid` under directory `dir`. An owned directory is collected whole (and not
-    /// descended into); a non-owned directory is descended to find owned vnodes.
-    #[cfg(feature = "permissions")]
-    pub(super) fn collect_owned(ctx: &Ctx, dir: AKey, uid: u32, out: &mut Vec<(AKey, String)>) -> AdbResult<()> {
-        for (name, child) in ctx.dir_children(dir)? {
-            if ctx.acl(child)?.map(|acl| acl.owner()) == Some(uid) {
-                out.push((dir, name));
-            } else if ctx.kind(child)? == Some(EntryKind::Dir) {
-                collect_owned(ctx, child, uid, out)?;
-            }
-        }
-
-        Ok(())
-    }
-}
+use std::sync::Arc;
+
+#[cfg(feature = "entry-timestamps")]
+use crate::inode::{self, INODES_TABLE};
+
+#[cfg(feature = "permissions")]
+use crate::{
+    acl::{AclClass, Rights},
+    inode::{read_acl, read_mac},
+    perm::{self, Principal},
+    AKey,
+};
 
 /// Deletes every value owned by `uid` in `table`, within `txn`, bypassing ACL
 /// checks (the caller must already be an authorized administrator). Used by user
@@ -784,7 +41,7 @@ mod table {
 pub(crate) fn reap_owned_in(txn: &WriteTransaction, table: &str, uid: u32, principal: &Principal) -> AdbResult<()> {
     let mut data = txn.open_table(data_def(table))?;
     let mut inodes = txn.open_table(INODES_TABLE)?;
-    let mut ctx = table::Ctx::new(&mut data, &mut inodes, table, principal);
+    let mut ctx = Context::new(&mut data, &mut inodes, table, principal);
 
     ctx.reap_owned(uid)
 }
@@ -829,6 +86,23 @@ impl WriteTxn {
         self.store_value(path, &writer.into_value())
     }
 
+    /// Stores any [`serde::Serialize`] value as a file at `path`, encoding it
+    /// **straight into the value blob** — no intermediate [`Value`] tree. It is stored
+    /// natively (indexable and navigable by `VPath`, exactly like a value built through
+    /// [`store`](Self::store)). Read it back with
+    /// [`ReadTxn::load_serde_value`](crate::txn::ReadTxn::load_serde_value).
+    #[cfg(feature = "serde")]
+    pub fn store_serde_value<T: serde::Serialize + ?Sized>(
+        &self,
+        path: impl IntoArborPath,
+        value: &T,
+    ) -> AdbResult<()> {
+        let path = path.into_arbor_path()?;
+        let blob = crate::serde::to_blob(value)?;
+
+        self.store_blob_at(&path, &blob)
+    }
+
     /// Stores a dynamic [`Value`] as a file at `path`, creating parent directories
     /// as needed. Replaces whatever was there: a file overwrite keeps the vnode's
     /// identity; a directory is removed with its whole subtree first.
@@ -844,6 +118,19 @@ impl WriteTxn {
 
         self.reindex_around(std::slice::from_ref(path), |ctx| {
             table::store_value_into(ctx, path, value)
+        })
+    }
+
+    /// Stores an already-encoded value blob at an already-parsed access path — the
+    /// direct Serde write path, which skips the intermediate [`Value`].
+    #[cfg(feature = "serde")]
+    pub(crate) fn store_blob_at(&self, path: &APath, value_blob: &[u8]) -> AdbResult<()> {
+        if path.is_root() {
+            return Err(AdbError::CannotAccess(String::from("cannot store a file at the root")));
+        }
+
+        self.reindex_around(std::slice::from_ref(path), |ctx| {
+            table::store_blob_into(ctx, path, value_blob)
         })
     }
 
@@ -945,11 +232,11 @@ impl WriteTxn {
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
 
         #[cfg(feature = "permissions")]
-        let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
         #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-        let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table);
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
         #[cfg(not(feature = "entry-timestamps"))]
-        let mut ctx = table::Ctx::new(&mut data);
+        let mut ctx = Context::new(&mut data);
 
         table::ensure_dir(&mut ctx, &path)?;
 
@@ -971,47 +258,72 @@ impl WriteTxn {
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
-        let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
 
         table::chown_into(&mut ctx, &path, new_uid)
     }
 
-    /// Changes the group of the file or directory at `path` to `group`, or clears
-    /// it with `None`.
+    /// Resolves a group name to its id, erroring if no such group exists.
     #[cfg(feature = "permissions")]
-    pub fn chgrp(&self, path: impl IntoArborPath, group: Option<&str>) -> AdbResult<()> {
+    fn gid_of(&self, group: &str) -> AdbResult<u32> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        perm::store::gid_of(&meta, group)?.ok_or_else(|| AdbError::CannotAccess(format!("no group named '{group}'")))
+    }
+
+    /// Grants `rights` to `class` on the file or directory at `path`. For a
+    /// [`Group`](AclClass::Group) this inserts or updates that group's entry — adding
+    /// the vnode to the group if needed — and setting a group to [`Rights::None`]
+    /// removes it. Requires `Modify` on the vnode; the root's ACL cannot be changed.
+    #[cfg(feature = "permissions")]
+    pub fn set_acl(&self, path: impl IntoArborPath, class: AclClass, rights: Rights) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
 
-        let new_gid = match group {
-            None => None,
-            Some(name) => Some(
-                {
-                    let meta = self.txn.open_table(META_TABLE)?;
-                    perm::store::gid_of(&meta, name)?
-                }
-                .ok_or_else(|| AdbError::CannotAccess(format!("no group named '{name}'")))?,
-            ),
+        // Resolve a group name to its id before opening the write context.
+        let gid = match &class {
+            AclClass::Group(name) => Some(self.gid_of(name)?),
+            _ => None,
         };
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
-        let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
 
-        table::chgrp_into(&mut ctx, &path, new_gid)
+        table::set_acl_into(&mut ctx, &path, |acl| match class {
+            AclClass::User => acl.set_owner_rights(rights),
+            AclClass::Other => acl.set_other_rights(rights),
+            AclClass::Group(_) => acl.set_group_rights(gid.expect("a group class resolves a gid"), rights),
+        })
     }
 
-    /// Sets the permission bits of the file or directory at `path`. Requires `write`
-    /// on the vnode; the root's ACL cannot be changed.
+    /// Adds the file or directory at `path` to `group`, granting that group
+    /// [`Access`](Rights::Access) unless it already has an entry (whose grade is
+    /// then kept). Use [`set_acl`](Self::set_acl) to grant a stronger grade.
+    /// Requires `Modify` on the vnode.
     #[cfg(feature = "permissions")]
-    pub fn chmod(&self, path: impl IntoArborPath, mode: crate::acl::Mode) -> AdbResult<()> {
+    pub fn add_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
-        let bits = mode_to_bits(&mode);
+        let gid = self.gid_of(group)?;
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
-        let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
 
-        table::chmod_into(&mut ctx, &path, bits)
+        table::set_acl_into(&mut ctx, &path, |acl| acl.add_group(gid))
+    }
+
+    /// Removes the file or directory at `path` from `group` (a no-op if it is not a
+    /// member). Requires `Modify` on the vnode.
+    #[cfg(feature = "permissions")]
+    pub fn del_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
+        let path = path.into_arbor_path()?;
+        let gid = self.gid_of(group)?;
+
+        let mut data = self.txn.open_table(data_def(&self.table))?;
+        let mut inodes = self.txn.open_table(INODES_TABLE)?;
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+
+        table::set_acl_into(&mut ctx, &path, |acl| acl.remove_group(gid))
     }
 
     /// Removes the file or directory at `path` (a directory with its whole
@@ -1087,7 +399,7 @@ impl WriteTxn {
     fn reindex_around<T>(
         &self,
         scopes: &[APath],
-        apply: impl FnOnce(&mut table::Ctx<'_, '_>) -> AdbResult<T>,
+        apply: impl FnOnce(&mut Context<'_, '_>) -> AdbResult<T>,
     ) -> AdbResult<T> {
         let indexes = self.indexes()?;
         let mut data = self.txn.open_table(data_def(&self.table))?;
@@ -1097,11 +409,11 @@ impl WriteTxn {
 
         if indexes.is_empty() {
             #[cfg(feature = "permissions")]
-            let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
             #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-            let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table);
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
             #[cfg(not(feature = "entry-timestamps"))]
-            let mut ctx = table::Ctx::new(&mut data);
+            let mut ctx = Context::new(&mut data);
 
             return apply(&mut ctx);
         }
@@ -1116,11 +428,11 @@ impl WriteTxn {
         // maintenance keeps its shared borrow of the data table before and after.
         let result = {
             #[cfg(feature = "permissions")]
-            let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
             #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-            let mut ctx = table::Ctx::new(&mut data, &mut inodes, &self.table);
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
             #[cfg(not(feature = "entry-timestamps"))]
-            let mut ctx = table::Ctx::new(&mut data);
+            let mut ctx = Context::new(&mut data);
 
             apply(&mut ctx)?
         };
@@ -1174,11 +486,16 @@ impl WriteTxn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::Scalar;
-    use crate::index::{registry, IndexColumn, IndexDef};
-    use crate::ArborDb;
+    use crate::{
+        codec::encode,
+        engine::file_entry,
+        index::{registry, IndexColumn, IndexDef},
+        data::Scalar,
+        ArborDb,
+    };
 
     use redb::ReadableTable; // `index.iter()` in the assertions below
+    use std::collections::BTreeMap;
 
     fn user(age: i64) -> Value {
         Value::Node(BTreeMap::from([(String::from("age"), Value::Leaf(Scalar::I64(age)))]))

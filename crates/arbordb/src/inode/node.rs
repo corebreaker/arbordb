@@ -88,7 +88,7 @@ impl Inode {
         }
 
         #[cfg(feature = "permissions")]
-        if let Some(acl) = self.acl {
+        if let Some(acl) = &self.acl {
             sections.push((SECTION_ACL, acl.encode()));
         }
 
@@ -134,7 +134,7 @@ impl Inode {
     /// The ACL section, if any.
     #[cfg(feature = "permissions")]
     pub(super) fn acl(&self) -> Option<Acl> {
-        self.acl
+        self.acl.clone()
     }
 
     /// Sets (or replaces) the ACL section.

@@ -6,8 +6,9 @@ use arbordb::{
     AdbError,
     Value,
     data::Scalar,
-    acl::{Mode, Rights},
+    acl::{AclClass, Rights},
 };
+
 use redb::{Database, ReadableTable, TableDefinition, TableHandle};
 use std::{error::Error, path::Path};
 
@@ -76,86 +77,35 @@ fn create_db(file: &Path) -> AdbResult<()> {
         txn.store_value(PATH2, &v2)?;
         txn.store_value(PATH3, &v3)?;
 
-        txn.chgrp(PARENT1, Some(GROUPNAME))?;
-        txn.chgrp(PATH1, Some(GROUPNAME))?;
-        txn.chgrp(PATH2, Some(GROUPNAME))?;
-        txn.chgrp(PATH3, Some(GROUPNAME))?;
+        // Directory `a`: the group may modify it (so members can traverse it); `other`
+        // keeps the default `Access`, so anyone can walk through it.
+        txn.set_acl(PARENT1, AclClass::Group(GROUPNAME.into()), Rights::Modify)?;
 
-        txn.chmod(
-            PARENT1,
-            Mode {
-                owner: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                group: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                other: Rights {
-                    read:  true,
-                    write: false,
-                    walk:  true,
-                },
-            },
-        )?;
+        // Directory `b`: no group at all, and `other` is denied — so a non-owner who
+        // is not a member cannot even traverse it, which walls off everything beneath.
+        txn.set_acl(PARENT2, AclClass::Other, Rights::None)?;
 
-        txn.chmod(
-            PARENT2,
-            Mode {
-                owner: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                group: Rights::read_only(),
-                other: Rights::default(),
-            },
-        )?;
+        // `a/v1`: the group may read it; `other` may not.
+        txn.set_acl(PATH1, AclClass::Group(GROUPNAME.into()), Rights::Access)?;
+        txn.set_acl(PATH1, AclClass::Other, Rights::None)?;
 
-        txn.chmod(
-            PATH1,
-            Mode {
-                owner: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                group: Rights::read_only(),
-                other: Rights::default(),
-            },
-        )?;
-
-        txn.chmod(
-            PATH2,
-            Mode {
-                owner: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                group: Rights::read_only(),
-                other: Rights::read_only(),
-            },
-        )?;
-
-        txn.chmod(
-            PATH3,
-            Mode {
-                owner: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                group: Rights::read_only(),
-                other: Rights::default(),
-            },
-        )?;
-
+        // `a/v2`: the group may read it; `other` keeps the default read. Then it is
+        // handed to USERNAME2, who becomes its owner.
+        txn.set_acl(PATH2, AclClass::Group(GROUPNAME.into()), Rights::Access)?;
         txn.chown(PATH2, USERNAME2)?;
+
+        // `b/x`: the group may read it; `other` may not (moot — `b` blocks non-members).
+        txn.set_acl(PATH3, AclClass::Group(GROUPNAME.into()), Rights::Access)?;
+        txn.set_acl(PATH3, AclClass::Other, Rights::None)?;
+
         txn.commit()?;
+    }
+
+    {
+        let txn = table.read()?;
+        let owner = txn.owner(PATH1)?;
+
+        assert_eq!(owner.as_deref(), Some(USERNAME1));
     }
 
     Ok(())

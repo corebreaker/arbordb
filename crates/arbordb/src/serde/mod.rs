@@ -29,4 +29,4 @@ mod blob_ser;
 mod dynamic;
 mod functions;
 
-pub(crate) use functions::{from_value, to_value};
+pub(crate) use functions::{from_blob, from_value, to_blob, to_value};

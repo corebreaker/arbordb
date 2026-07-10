@@ -194,7 +194,7 @@ mod bignum {
 #[cfg(feature = "permissions")]
 mod permissions {
     use super::*;
-    use arbordb::acl::{Mode, Rights};
+    use arbordb::acl::{AclClass, Rights};
 
     #[derive(AData, Debug, PartialEq)]
     #[arbor(index(name = "by_rank", columns(rank)))]
@@ -231,20 +231,9 @@ mod permissions {
             )
             .unwrap();
 
-            // Lock `secret` down to its owner (master); other gets nothing.
-            w.chmod(
-                "docs/secret",
-                Mode {
-                    owner: Rights {
-                        read:  true,
-                        write: true,
-                        walk:  true,
-                    },
-                    group: Rights::default(),
-                    other: Rights::default(),
-                },
-            )
-            .unwrap();
+            // Lock `secret` down to its owner (master); other gets nothing (the
+            // default owner grade is already `Delete`).
+            w.set_acl("docs/secret", AclClass::Other, Rights::None).unwrap();
             w.commit().unwrap();
         }
 

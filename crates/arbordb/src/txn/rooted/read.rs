@@ -50,6 +50,12 @@ impl<'a> RootedRead<'a> {
         self.txn.load_value(self.absolute(path)?)
     }
 
+    /// Loads a [`serde::de::DeserializeOwned`] value at `path` (relative to the root).
+    #[cfg(feature = "serde")]
+    pub fn load_serde_value<T: serde::de::DeserializeOwned>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
+        self.txn.load_serde_value(self.absolute(path)?)
+    }
+
     /// Opens a read accessor over the file at `path` (relative to the root).
     pub fn fetch<A: ARef<'static>>(&self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
         self.txn.fetch(self.absolute(path)?)

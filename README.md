@@ -247,12 +247,18 @@ a random database integrity key, and an Ed25519 signing keypair — and authenti
   `open_with_authentication(path, user, password)` opens and authenticates in one step;
   opening a protected database without credentials yields a read-only **guest**
   (`is_readonly` reports whether a handle can write).
-- **Access control.** Every vnode has an owner, an optional group,
-  and read/write/walk bits for owner/group/other (`walk` gates directory traversal).
-  Changing an ACL needs `write` on the vnode — there is no separate admin right.
+- **Access control.** Every vnode has an owner, any number of groups, and a single *graded* right —
+  `None` ⊂ `Access` ⊂ `Modify` ⊂ `Delete` — for its owner, for each of its groups, and for everyone else.
+  `Access` reads a file / lists a directory / traverses a directory (there is no separate `walk` right);
+  `Modify` adds overwriting a value or an ACL and adding/removing/renaming directory children;
+  `Delete` adds removing the vnode (a cascade needs `Delete` on every descendant). A caller in several of a vnode's
+  groups gets the strongest grade any of them is granted. Read a class's grade with `get_acl(path, class)`
+  (`class` being `AclClass::{User, Group(name), Other}`) and set it with `set_acl(path, class, rights)`;
+  `add_group` / `del_group` manage which groups a vnode is in, and `owner` / `groups` report its identity.
+  Changing an ACL needs `Modify` on the vnode — there is no separate admin right.
   The **master user** bypasses all ACLs;
   the **master group** administers users and groups (without bypassing value ACLs);
-  the **guest** is strictly read-only.
+  the **guest** is strictly read-only (it may only `Access`).
 - **Integrity.** Every value carries two tamper tags over the same bytes — the value *and* its ACL:
   a keyed BLAKE3 MAC an authenticated reader verifies (fast, unforgeable without `K`),
   and an Ed25519 signature a keyless **guest** verifies with the public key (stored in the clear).
@@ -272,8 +278,8 @@ a random database integrity key, and an Ed25519 signing keypair — and authenti
   Pinning is optional: a database that never exports its key is still fully write-protected (a guest cannot write),
   but its guest reads should be treated as untrusted — reading as a guest is recommended only with a pinned key.
 - **Administration.** `add_user` / `add_group` / `rename_*` / `assign_user_to_group`
-  / `remove_user` (cascades the values it owns) / `remove_group` (unassigns it and strips it from every ACL); `chown`
-  / `chgrp` / `chmod` / `get_acl`.
+  / `remove_user` (cascades the values it owns) / `remove_group` (unassigns it and strips it from every ACL); per-vnode
+  `chown` / `set_acl` / `add_group` / `del_group` / `get_acl` / `owner` / `groups`.
 
 A binary built *without* `permissions` refuses to open a protected database (`AdbError::DatabaseProtected`);
 one built without `entry-timestamps` opens a timestamped database and ignores the timestamps.
@@ -297,7 +303,7 @@ including across byte-length and sign boundaries.
 |------------------------------------------------------------------|:-------:|------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
 | `derive`                                                         |    —    | `arbordb-derive`                                                                         | `#[derive(AData)]` and the `#[arbor(...)]` attributes                            |
 | `parallel`                                                       |    —    | `rayon`                                                                                  | parallelize batch operations                                                     |
-| `serde`                                                          |    —    | `serde`                                                                                  | `Serialize` / `Deserialize` for public types like `PublicKey`                    |
+| `serde`                                                          |    —    | `serde`                                                                                  | `Serialize` / `Deserialize` for public types and `Value`; `store_serde_value` / `load_serde_value` (straight to/from the value codec) |
 | `entry-timestamps`                                               |    —    | `chrono`                                                                                 | per-vnode `created` / `modified` / `accessed` datetimes (out-of-band, ignorable) |
 | `permissions`                                                    |    —    | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `ed25519-dalek`, `getrandom` | user/password auth, per-vnode ACLs, MAC + signature tamper detection             |
 | `bignum`                                                         |    —    | both umbrellas below                                                                     | every big-number type, as scalar **and** data                                    |

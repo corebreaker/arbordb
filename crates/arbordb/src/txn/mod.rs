@@ -1,5 +1,6 @@
 //! Opaque read and write transactions over a table.
 
+mod context;
 mod query;
 mod read;
 mod rooted;

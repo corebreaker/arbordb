@@ -1,186 +1,230 @@
-//! A vnode's access-control list: an owner, an optional group, and mode bits
-//! granting read/write — and, for directories, walk — to each of owner/group/other.
+//! A vnode's access-control list: its owning user, the [`Rights`] it grants that
+//! owner, the rights it grants the members of each of its groups, and the rights it
+//! grants everyone else.
 //!
-//! The mode packs 3 rights × 3 classes into a `u16`, class-major, so the bit for
-//! `(class, right)` is `class_index * 3 + right_index`. The walk bit is inert for
-//! files (checked only on directories). Changing an ACL needs `write` on the vnode
-//! — there is no separate admin right.
+//! Rights are graded (`None` ⊂ `Access` ⊂ `Modify` ⊂ `Delete`; see [`Rights`]).
+//! A vnode belongs to zero or more groups — the keys of its group map — and a caller
+//! in several of them gets the strongest grade any of those groups is granted.
+//! Group ids are kept in a [`BTreeMap`], so the encoding is deterministic: the value
+//! integrity tags bind the encoded ACL, and a nondeterministic order would break them.
+//! Changing an ACL needs `Modify` on the vnode — there is no separate admin right.
 
-use crate::{codec::Reader, error::AdbResult};
+use crate::{acl::Rights, codec::Reader, error::AdbResult};
+use std::collections::BTreeMap;
 
-/// The sentinel group value meaning "no group" on disk.
-const NO_GROUP: u32 = u32::MAX;
+/// A group identifier, as stored in a vnode's ACL and the group store.
+pub(crate) type GroupId = u32;
 
-/// A right that can be checked on a vnode.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Right {
-    /// Read a file's value, or list a directory's children.
-    Read,
-    /// Write a file's value or ACL, or add/remove/rename a directory's children.
-    Write,
-    /// Traverse *through* a directory to reach a descendant (directories only).
-    Walk,
-}
-
-/// Which of owner/group/other a principal falls into for a given vnode.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Class {
-    /// The vnode's owner.
-    Owner,
-    /// A member of the vnode's group.
-    Group,
-    /// Everyone else.
-    Other,
-}
-
-impl Right {
-    fn index(self) -> u16 {
-        match self {
-            Right::Read => 0,
-            Right::Write => 1,
-            Right::Walk => 2,
-        }
-    }
-}
-
-impl Class {
-    fn index(self) -> u16 {
-        match self {
-            Class::Owner => 0,
-            Class::Group => 1,
-            Class::Other => 2,
-        }
-    }
-}
-
-/// The mode bit granting `right` to `class`.
-fn bit(class: Class, right: Right) -> u16 {
-    1 << (class.index() * 3 + right.index())
-}
-
-/// Packs the public per-class rights into the on-disk mode bits.
-pub(crate) fn mode_to_bits(mode: &crate::acl::Mode) -> u16 {
-    let class_bits = |class: Class, rights: &crate::acl::Rights| {
-        let mut bits = 0;
-        if rights.read {
-            bits |= bit(class, Right::Read);
-        }
-        if rights.write {
-            bits |= bit(class, Right::Write);
-        }
-        if rights.walk {
-            bits |= bit(class, Right::Walk);
-        }
-
-        bits
-    };
-
-    class_bits(Class::Owner, &mode.owner)
-        | class_bits(Class::Group, &mode.group)
-        | class_bits(Class::Other, &mode.other)
-}
-
-/// A vnode's access-control list. Every vnode has an owner; the group is optional
-/// (a vnode with no group treats every non-owner as `other`).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// A vnode's access-control list. Every vnode has an owning user; it may grant
+/// rights to any number of groups (a caller in several gets the strongest), and to
+/// everyone else.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub(crate) struct Acl {
-    /// The owner's user id.
-    owner: u32,
-    /// The group's id, or `None` for a vnode with no group.
-    group: Option<u32>,
-    /// The packed rights (3 rights × 3 classes; see the module docs).
-    mode:  u16,
+    /// The owning user's id.
+    owner_uid: u32,
+
+    /// The rights granted to the owner.
+    owner: Rights,
+
+    /// The rights granted to each group the vnode belongs to, keyed by group id.
+    group: BTreeMap<GroupId, Rights>,
+
+    /// The rights granted to everyone else.
+    other: Rights,
 }
 
 impl Acl {
-    /// An ACL with an explicit owner, optional group, and mode.
-    pub(crate) fn new(owner: u32, group: Option<u32>, mode: u16) -> Self {
+    /// The default ACL for a freshly created vnode owned by `owner_uid`: the owner
+    /// may delete it, everyone else may access (read + traverse) it, and it belongs
+    /// to no group.
+    pub(crate) fn default_for(owner_uid: u32) -> Self {
         Self {
-            owner,
-            group,
-            mode,
+            owner_uid,
+            owner: Rights::Delete,
+            group: BTreeMap::new(),
+            other: Rights::Access,
         }
     }
 
-    /// The default mode for a freshly created vnode: the owner gets every right;
-    /// group and other get read + walk (so paths stay traversable and listable).
-    pub(crate) fn default_mode() -> u16 {
-        bit(Class::Owner, Right::Read)
-            | bit(Class::Owner, Right::Write)
-            | bit(Class::Owner, Right::Walk)
-            | bit(Class::Group, Right::Read)
-            | bit(Class::Group, Right::Walk)
-            | bit(Class::Other, Right::Read)
-            | bit(Class::Other, Right::Walk)
+    /// The owning user's id.
+    pub(crate) fn owner_uid(&self) -> u32 {
+        self.owner_uid
     }
 
-    /// The owner's user id.
-    pub(crate) fn owner(&self) -> u32 {
+    /// Reassigns the owning user (chown).
+    pub(crate) fn set_owner_uid(&mut self, uid: u32) {
+        self.owner_uid = uid;
+    }
+
+    /// The rights granted to the owner.
+    pub(crate) fn owner_rights(&self) -> Rights {
         self.owner
     }
 
-    /// The group's id, if the vnode has one.
-    pub(crate) fn group(&self) -> Option<u32> {
-        self.group
+    /// The rights granted to everyone else.
+    pub(crate) fn other_rights(&self) -> Rights {
+        self.other
     }
 
-    /// Reassigns the owner (chown).
-    pub(crate) fn set_owner(&mut self, owner: u32) {
-        self.owner = owner;
+    /// Sets the owner's rights.
+    pub(crate) fn set_owner_rights(&mut self, rights: Rights) {
+        self.owner = rights;
     }
 
-    /// Reassigns the group, or clears it (chgrp).
-    pub(crate) fn set_group(&mut self, group: Option<u32>) {
-        self.group = group;
+    /// Sets everyone else's rights.
+    pub(crate) fn set_other_rights(&mut self, rights: Rights) {
+        self.other = rights;
     }
 
-    /// Replaces the mode bits (chmod).
-    pub(crate) fn set_mode(&mut self, mode: u16) {
-        self.mode = mode;
+    /// The rights granted to `gid`, or [`Rights::None`] if the vnode is not in that
+    /// group.
+    pub(crate) fn group_rights(&self, gid: GroupId) -> Rights {
+        self.group.get(&gid).copied().unwrap_or(Rights::None)
     }
 
-    /// The mode as the public per-class rights.
-    pub(crate) fn to_mode(self) -> crate::acl::Mode {
-        let rights = |class: Class| crate::acl::Rights {
-            read:  self.allows(class, Right::Read),
-            write: self.allows(class, Right::Write),
-            walk:  self.allows(class, Right::Walk),
-        };
-
-        crate::acl::Mode {
-            owner: rights(Class::Owner),
-            group: rights(Class::Group),
-            other: rights(Class::Other),
+    /// Grants `rights` to `gid`, adding the group if it is absent; [`Rights::None`]
+    /// removes the group entirely.
+    pub(crate) fn set_group_rights(&mut self, gid: GroupId, rights: Rights) {
+        if rights == Rights::None {
+            self.group.remove(&gid);
+        } else {
+            self.group.insert(gid, rights);
         }
     }
 
-    /// Whether `class` is granted `right`.
-    pub(crate) fn allows(&self, class: Class, right: Right) -> bool {
-        self.mode & bit(class, right) != 0
+    /// Adds `gid` with the default [`Access`](Rights::Access) grade, unless it is
+    /// already present (in which case its grade is kept).
+    pub(crate) fn add_group(&mut self, gid: GroupId) {
+        self.group.entry(gid).or_insert(Rights::Access);
     }
 
+    /// Removes `gid` from the vnode's groups (a no-op if it is absent).
+    pub(crate) fn remove_group(&mut self, gid: GroupId) {
+        self.group.remove(&gid);
+    }
+
+    /// Whether the vnode belongs to `gid`.
+    pub(crate) fn has_group(&self, gid: GroupId) -> bool {
+        self.group.contains_key(&gid)
+    }
+
+    /// The ids of the groups the vnode belongs to, in ascending order.
+    pub(crate) fn group_ids(&self) -> impl Iterator<Item = GroupId> + '_ {
+        self.group.keys().copied()
+    }
+
+    /// The effective grade for a caller with id `uid` who is in groups `gids`: the
+    /// owner's rights if they own the vnode, otherwise the strongest grade of any
+    /// group they share with it, otherwise everyone-else's rights.
+    pub(crate) fn effective_rights(&self, uid: u32, gids: &[u32]) -> Rights {
+        if uid == self.owner_uid {
+            return self.owner;
+        }
+
+        let grouped = gids.iter().filter_map(|gid| self.group.get(gid).copied()).max();
+
+        grouped.unwrap_or(self.other)
+    }
+
+    /// Serializes the ACL: `owner_uid` (`u32`), the owner and other grades (one byte
+    /// each), then a `u32` count and that many `(gid: u32, grade: u8)` pairs in
+    /// ascending gid order.
     pub(crate) fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(10);
-        out.extend_from_slice(&self.owner.to_be_bytes());
-        out.extend_from_slice(&self.group.unwrap_or(NO_GROUP).to_be_bytes());
-        out.extend_from_slice(&self.mode.to_be_bytes());
+        let mut out = Vec::with_capacity(4 + 1 + 1 + 4 + self.group.len() * 5);
+        out.extend_from_slice(&self.owner_uid.to_be_bytes());
+        out.push(self.owner.to_bits());
+        out.push(self.other.to_bits());
+        out.extend_from_slice(&(self.group.len() as u32).to_be_bytes());
+
+        for (gid, rights) in &self.group {
+            out.extend_from_slice(&gid.to_be_bytes());
+            out.push(rights.to_bits());
+        }
 
         out
     }
 
+    /// Decodes the layout [`encode`](Self::encode) produces.
     pub(crate) fn decode(body: &[u8]) -> AdbResult<Self> {
         let mut r = Reader::new(body);
-        let owner = r.u32()?;
-        let group = match r.u32()? {
-            NO_GROUP => None,
-            gid => Some(gid),
-        };
-        let mode = u16::from_be_bytes(r.array::<2>()?);
+        let owner_uid = r.u32()?;
+        let owner = Rights::from_bits(r.u8()?);
+        let other = Rights::from_bits(r.u8()?);
+
+        let count = r.u32()?;
+        let mut group = BTreeMap::new();
+        for _ in 0..count {
+            let gid = r.u32()?;
+            let rights = Rights::from_bits(r.u8()?);
+            group.insert(gid, rights);
+        }
 
         Ok(Self {
+            owner_uid,
             owner,
             group,
-            mode,
+            other,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grades_are_cumulative_and_encode_round_trips() {
+        assert!(Rights::Delete.includes(Rights::Modify));
+        assert!(Rights::Modify.includes(Rights::Access));
+        assert!(!Rights::Access.includes(Rights::Modify));
+
+        for grade in [Rights::None, Rights::Access, Rights::Modify, Rights::Delete] {
+            assert_eq!(Rights::from_bits(grade.to_bits()), grade);
+        }
+    }
+
+    #[test]
+    fn effective_rights_follow_owner_then_group_then_other() {
+        let mut group = BTreeMap::new();
+        group.insert(7u32, Rights::Access);
+        group.insert(8u32, Rights::Modify);
+
+        let acl = Acl {
+            owner_uid: 1,
+            owner: Rights::Delete,
+            group,
+            other: Rights::None,
+        };
+
+        // The owner gets the owner grade.
+        assert_eq!(acl.effective_rights(1, &[7, 8]), Rights::Delete);
+
+        // A non-owner in several groups gets the strongest of them.
+        assert_eq!(acl.effective_rights(2, &[7, 8]), Rights::Modify);
+        assert_eq!(acl.effective_rights(2, &[7]), Rights::Access);
+
+        // A non-owner in none of the groups falls to other.
+        assert_eq!(acl.effective_rights(2, &[9]), Rights::None);
+    }
+
+    #[test]
+    fn setting_a_group_to_none_removes_it() {
+        let mut acl = Acl::default_for(1);
+        acl.set_group_rights(5, Rights::Modify);
+        assert!(acl.has_group(5));
+
+        acl.set_group_rights(5, Rights::None);
+        assert!(!acl.has_group(5));
+    }
+
+    #[test]
+    fn encode_decode_preserves_groups() {
+        let mut acl = Acl::default_for(42);
+        acl.set_group_rights(3, Rights::Modify);
+        acl.set_group_rights(9, Rights::Delete);
+
+        let decoded = Acl::decode(&acl.encode()).unwrap();
+        assert_eq!(decoded, acl);
+        assert_eq!(decoded.group_ids().collect::<Vec<_>>(), vec![3, 9]);
     }
 }

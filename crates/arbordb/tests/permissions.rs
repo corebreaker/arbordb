@@ -3,14 +3,15 @@
 
 #![cfg(feature = "permissions")]
 
-use arbordb::acl::{Mode, Rights};
-use arbordb::perm::PublicKey;
 use arbordb::{
+    acl::{AclClass, Rights},
     data::{AValue, Scalar},
+    perm::PublicKey,
     AdbError,
     ArborDb,
     Value,
 };
+
 use std::path::PathBuf;
 
 fn leaf(n: i64) -> Value {
@@ -144,7 +145,7 @@ fn guest_cannot_write_but_master_can() {
 fn guest_can_read_a_default_readable_file() {
     let (_dir, path) = tmp_db();
 
-    // Master creates a nested file; default ACLs grant other read + walk.
+    // Master creates a nested file; default ACLs grant `other` the Access grade.
     {
         let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
         let t = db.open_table("data").unwrap();
@@ -153,7 +154,7 @@ fn guest_can_read_a_default_readable_file() {
         w.commit().unwrap();
     }
 
-    // Guest traverses the directories (walk) and reads the file (read).
+    // Guest traverses the directories and reads the file (all Access-level).
     {
         let guest = ArborDb::open(&path).unwrap();
         let t = guest.open_table("data").unwrap();
@@ -185,7 +186,7 @@ fn owner_may_write_but_another_user_only_reads() {
         db.add_user("bob", "bob-pw", false).unwrap();
     }
 
-    // Alice creates a file — she owns it (default mode: owner rwx, other read+walk).
+    // Alice creates a file — she owns it (default: owner Delete, other Access).
     {
         let alice = ArborDb::open_with_authentication(&path, "alice", "alice-pw").unwrap();
         let t = alice.open_table("data").unwrap();
@@ -259,40 +260,102 @@ fn chown_transfers_ownership() {
 }
 
 #[test]
-fn chgrp_requires_membership_of_the_target_group() {
+fn add_and_del_group_manage_a_vnodes_groups() {
     let (_dir, path) = tmp_db();
 
     {
         let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
         db.add_user("alice", "a", false).unwrap();
+        db.add_user("bob", "b", false).unwrap();
         db.add_group("staff").unwrap();
     }
 
-    // Alice owns the file but is not in "staff", so she cannot set that group.
+    // Alice owns the file, so she may add a group to it and set that group's grade.
     {
         let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
         let t = alice.open_table("data").unwrap();
         let w = t.write().unwrap();
         w.store_value("f", &leaf(1)).unwrap();
-        assert!(matches!(
-            w.chgrp("f", Some("staff")),
-            Err(AdbError::PermissionDenied(_))
-        ));
+        w.add_group("f", "staff").unwrap();
+        w.set_acl("f", AclClass::Group(String::from("staff")), Rights::Modify)
+            .unwrap();
+        w.commit().unwrap();
+
+        // `groups` lists it and `get_acl` reports the grade it was granted.
+        let r = t.read().unwrap();
+        assert_eq!(r.groups("f").unwrap(), vec![String::from("staff")]);
+        assert_eq!(
+            r.get_acl("f", AclClass::Group(String::from("staff"))).unwrap(),
+            Rights::Modify
+        );
+    }
+
+    // Bob is only `other` on the file, so he cannot touch its ACL.
+    {
+        let bob = ArborDb::open_with_authentication(&path, "bob", "b").unwrap();
+        let w = bob.open_table("data").unwrap().write().unwrap();
+        assert!(matches!(w.add_group("f", "staff"), Err(AdbError::PermissionDenied(_))));
+    }
+
+    // Alice removes the group again; the vnode belongs to nothing afterwards.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.del_group("f", "staff").unwrap();
+        w.commit().unwrap();
+
+        assert!(t.read().unwrap().groups("f").unwrap().is_empty());
+    }
+}
+
+#[test]
+fn deleting_needs_the_delete_grade_not_merely_modify() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+
+        let t = db.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("f", &leaf(1)).unwrap();
+
+        // Grant `other` Modify: enough to overwrite the value, not to delete the vnode.
+        w.set_acl("f", AclClass::Other, Rights::Modify).unwrap();
         w.commit().unwrap();
     }
 
-    // The master may set any group.
+    // Alice (an `other`) may overwrite the file, but removing it is denied.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("f", &leaf(2)).unwrap();
+        assert!(matches!(w.rm("f"), Err(AdbError::PermissionDenied(_))));
+        w.commit().unwrap();
+    }
+
+    // The master raises `other` to Delete.
     {
         let master = ArborDb::open_with_authentication(&path, "master", "m").unwrap();
-        let t = master.open_table("data").unwrap();
+        let w = master.open_table("data").unwrap().write().unwrap();
+        w.set_acl("f", AclClass::Other, Rights::Delete).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Now Alice may remove it.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
         let w = t.write().unwrap();
-        w.chgrp("f", Some("staff")).unwrap();
+        assert!(w.rm("f").unwrap());
         w.commit().unwrap();
     }
 }
 
 #[test]
-fn chmod_restricts_access_and_get_acl_reflects_it() {
+fn set_acl_restricts_access_and_get_acl_reflects_it() {
     let (_dir, path) = tmp_db();
 
     {
@@ -301,28 +364,17 @@ fn chmod_restricts_access_and_get_acl_reflects_it() {
         let w = t.write().unwrap();
         w.store_value("secret", &leaf(7)).unwrap();
 
-        // Restrict to the owner only (no group, no other).
-        w.chmod(
-            "secret",
-            Mode {
-                owner: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                group: Rights::default(),
-                other: Rights::default(),
-            },
-        )
-        .unwrap();
+        // Restrict to the owner alone: revoke everyone else (the default owner grade
+        // is already `Delete`).
+        w.set_acl("secret", AclClass::Other, Rights::None).unwrap();
         w.commit().unwrap();
 
-        // get_acl reports the owner name and the tightened mode.
-        let acl = t.read().unwrap().get_acl("secret").unwrap().unwrap();
-        assert_eq!(acl.owner, "master");
-        assert_eq!(acl.group, None);
-        assert!(acl.mode.owner.read && acl.mode.owner.write);
-        assert!(!acl.mode.other.read);
+        // get_acl / owner / groups report the tightened ACL.
+        let r = t.read().unwrap();
+        assert_eq!(r.owner("secret").unwrap(), Some(String::from("master")));
+        assert!(r.groups("secret").unwrap().is_empty());
+        assert_eq!(r.get_acl("secret", AclClass::User).unwrap(), Rights::Delete);
+        assert_eq!(r.get_acl("secret", AclClass::Other).unwrap(), Rights::None);
     }
 
     // The guest (an `other`) may no longer read it.
@@ -396,13 +448,11 @@ fn removing_a_group_unassigns_it_and_clears_it_from_acls() {
         let t = db.open_table("data").unwrap();
         let w = t.write().unwrap();
         w.store_value("f", &leaf(1)).unwrap();
-        w.chgrp("f", Some("staff")).unwrap();
+        w.set_acl("f", AclClass::Group(String::from("staff")), Rights::Access)
+            .unwrap();
         w.commit().unwrap();
 
-        assert_eq!(
-            t.read().unwrap().get_acl("f").unwrap().unwrap().group,
-            Some(String::from("staff"))
-        );
+        assert_eq!(t.read().unwrap().groups("f").unwrap(), vec![String::from("staff")]);
     }
 
     // Removing the group unassigns every user and clears it from every ACL.
@@ -414,7 +464,7 @@ fn removing_a_group_unassigns_it_and_clears_it_from_acls() {
         assert!(!master.list_groups().unwrap().contains(&String::from("staff")));
 
         let t = master.open_table("data").unwrap();
-        assert_eq!(t.read().unwrap().get_acl("f").unwrap().unwrap().group, None);
+        assert!(t.read().unwrap().groups("f").unwrap().is_empty());
     }
 
     // The built-in groups cannot be removed.

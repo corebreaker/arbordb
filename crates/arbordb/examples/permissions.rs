@@ -3,12 +3,13 @@
 //! A fresh database is unprotected. Promoting it (via `change_password`) mints a
 //! master user, a per-user keyring, and a database integrity key; from then on
 //! every value carries a keyed MAC and every access is ACL-checked. This example
-//! promotes a database, adds a second user, and shows the owner/other split.
+//! promotes a database, adds a second user, and shows the owner/other split with the
+//! graded `Rights` model (`None` ⊂ `Access` ⊂ `Modify` ⊂ `Delete`).
 //!
 //! Run with: `cargo run --example permissions --features permissions`
 
 use arbordb::{
-    acl::{Mode, Rights},
+    acl::{AclClass, Rights},
     data::Scalar,
     AdbError,
     AdbResult,
@@ -34,26 +35,16 @@ fn main() -> AdbResult<()> {
     println!("users = {:?}", master.list_users()?);
 
     // The master stores two files. A freshly created file gets a default ACL: the
-    // owner gets every right, group and other get read + walk.
+    // owner may delete it (the strongest grade), everyone else may access (read +
+    // traverse) it, and it belongs to no group.
     {
         let docs = master.open_table("docs")?;
         let w = docs.write()?;
         w.store_value("shared/welcome", &note(1))?;
         w.store_value("vault/secret", &note(42))?;
 
-        // Lock the vault down to its owner (master) alone: no group, no other.
-        w.chmod(
-            "vault/secret",
-            Mode {
-                owner: Rights {
-                    read:  true,
-                    write: true,
-                    walk:  true,
-                },
-                group: Rights::default(),
-                other: Rights::default(),
-            },
-        )?;
+        // Lock the vault down to its owner (master) alone: revoke everyone else.
+        w.set_acl("vault/secret", AclClass::Other, Rights::None)?;
         w.commit()?;
     }
 
@@ -64,7 +55,7 @@ fn main() -> AdbResult<()> {
         let r = alice.open_table("docs")?.read()?;
 
         // `alice` owns neither file and is in neither file's group, so she is "other".
-        // `shared/welcome` keeps the default other-read, so she may read it.
+        // `shared/welcome` keeps the default other-access, so she may read it.
         println!(
             "alice reads shared/welcome n = {:?}",
             r.get_as::<i64>("shared/welcome", "n")?
@@ -80,12 +71,13 @@ fn main() -> AdbResult<()> {
     // The master (or any reader that may see it) can inspect the resolved ACL and the
     // vnode's timestamps (the `permissions` feature implies `entry-timestamps`).
     let r = master.open_table("docs")?.read()?;
-    if let Some(acl) = r.get_acl("vault/secret")? {
-        println!(
-            "vault/secret: owner={}, group={:?}, other.read={}",
-            acl.owner, acl.group, acl.mode.other.read,
-        );
-    }
+    println!(
+        "vault/secret: owner={:?}, groups={:?}, other={:?}",
+        r.owner("vault/secret")?,
+        r.groups("vault/secret")?,
+        r.get_acl("vault/secret", AclClass::Other)?,
+    );
+
     if let Some(times) = r.times("vault/secret")? {
         println!("vault/secret created at {}", times.created());
     }

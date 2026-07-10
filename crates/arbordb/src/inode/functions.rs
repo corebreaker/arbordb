@@ -120,13 +120,13 @@ pub(crate) fn set_default_acl(inodes: &mut InodeTable, table: &str, akey: AKey, 
         return Ok(());
     }
 
-    inode.set_acl(Acl::new(owner, None, Acl::default_mode()));
+    inode.set_acl(Acl::default_for(owner));
     inodes.insert(key.as_slice(), inode.encode().as_slice())?;
 
     Ok(())
 }
 
-/// Replaces vnode `akey`'s ACL wholesale (used by chown/chgrp/chmod).
+/// Replaces vnode `akey`'s ACL wholesale (used by chown/set_acl).
 #[cfg(feature = "permissions")]
 pub(crate) fn set_acl(inodes: &mut InodeTable, table: &str, akey: AKey, acl: Acl) -> AdbResult<()> {
     let key = inode_key(table, akey);
@@ -214,9 +214,9 @@ pub(crate) fn strip_group(inodes: &mut InodeTable, gid: u32) -> AdbResult<()> {
         let mut inode = Inode::decode(value.value())?;
 
         if let Some(mut acl) = inode.acl()
-            && acl.group() == Some(gid)
+            && acl.has_group(gid)
         {
-            acl.set_group(None);
+            acl.remove_group(gid);
             inode.set_acl(acl);
             updates.push((key.value().to_vec(), inode.encode()));
         }

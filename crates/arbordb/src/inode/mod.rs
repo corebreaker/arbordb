@@ -13,14 +13,15 @@
 //! section tag it does not recognize (for example a `permissions` build's ACL
 //! section, seen by an `entry-timestamps`-only build).
 
-#[cfg(feature = "permissions")]
-mod acl;
 mod constants;
 mod datetime;
 mod functions;
 mod node;
 mod table;
 mod underlying_timestamps;
+
+#[cfg(feature = "permissions")]
+mod acl;
 
 pub(crate) use self::{
     constants::INODES_TABLE,
@@ -30,7 +31,7 @@ pub(crate) use self::{
 
 #[cfg(feature = "permissions")]
 pub(crate) use self::{
-    acl::{mode_to_bits, Acl, Class, Right},
+    acl::Acl,
     functions::{read_acl, read_mac, read_sig, seal_mac, seal_sig, set_acl, set_default_acl, strip_group},
 };
 

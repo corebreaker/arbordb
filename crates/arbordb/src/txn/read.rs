@@ -19,18 +19,22 @@ use crate::{
 use redb::{ReadOnlyTable, ReadTransaction, ReadableTable, TableError};
 use std::{collections::HashSet, sync::Arc};
 
+#[cfg(feature = "permissions")]
+use crate::{
+    acl::{AclClass, Rights},
+    inode::{read_acl, read_mac, read_sig},
+    perm::{self, Principal},
+};
+
 #[cfg(feature = "entry-timestamps")]
-use crate::{db::DbInner, time::timestamp_now};
+use crate::{
+    db::DbInner,
+    inode::{NodeTimestamps, read_timestamps, INODES_TABLE},
+    time::timestamp_now,
+};
 
 #[cfg(feature = "entry-timestamps")]
 use std::{collections::HashMap, sync::Mutex};
-
-#[cfg(feature = "permissions")]
-use crate::{
-    acl::NodeAcl,
-    inode::{read_acl, read_mac, read_sig, read_timestamps, NodeTimestamps, Right, INODES_TABLE},
-    perm::{self, Principal},
-};
 
 /// A read transaction over one table — a consistent, concurrent snapshot.
 ///
@@ -141,9 +145,10 @@ impl ReadTxn {
         }
     }
 
-    /// Checks `right` on `akey` against its ACL. A no-op when enforcement is off.
+    /// Checks the `needed` grade on `akey` against its ACL. A no-op when enforcement
+    /// is off.
     #[cfg(feature = "permissions")]
-    fn authorize_target(&self, akey: AKey, right: Right) -> AdbResult<()> {
+    fn authorize_target(&self, akey: AKey, needed: Rights) -> AdbResult<()> {
         if !self.enforced() {
             return Ok(());
         }
@@ -154,7 +159,7 @@ impl ReadTxn {
             None => None,
         };
 
-        perm::access::authorize(&self.principal, akey, acl.as_ref(), right)
+        perm::access::authorize(&self.principal, akey, acl.as_ref(), needed)
     }
 
     /// Verifies vnode `akey`'s integrity tag over `blob` and its ACL, using an
@@ -248,7 +253,7 @@ impl ReadTxn {
                 None => None,
             };
 
-            perm::access::authorize(&self.principal, akey, acl.as_ref(), Right::Walk)?;
+            perm::access::authorize(&self.principal, akey, acl.as_ref(), Rights::Access)?;
 
             let Some(blob) = self.entry_blob(table, akey)? else {
                 return Ok(None);
@@ -309,38 +314,6 @@ impl ReadTxn {
         Ok(Some(akey))
     }
 
-    /// Loads the whole dynamic [`Value`] stored in the file at `path`, or `None` if
-    /// there is nothing there. Errors if `path` names a directory.
-    pub fn load_value(&self, path: impl IntoArborPath) -> AdbResult<Option<Value>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Right::Read)?;
-
-        #[cfg(feature = "entry-timestamps")]
-        self.record_access(akey);
-
-        let Some(blob) = self.entry_blob(&table, akey)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(akey, &blob)?;
-
-        let (kind, payload) = entry_split(&blob)?;
-        match kind {
-            EntryKind::File => Ok(Some(decode(payload)?)),
-            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
-        }
-    }
-
     /// Loads a typed value from the file at `path`, or `None` if absent. Errors if
     /// `path` names a directory.
     pub fn load<T: AData>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
@@ -354,7 +327,7 @@ impl ReadTxn {
         };
 
         #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Right::Read)?;
+        self.authorize_target(akey, Rights::Access)?;
 
         #[cfg(feature = "entry-timestamps")]
         self.record_access(akey);
@@ -377,6 +350,74 @@ impl ReadTxn {
         }
     }
 
+    /// Loads a file stored at `path` into any [`serde::de::DeserializeOwned`] value,
+    /// reading the value blob **directly** over the zero-copy codec — no intermediate
+    /// [`Value`] tree — the counterpart of
+    /// [`WriteTxn::store_serde_value`](crate::txn::WriteTxn::store_serde_value).
+    /// `None` if absent; errors if `path` names a directory.
+    #[cfg(feature = "serde")]
+    pub fn load_serde_value<T: serde::de::DeserializeOwned>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
+        let path = path.into_arbor_path()?;
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        let Some(akey) = self.resolve_cached(&table, &path)? else {
+            return Ok(None);
+        };
+
+        #[cfg(feature = "permissions")]
+        self.authorize_target(akey, Rights::Access)?;
+
+        #[cfg(feature = "entry-timestamps")]
+        self.record_access(akey);
+
+        let Some(blob) = self.entry_blob(&table, akey)? else {
+            return Ok(None);
+        };
+
+        #[cfg(feature = "permissions")]
+        self.verify_integrity(akey, &blob)?;
+
+        let (kind, payload) = entry_split(&blob)?;
+        match kind {
+            EntryKind::File => Ok(Some(crate::serde::from_blob(payload)?)),
+            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
+        }
+    }
+
+    /// Loads the whole dynamic [`Value`] stored in the file at `path`, or `None` if
+    /// there is nothing there. Errors if `path` names a directory.
+    pub fn load_value(&self, path: impl IntoArborPath) -> AdbResult<Option<Value>> {
+        let path = path.into_arbor_path()?;
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        let Some(akey) = self.resolve_cached(&table, &path)? else {
+            return Ok(None);
+        };
+
+        #[cfg(feature = "permissions")]
+        self.authorize_target(akey, Rights::Access)?;
+
+        #[cfg(feature = "entry-timestamps")]
+        self.record_access(akey);
+
+        let Some(blob) = self.entry_blob(&table, akey)? else {
+            return Ok(None);
+        };
+
+        #[cfg(feature = "permissions")]
+        self.verify_integrity(akey, &blob)?;
+
+        let (kind, payload) = entry_split(&blob)?;
+        match kind {
+            EntryKind::File => Ok(Some(decode(payload)?)),
+            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
+        }
+    }
+
     /// Opens a read accessor over the file at `path`, navigating its value blob
     /// zero-copy. `None` if the file is absent; errors if `path` names a directory.
     /// The accessor owns a snapshot of the blob, so it may outlive the transaction.
@@ -391,7 +432,7 @@ impl ReadTxn {
         };
 
         #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Right::Read)?;
+        self.authorize_target(akey, Rights::Access)?;
 
         #[cfg(feature = "entry-timestamps")]
         self.record_access(akey);
@@ -429,7 +470,7 @@ impl ReadTxn {
         };
 
         #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Right::Read)?;
+        self.authorize_target(akey, Rights::Access)?;
 
         #[cfg(feature = "entry-timestamps")]
         self.record_access(akey);
@@ -512,11 +553,51 @@ impl ReadTxn {
         read_timestamps(&inodes, &self.table, akey)
     }
 
-    /// The access-control list of the file or directory at `path`, with owner and
-    /// group resolved to names — or `None` if the node is absent or has no ACL (a
-    /// non-protected database, the special root, or a node predating protection).
+    /// The [`Rights`] the file or directory at `path` grants `class`.
+    ///
+    /// Returns [`Rights::None`] when the vnode has no ACL (a non-protected database,
+    /// the special root, or a node predating protection) or when a
+    /// [`Group`](AclClass::Group) names one the vnode is not in. Errors with
+    /// [`ValueNotFound`](AdbError::ValueNotFound) if nothing exists at `path`. Read
+    /// the owner's name and the group list with [`owner`](Self::owner) and
+    /// [`groups`](Self::groups).
     #[cfg(feature = "permissions")]
-    pub fn get_acl(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeAcl>> {
+    pub fn get_acl(&self, path: impl IntoArborPath, class: AclClass) -> AdbResult<Rights> {
+        let path = path.into_arbor_path()?;
+        let Some(table) = self.open()? else {
+            return Err(AdbError::ValueNotFound(path));
+        };
+
+        let Some(akey) = self.resolve_cached(&table, &path)? else {
+            return Err(AdbError::ValueNotFound(path));
+        };
+
+        let acl = match self.open_inodes()? {
+            Some(inodes) => read_acl(&inodes, &self.table, akey)?,
+            None => None,
+        };
+        let Some(acl) = acl else {
+            return Ok(Rights::None);
+        };
+
+        Ok(match class {
+            AclClass::User => acl.owner_rights(),
+            AclClass::Other => acl.other_rights(),
+            AclClass::Group(name) => {
+                let meta = self.txn.open_table(META_TABLE)?;
+                match perm::store::gid_of(&meta, &name)? {
+                    Some(gid) => acl.group_rights(gid),
+                    None => Rights::None,
+                }
+            }
+        })
+    }
+
+    /// The name of the owner of the file or directory at `path`, or `None` if the
+    /// vnode is absent or has no ACL. Falls back to the numeric id if the owning user
+    /// is no longer in the store.
+    #[cfg(feature = "permissions")]
+    pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
         let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(None);
@@ -526,25 +607,51 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let Some(inodes) = self.open_inodes()? else {
-            return Ok(None);
+        let acl = match self.open_inodes()? {
+            Some(inodes) => read_acl(&inodes, &self.table, akey)?,
+            None => None,
         };
-        let Some(acl) = read_acl(&inodes, &self.table, akey)? else {
+        let Some(acl) = acl else {
             return Ok(None);
         };
 
         let meta = self.txn.open_table(META_TABLE)?;
-        let owner = perm::store::name_of_user(&meta, acl.owner())?.unwrap_or_else(|| acl.owner().to_string());
-        let group = match acl.group() {
-            Some(gid) => perm::store::name_of_group(&meta, gid)?,
-            None => None,
+        let name = perm::store::name_of_user(&meta, acl.owner_uid())?.unwrap_or_else(|| acl.owner_uid().to_string());
+
+        Ok(Some(name))
+    }
+
+    /// The names of the groups the file or directory at `path` belongs to, sorted;
+    /// empty when the vnode is absent, has no ACL, or is in no group.
+    #[cfg(feature = "permissions")]
+    pub fn groups(&self, path: impl IntoArborPath) -> AdbResult<Vec<String>> {
+        let path = path.into_arbor_path()?;
+        let Some(table) = self.open()? else {
+            return Ok(Vec::new());
         };
 
-        Ok(Some(NodeAcl {
-            owner,
-            group,
-            mode: acl.to_mode(),
-        }))
+        let Some(akey) = self.resolve_cached(&table, &path)? else {
+            return Ok(Vec::new());
+        };
+
+        let acl = match self.open_inodes()? {
+            Some(inodes) => read_acl(&inodes, &self.table, akey)?,
+            None => None,
+        };
+        let Some(acl) = acl else {
+            return Ok(Vec::new());
+        };
+
+        let meta = self.txn.open_table(META_TABLE)?;
+        let mut names = Vec::new();
+        for gid in acl.group_ids() {
+            if let Some(name) = perm::store::name_of_group(&meta, gid)? {
+                names.push(name);
+            }
+        }
+        names.sort();
+
+        Ok(names)
     }
 
     /// Finds the entities an index points at, recomposing each as a `T`.
@@ -647,7 +754,7 @@ impl ReadTxn {
     fn load_entity<T: AData>(&self, table: &ReadOnlyTable<u128, EntryBytes>, entity: AKey) -> AdbResult<Option<T>> {
         // An index query silently skips entities the principal may not read.
         #[cfg(feature = "permissions")]
-        match self.authorize_target(entity, Right::Read) {
+        match self.authorize_target(entity, Rights::Access) {
             Ok(()) => {}
             Err(AdbError::PermissionDenied(_)) => return Ok(None),
             Err(err) => return Err(err),
@@ -683,7 +790,7 @@ impl ReadTxn {
         };
 
         #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Right::Read)?;
+        self.authorize_target(akey, Rights::Access)?;
 
         #[cfg(feature = "entry-timestamps")]
         self.record_access(akey);

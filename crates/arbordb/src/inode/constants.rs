@@ -11,7 +11,8 @@ pub(crate) const INODES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::
 /// The timestamps section: three `i64` Unix-epoch-millisecond fields.
 pub(super) const SECTION_TIMESTAMPS: u8 = 0;
 
-/// The ACL section (`permissions` feature): owner `u32`, group `u32`, mode `u16`.
+/// The ACL section (`permissions` feature): owner `u32`, owner/other grades (one
+/// byte each), then a `u32` group count and that many `(gid: u32, grade: u8)` pairs.
 #[cfg(feature = "permissions")]
 pub(super) const SECTION_ACL: u8 = 1;
 

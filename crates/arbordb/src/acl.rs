@@ -1,59 +1,91 @@
 //! Public access-control types for the `permissions` feature.
 //!
-//! [`Mode`](crate::acl::Mode) describes the read/write/walk rights of each class
-//! (owner, group, other); it is what [`WriteTxn::chmod`](crate::txn::WriteTxn::chmod)
-//! takes and part of the [`NodeAcl`](crate::acl::NodeAcl) that
-//! [`ReadTxn::get_acl`](crate::txn::ReadTxn::get_acl) returns. `walk` is meaningful
-//! only for directories.
+//! [`Rights`](crate::acl::Rights) is a single *graded* right — `None` ⊂ `Access` ⊂ `Modify` ⊂ `Delete`,
+//! each grade including every weaker one. It is what
+//! [`WriteTxn::set_acl`](crate::txn::WriteTxn::set_acl) grants and what
+//! [`ReadTxn::get_acl`](crate::txn::ReadTxn::get_acl) reports. [`AclClass`](crate::acl::AclClass) selects
+//! *which* class of a vnode's ACL — its owner, one of its groups, or everyone else —
+//! an operation reads or sets. There is no longer a separate `walk` right: a
+//! directory is traversable by anyone who holds `Access` on it.
 
-/// The rights granted to one class on a vnode.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Rights {
-    /// Read a file's value, or list a directory's children.
-    pub read: bool,
+/// A graded access right on a vnode.
+///
+/// The grades are cumulative — each includes every weaker one — so an ordering
+/// comparison answers "does this grade allow that one?": `Delete` > `Modify` >
+/// `Access` > `None`. Concretely:
+///
+/// - [`Access`](Rights::Access) — read a file's value, list a directory, and traverse a directory to reach a
+///   descendant.
+/// - [`Modify`](Rights::Modify) — everything `Access` grants, plus overwrite a file's value or a vnode's ACL, and add /
+///   remove / rename a directory's children.
+/// - [`Delete`](Rights::Delete) — everything `Modify` grants, plus delete the vnode itself.
+///
+/// On disk each grade is a 3-bit cumulative mask (`Access` = 1, `Modify` = 3,
+/// `Delete` = 7), so a stronger grade's bits cover every weaker grade's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Rights {
+    /// No access at all.
+    #[default]
+    None,
 
-    /// Write a file's value or ACL, or add/remove/rename a directory's children.
-    pub write: bool,
+    /// Read a file's value, list a directory, and traverse a directory.
+    Access,
 
-    /// Traverse *through* a directory to reach a descendant (directories only).
-    pub walk: bool,
+    /// Everything [`Access`](Rights::Access) grants, plus overwrite a file's value
+    /// or a vnode's ACL, and add / remove / rename a directory's children.
+    Modify,
+
+    /// Everything [`Modify`](Rights::Modify) grants, plus delete the vnode.
+    Delete,
 }
 
 impl Rights {
-    /// Rights granting only `read` (and nothing else) — a convenience constructor.
-    pub fn read_only() -> Self {
-        Self {
-            read:  true,
-            write: false,
-            walk:  false,
+    /// The 3-bit cumulative on-disk encoding of this grade (`None` = 0,
+    /// `Access` = 1, `Modify` = 3, `Delete` = 7).
+    pub(crate) fn to_bits(self) -> u8 {
+        match self {
+            Rights::None => 0,
+            Rights::Access => 1,
+            Rights::Modify => 3,
+            Rights::Delete => 7,
         }
+    }
+
+    /// Decodes a grade from its 3-bit cumulative encoding, taking the strongest
+    /// grade whose bits are all present so an unknown pattern degrades safely.
+    pub(crate) fn from_bits(bits: u8) -> Self {
+        if bits & 0b111 == 0b111 {
+            Rights::Delete
+        } else if bits & 0b011 == 0b011 {
+            Rights::Modify
+        } else if bits & 0b001 == 0b001 {
+            Rights::Access
+        } else {
+            Rights::None
+        }
+    }
+
+    /// Whether this grade includes `needed` (grades are cumulative, so this is
+    /// simply `self >= needed`).
+    pub(crate) fn includes(self, needed: Rights) -> bool {
+        self >= needed
     }
 }
 
-/// A vnode's permission bits: the rights of each of owner, group, and other.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Mode {
-    /// The owner's rights.
-    pub owner: Rights,
-
-    /// The group's rights (apply only when the vnode has a group the caller is in).
-    pub group: Rights,
-
-    /// Everyone else's rights.
-    pub other: Rights,
-}
-
-/// A vnode's full access-control list, with owner and group resolved to names.
+/// Selects one class of a vnode's access-control list.
 ///
-/// Returned by [`ReadTxn::get_acl`](crate::txn::ReadTxn::get_acl).
+/// A vnode grants rights to its owner, to the members of any number of named
+/// groups, and to everyone else. [`get_acl`](crate::txn::ReadTxn::get_acl) reads,
+/// and [`set_acl`](crate::txn::WriteTxn::set_acl) sets, the [`Rights`] of the class
+/// named here.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NodeAcl {
-    /// The owning user's name.
-    pub owner: String,
+pub enum AclClass {
+    /// The vnode's owner.
+    User,
 
-    /// The owning group's name, if the vnode has a group.
-    pub group: Option<String>,
+    /// The members of the group with this name.
+    Group(String),
 
-    /// The permission bits.
-    pub mode: Mode,
+    /// Everyone who is neither the owner nor a member of one of the vnode's groups.
+    Other,
 }

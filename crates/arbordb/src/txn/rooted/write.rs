@@ -48,6 +48,16 @@ impl<'a> RootedWrite<'a> {
         self.txn.store_value(self.absolute(path)?, value)
     }
 
+    /// Stores any [`serde::Serialize`] value at `path` (relative to the root).
+    #[cfg(feature = "serde")]
+    pub fn store_serde_value<T: serde::Serialize + ?Sized>(
+        &self,
+        path: impl IntoArborPath,
+        value: &T,
+    ) -> AdbResult<()> {
+        self.txn.store_serde_value(self.absolute(path)?, value)
+    }
+
     /// Creates the directory at `path` (relative to the root) and any ancestors.
     pub fn mkdir(&self, path: impl IntoArborPath) -> AdbResult<()> {
         self.txn.mkdir(self.absolute(path)?)
