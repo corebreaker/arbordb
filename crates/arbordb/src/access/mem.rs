@@ -17,6 +17,7 @@ use std::cell::RefCell;
 
 /// A value being assembled in memory.
 pub(crate) struct MemWriter {
+    /// The value under construction; `RefCell` lets the `Writer` methods take `&self`.
     value: RefCell<Value>,
 }
 

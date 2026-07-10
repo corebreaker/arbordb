@@ -19,14 +19,19 @@ use std::{
 /// Database-wide shared state, held behind an [`Arc`] so an
 /// [`ArborDb`](crate::ArborDb) is cheap to clone and share across threads.
 pub(crate) struct DbInner {
+    /// The underlying storage-engine handle.
     db:           Database,
+    /// The database-wide version counter, bumped on every committed write.
     generation:   AtomicU64,
+    /// Serializes a read's `(snapshot, generation)` capture against a commit's
+    /// `(commit, generation bump)` so a snapshot never borrows another version.
     version_lock: RwLock<()>,
+    /// Per-table caches, created lazily on first use.
     caches:       Mutex<HashMap<String, Arc<PathCache>>>,
 
-    // Buffered vnode access times awaiting a flush to `$inodes`: reads record here
-    // (cheap, in memory) and a committed write or an explicit flush persists them.
-    // Keyed by `(table, vnode)`, valued by the latest access time (epoch millis).
+    /// Buffered vnode access times awaiting a flush to `$inodes`: reads record here
+    /// (cheap, in memory) and a committed write or an explicit flush persists them.
+    /// Keyed by `(table, vnode)`, valued by the latest access time (epoch millis).
     #[cfg(feature = "entry-timestamps")]
     access_log: Mutex<HashMap<(String, crate::AKey), i64>>,
 }

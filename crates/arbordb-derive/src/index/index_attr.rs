@@ -5,8 +5,11 @@ use syn::{parse::ParseStream, punctuated::Punctuated, Error, LitStr, Token, Resu
 
 /// A parsed `index(name = "...", columns(...), unique)` declaration.
 pub(crate) struct IndexAttr {
+    /// The index name (`name = "..."`).
     name:    LitStr,
+    /// The sort-key columns, in declared order.
     columns: Vec<ColumnSpec>,
+    /// Whether the index is declared `unique`.
     unique:  bool,
 }
 

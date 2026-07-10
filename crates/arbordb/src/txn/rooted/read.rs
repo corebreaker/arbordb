@@ -1,3 +1,7 @@
+//! [`RootedRead`] — a read view that prefixes every access path with a fixed root
+//! before forwarding to the underlying [`ReadTxn`], including index queries scoped
+//! to the root's subtree.
+
 use super::super::{IndexQuery, ReadTxn};
 use crate::{
     data::{AData, AValue, ARef, Scalar},
@@ -9,7 +13,9 @@ use crate::{
 
 /// A [`ReadTxn`] whose access paths are relative to a fixed root.
 pub struct RootedRead<'a> {
+    /// The transaction every path is forwarded to.
     txn:  &'a ReadTxn,
+    /// The fixed root prepended to each access path.
     root: APath,
 }
 

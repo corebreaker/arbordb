@@ -1,3 +1,6 @@
+//! [`IndexColumn`] — one column of an index: an intra-value [`VPath`] plus a sort
+//! [`Direction`].
+
 use super::Direction;
 use crate::path::VPath;
 

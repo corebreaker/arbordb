@@ -1,3 +1,6 @@
+//! The registry's free-function facade: thin wrappers that forward to
+//! [`RegistryRepository`] so the rest of the crate never names the repository type.
+
 use super::{
     super::IndexDef,
     IndexEntry,

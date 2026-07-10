@@ -121,7 +121,9 @@ fn offset(buf: &[u8]) -> u32 {
 /// Holds a borrow of the blob (the redb page, on a read) and the offset of its
 /// root vnode. Navigation reads happen straight out of the borrowed bytes.
 pub(crate) struct ArchivedValue<'a> {
+    /// The borrowed value blob (a redb page, on a read).
     blob: &'a [u8],
+    /// Offset of the root vnode within `blob`.
     root: u32,
 }
 
@@ -173,7 +175,9 @@ impl<'a> ArchivedValue<'a> {
 /// A cursor at one vnode inside a value blob, navigated zero-copy.
 #[derive(Clone, Copy)]
 pub(crate) struct ArchivedNode<'a> {
+    /// The borrowed value blob this cursor reads from.
     blob: &'a [u8],
+    /// Offset of this vnode within `blob`.
     off:  u32,
 }
 

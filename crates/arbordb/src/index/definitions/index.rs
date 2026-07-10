@@ -1,3 +1,7 @@
+//! [`IndexDef`] — the full description of a secondary index (name, entity pattern,
+//! sort columns, uniqueness) together with its registry encoding and the
+//! order-preserving column-key encoding shared by write-time maintenance and queries.
+
 use super::{Direction, IndexColumn, misc::read_string};
 use crate::{
     codec::{self, Reader},

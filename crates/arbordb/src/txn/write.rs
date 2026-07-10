@@ -60,17 +60,22 @@ mod table {
     /// (optional) per-vnode metadata table lets every vnode write keep that vnode's
     /// `$inodes` entry — its timestamps — in step within the same transaction.
     pub(super) struct Ctx<'txn, 'a> {
+        /// The data table this mutation writes vnode entries through.
         data: &'a mut DataTable<'txn>,
 
+        /// The per-vnode metadata table, kept in step with `data`.
         #[cfg(feature = "entry-timestamps")]
         inodes: &'a mut InodeTable<'txn>,
 
+        /// The table name, part of every `$inodes` key.
         #[cfg(feature = "entry-timestamps")]
         table: &'a str,
 
+        /// One timestamp shared by every vnode this mutation touches.
         #[cfg(feature = "entry-timestamps")]
         now: i64,
 
+        /// The identity performing the mutation; drives ACL enforcement.
         #[cfg(feature = "permissions")]
         principal: &'a Principal,
     }
@@ -778,10 +783,14 @@ pub(crate) fn reap_owned_in(txn: &WriteTransaction, table: &str, uid: u32, princ
 
 /// A write transaction over one table. Changes become durable on [`commit`](WriteTxn::commit).
 pub struct WriteTxn {
+    /// The underlying engine write transaction.
     txn:   WriteTransaction,
+    /// The table this transaction writes.
     table: String,
+    /// The database-wide shared state (for the generation bump on commit).
     inner: Arc<DbInner>,
 
+    /// The identity performing the writes; drives ACL enforcement.
     #[cfg(feature = "permissions")]
     principal: Arc<Principal>,
 }

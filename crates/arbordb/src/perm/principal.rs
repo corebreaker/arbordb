@@ -1,6 +1,7 @@
 //! The identity a database handle acts as.
 
-use super::crypto::KEY_LEN;
+use super::constants::{MASTER_UID, MASTER_GID, SUPER_GID};
+use crate::crypto::KEY_LEN;
 
 /// The identity a database handle acts as.
 pub(crate) enum Principal {
@@ -17,9 +18,13 @@ pub(crate) enum Principal {
 
 /// An authenticated session: who the caller is and the integrity key they unlocked.
 pub(crate) struct Session {
+    /// The authenticated user's name.
     name: String,
+    /// The user's id.
     uid:  u32,
+    /// The ids of the groups the user belongs to.
     gids: Vec<u32>,
+    /// The database integrity key this session unlocked.
     key:  [u8; KEY_LEN],
 }
 
@@ -59,18 +64,18 @@ impl Session {
 
     /// Whether this is the master user, which bypasses ACLs entirely.
     pub(crate) fn is_master(&self) -> bool {
-        self.uid == super::MASTER_UID
+        self.uid == MASTER_UID
     }
 
     /// Whether the user belongs to the master group, which administers users and
     /// groups (but does not bypass ACLs).
     pub(crate) fn in_master_group(&self) -> bool {
-        self.gids.contains(&super::MASTER_GID)
+        self.gids.contains(&MASTER_GID)
     }
 
     /// Whether the user belongs to the super group, which may list users and
     /// groups read-only.
     pub(crate) fn in_super_group(&self) -> bool {
-        self.gids.contains(&super::SUPER_GID)
+        self.gids.contains(&SUPER_GID)
     }
 }

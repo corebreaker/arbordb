@@ -39,7 +39,9 @@ type BlobEntries = LruCache<(u64, AKey), Arc<Vec<u8>>>;
 /// A per-table pair of bounded LRU caches, shared across that table's read
 /// transactions.
 pub(crate) struct PathCache {
+    /// The path-resolution cache (`APath` → `(generation, key)`).
     paths: Mutex<PathEntries>,
+    /// The entry-blob cache (`(generation, key)` → entry bytes).
     blobs: Mutex<BlobEntries>,
 }
 

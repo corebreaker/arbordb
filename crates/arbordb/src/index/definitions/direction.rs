@@ -1,3 +1,6 @@
+//! [`Direction`] — the ascending/descending sort order of an index column, plus
+//! its one-byte on-disk encoding.
+
 use crate::error::{AdbError, AdbResult};
 
 /// The sort direction of an index column.
@@ -10,6 +13,7 @@ pub enum Direction {
 }
 
 impl Direction {
+    /// The one-byte encoding stored in an index definition (`Asc` → 0, `Desc` → 1).
     pub(super) fn to_byte(self) -> u8 {
         match self {
             Direction::Asc => 0,
@@ -17,6 +21,7 @@ impl Direction {
         }
     }
 
+    /// Decodes a byte written by [`to_byte`](Self::to_byte); any other value is corrupt.
     pub(super) fn from_byte(byte: u8) -> AdbResult<Self> {
         match byte {
             0 => Ok(Direction::Asc),

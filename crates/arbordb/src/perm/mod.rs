@@ -12,57 +12,36 @@
 //! the master user. Creation itself never produces a protected database.
 
 mod access;
-mod crypto;
 mod integrity;
 mod principal;
 mod store;
 
-pub(crate) use self::access::{authorize, authorize_chgrp, authorize_chown};
-pub(crate) use self::integrity::{ct_eq, mac_value};
-pub(crate) use self::principal::Principal;
-pub(crate) use self::store::{
-    add_group,
-    add_user,
-    assign,
-    authenticate,
-    change_user_password,
-    forget_user,
-    gid_of,
-    group_members,
-    is_protected,
-    list_groups,
-    list_users,
-    name_of_group,
-    name_of_user,
-    promote_to_master,
-    remove_group,
-    rename_group,
-    rename_user,
-    uid_of,
-    unassign,
-    user_groups,
+pub mod constants;
+
+pub(crate) use self::{
+    access::{authorize, authorize_chgrp, authorize_chown},
+    integrity::{ct_eq, mac_value},
+    principal::Principal,
+    store::{
+        add_group,
+        add_user,
+        assign,
+        authenticate,
+        change_user_password,
+        forget_user,
+        gid_of,
+        group_members,
+        is_protected,
+        list_groups,
+        list_users,
+        name_of_group,
+        name_of_user,
+        promote_to_master,
+        remove_group,
+        rename_group,
+        rename_user,
+        uid_of,
+        unassign,
+        user_groups,
+    },
 };
-
-/// The master user's fixed id — the only principal that bypasses ACLs.
-pub(crate) const MASTER_UID: u32 = 0;
-
-/// The guest user's fixed id — anonymous, frozen, read-only.
-pub(crate) const GUEST_UID: u32 = 1;
-
-/// The master group's fixed id — administers users and groups (no ACL bypass).
-pub(crate) const MASTER_GID: u32 = 0;
-
-/// The super group's fixed id — read-only listing of users and groups.
-pub(crate) const SUPER_GID: u32 = 1;
-
-/// The master user's fixed name.
-pub(crate) const MASTER_USER: &str = "master";
-
-/// The guest user's fixed name.
-pub(crate) const GUEST_USER: &str = "guest";
-
-/// The master group's fixed name.
-pub(crate) const MASTER_GROUP: &str = "master";
-
-/// The super group's fixed name.
-pub(crate) const SUPER_GROUP: &str = "super";

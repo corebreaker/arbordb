@@ -20,7 +20,9 @@ use crate::{
 
 /// A read/write cursor over one file, reloading and rewriting it per operation.
 pub(crate) struct MutCursor<'t> {
+    /// The transaction whose staged state is edited.
     txn:   &'t WriteTxn,
+    /// The access path of the file this cursor operates on.
     apath: APath,
 }
 

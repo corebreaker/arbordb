@@ -25,8 +25,11 @@ pub(crate) enum Right {
 /// Which of owner/group/other a principal falls into for a given vnode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Class {
+    /// The vnode's owner.
     Owner,
+    /// A member of the vnode's group.
     Group,
+    /// Everyone else.
     Other,
 }
 
@@ -81,8 +84,11 @@ pub(crate) fn mode_to_bits(mode: &crate::acl::Mode) -> u16 {
 /// (a vnode with no group treats every non-owner as `other`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct Acl {
+    /// The owner's user id.
     owner: u32,
+    /// The group's id, or `None` for a vnode with no group.
     group: Option<u32>,
+    /// The packed rights (3 rights × 3 classes; see the module docs).
     mode:  u16,
 }
 

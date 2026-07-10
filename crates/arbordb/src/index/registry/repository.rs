@@ -1,3 +1,9 @@
+//! [`RegistryRepository`] — the whole secondary-index registry as one blob under
+//! `META_INDEX_REGISTRY_KEY`: a monotonic id allocator plus the table-scoped
+//! entries. Every mutation is a read-modify-write of that single value; ids are
+//! allocated once and never reused, so a leftover physical entry can never collide
+//! with a future index.
+
 use super::{super::IndexId, IndexEntry};
 use crate::{
     codec::{self, Reader},
@@ -14,11 +20,15 @@ pub(super) type MetaTable<'txn> = Table<'txn, &'static str, &'static [u8]>;
 /// The whole registry: an id allocator plus every registered entry.
 #[derive(Default)]
 pub(super) struct RegistryRepository {
+    /// The next index id to hand out (monotonic; ids are never reused).
     next_id: u32,
+    /// Every registered index entry, across all tables.
     entries: Vec<IndexEntry>,
 }
 
 impl RegistryRepository {
+    /// Decodes the registry blob: the `next_id` allocator, an entry count, then each
+    /// `(table, id, def)` record.
     fn decode(data: &[u8]) -> AdbResult<Self> {
         let mut r = Reader::new(data);
         let next_id = r.u32()?;
@@ -41,6 +51,7 @@ impl RegistryRepository {
         })
     }
 
+    /// Loads the registry, or an empty one when the metadata key is absent.
     fn load<T: ReadableTable<&'static str, &'static [u8]>>(meta: &T) -> AdbResult<Self> {
         match meta.get(META_INDEX_REGISTRY_KEY)? {
             Some(guard) => Self::decode(guard.value()),
@@ -70,6 +81,7 @@ impl RegistryRepository {
         Ok(buf)
     }
 
+    /// Persists the registry back to its single metadata value.
     fn store(&self, meta: &mut MetaTable<'_>) -> AdbResult<()> {
         meta.insert(META_INDEX_REGISTRY_KEY, self.encode()?.as_slice())?;
         Ok(())

@@ -20,6 +20,7 @@ use std::{
 /// [`APath`](super::APath), which addresses a whole value and carries no index.
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub struct VPath {
+    /// The path's segments (named fields and list indices), from root to leaf.
     segments: Segments,
 }
 

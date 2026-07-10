@@ -23,6 +23,7 @@ use redb::ReadableTable;
 /// A parsed index scope pattern.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Pattern {
+    /// The parsed segments, in path order.
     segs: Vec<PatternSeg>,
 }
 

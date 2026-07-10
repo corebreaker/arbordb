@@ -1,3 +1,6 @@
+//! The reserved `$inodes` table handle and the section tags that identify each
+//! kind of per-vnode metadata inside an inode blob.
+
 use crate::constants::INODES_TABLE_NAME;
 use redb::TableDefinition;
 

@@ -18,7 +18,9 @@ use std::sync::Arc;
 
 /// A read cursor over one stored file's value blob.
 pub(crate) struct ArchivedReader {
+    /// The file's whole entry blob, shared with the transaction's blob cache.
     entry:  Arc<Vec<u8>>,
+    /// Where the value payload begins inside `entry` (just past the entry tag).
     offset: usize,
 }
 

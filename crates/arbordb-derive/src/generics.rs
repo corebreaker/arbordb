@@ -12,13 +12,21 @@ pub(crate) type Bounds = Punctuated<WherePredicate, Token![,]>;
 /// by [`Generics::analyze`]; for a non-generic type every fragment is empty (bar
 /// the accessors' `'t`), so the generated code is unchanged.
 pub(crate) struct Generics {
+    /// The impl generics for the `AData` impl on the original type (`<T>`).
     a_data_impl:    TokenStream,
+    /// The type generics for the original type (`<T>`).
     a_data_ty:      TokenStream,
+    /// The where-clause for the `AData` impl (`where T: AData`, or the custom bound).
     a_data_where:   TokenStream,
+    /// The accessor impl generics, including the extra `'t` (`<'t, T>`).
     accessor_impl:  TokenStream,
+    /// The accessor type generics (`<'t, T>`).
     accessor_ty:    TokenStream,
+    /// The accessor where-clause (identical to the `AData` one).
     accessor_where: TokenStream,
+    /// A trailing `__marker: PhantomData<…>,` field (empty without type params).
     phantom_field:  TokenStream,
+    /// The matching `__marker: PhantomData,` initializer (empty without type params).
     phantom_init:   TokenStream,
 }
 

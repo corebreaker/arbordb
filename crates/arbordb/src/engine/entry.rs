@@ -3,7 +3,9 @@
 use crate::error::{AdbError, AdbResult};
 
 mod tag {
+    /// Leading byte marking a directory blob.
     pub(super) const DIR: u8 = 0;
+    /// Leading byte marking a file blob.
     pub(super) const FILE: u8 = 1;
 }
 
@@ -24,7 +26,9 @@ pub enum EntryKind {
 /// identities.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Entry {
+    /// The child's name within its parent directory.
     name: String,
+    /// Whether the child is a directory or a file.
     kind: EntryKind,
 }
 

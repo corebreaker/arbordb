@@ -6,7 +6,6 @@
 //! stored hash. `K` also keys the per-value BLAKE3 MAC used for tamper detection.
 
 use crate::error::{AdbError, AdbResult};
-
 use argon2::Argon2;
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
@@ -25,7 +24,7 @@ pub(crate) const NONCE_LEN: usize = 24;
 
 /// Fills `buf` with cryptographically secure random bytes.
 pub(crate) fn random_bytes(buf: &mut [u8]) -> AdbResult<()> {
-    getrandom::getrandom(buf).map_err(|e| AdbError::CannotAccess(format!("secure RNG failed: {e}")))
+    getrandom::fill(buf).map_err(|e| AdbError::CannotAccess(format!("secure RNG failed: {e}")))
 }
 
 /// A fresh random integrity key.
@@ -58,9 +57,15 @@ pub(crate) fn wrap_key(password: &str, key: &[u8]) -> AdbResult<([u8; SALT_LEN],
     let cipher = XChaCha20Poly1305::new_from_slice(&kek)
         .map_err(|e| AdbError::CannotAccess(format!("cipher init failed: {e}")))?;
 
+    let xnonce = XNonce::try_from(&nonce[..]).map_err(|_| {
+        const MSG: &str = "nonce has the wrong length";
+
+        AdbError::CannotAccess(MSG.into())
+    })?;
+
     let ciphertext = cipher
-        .encrypt(XNonce::from_slice(&nonce), key)
-        .map_err(|_| AdbError::CannotAccess("wrapping the integrity key failed".into()))?;
+        .encrypt(&xnonce, key)
+        .map_err(|_| AdbError::CannotAccess(String::from("wrapping the integrity key failed")))?;
 
     Ok((salt, nonce, ciphertext))
 }
@@ -72,7 +77,9 @@ pub(crate) fn unwrap_key(password: &str, salt: &[u8], nonce: &[u8], ciphertext: 
     let cipher = XChaCha20Poly1305::new_from_slice(&kek)
         .map_err(|e| AdbError::CannotAccess(format!("cipher init failed: {e}")))?;
 
+    let xnonce = XNonce::try_from(nonce).map_err(|_| AdbError::AuthenticationFailed)?;
+
     cipher
-        .decrypt(XNonce::from_slice(nonce), ciphertext)
+        .decrypt(&xnonce, ciphertext)
         .map_err(|_| AdbError::AuthenticationFailed)
 }

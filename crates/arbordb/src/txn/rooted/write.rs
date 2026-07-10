@@ -1,3 +1,6 @@
+//! [`RootedWrite`] — a write view that prefixes every access path with a fixed root
+//! before forwarding to the underlying [`WriteTxn`].
+
 use super::super::WriteTxn;
 use crate::{
     data::{AData, AMut},
@@ -8,7 +11,9 @@ use crate::{
 
 /// A [`WriteTxn`] whose access paths are relative to a fixed root.
 pub struct RootedWrite<'a> {
+    /// The transaction every path is forwarded to.
     txn:  &'a WriteTxn,
+    /// The fixed root prepended to each access path.
     root: APath,
 }
 

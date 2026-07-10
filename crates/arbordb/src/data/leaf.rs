@@ -15,8 +15,11 @@ use std::{marker::PhantomData, sync::Arc};
 
 /// A read accessor for a single scalar leaf of type `T`.
 pub struct Leaf<'t, T: AValue> {
+    /// The cursor this accessor reads through.
     reader:  Arc<dyn Reader + 't>,
+    /// The intra-value path this leaf is anchored at.
     base:    VPath,
+    /// Binds the scalar type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -48,8 +51,11 @@ impl<'t, T: AValue> ARef<'t> for Leaf<'t, T> {
 
 /// A read/write accessor for a single scalar leaf of type `T`.
 pub struct LeafMut<'t, T: AValue> {
+    /// The cursor this accessor reads and writes through.
     writer:  Arc<dyn Writer + 't>,
+    /// The intra-value path this leaf is anchored at.
     base:    VPath,
+    /// Binds the scalar type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 

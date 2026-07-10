@@ -27,6 +27,7 @@ type Names = SmallVec<[SmolStr; INLINE_NAMES]>;
 /// `.`/`..` the same way `VPath` does.
 #[derive(Clone, PartialEq, Eq, Hash, Default)]
 pub struct APath {
+    /// The path's names, from root to leaf (empty for the root path).
     names: Names,
 }
 

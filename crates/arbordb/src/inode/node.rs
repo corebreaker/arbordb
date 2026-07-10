@@ -1,3 +1,9 @@
+//! [`Inode`] — the decoded in-memory form of an `$inodes` blob: the sections this
+//! build understands (timestamps, and with `permissions` an ACL and integrity tag)
+//! plus any unrecognized sections kept verbatim in `extra`. The section-tagged,
+//! copy-through layout is what lets a build read and rewrite an inode written by a
+//! build with a different feature set.
+
 use super::{constants::SECTION_TIMESTAMPS, underlying_timestamps::UnderlyingTimestamps};
 use crate::{
     codec::{put_bytes, Reader},
@@ -14,14 +20,19 @@ use super::{
 /// kept verbatim so a rewrite never drops another feature's metadata.
 #[derive(Default)]
 pub(super) struct Inode {
+    /// The created/modified/accessed section, if present.
     timestamps: Option<UnderlyingTimestamps>,
 
+    /// The access-control section (`permissions` feature), if present.
     #[cfg(feature = "permissions")]
     acl: Option<Acl>,
 
+    /// The 32-byte keyed integrity tag (`permissions` feature), if present.
     #[cfg(feature = "permissions")]
     mac: Option<[u8; 32]>,
 
+    /// Sections this build does not recognize, kept as `(tag, body)` and written
+    /// back untouched so another feature's metadata survives a rewrite.
     extra: Vec<(u8, Vec<u8>)>,
 }
 
@@ -55,6 +66,8 @@ impl Inode {
         Ok(inode)
     }
 
+    /// Serializes the known sections followed by any retained `extra` ones, back
+    /// into the `[count:u8]` + `[tag:u8][len:u32][body]` layout that [`decode`](Self::decode) reads.
     pub(super) fn encode(&self) -> Vec<u8> {
         let mut sections: Vec<(u8, Vec<u8>)> = Vec::new();
         if let Some(times) = self.timestamps {
@@ -82,33 +95,40 @@ impl Inode {
         out
     }
 
+    /// The timestamps section, if any.
     pub(super) fn timestamps(&self) -> Option<UnderlyingTimestamps> {
         self.timestamps
     }
 
+    /// A mutable borrow of the timestamps section, if any.
     pub(super) fn timestamps_mut(&mut self) -> Option<&mut UnderlyingTimestamps> {
         self.timestamps.as_mut()
     }
 
+    /// Sets (or replaces) the timestamps section.
     pub(super) fn set_timestamps(&mut self, timestamps: UnderlyingTimestamps) {
         self.timestamps.replace(timestamps);
     }
 
+    /// The ACL section, if any.
     #[cfg(feature = "permissions")]
     pub(super) fn acl(&self) -> Option<Acl> {
         self.acl
     }
 
+    /// Sets (or replaces) the ACL section.
     #[cfg(feature = "permissions")]
     pub(super) fn set_acl(&mut self, acl: Acl) {
         self.acl.replace(acl);
     }
 
+    /// The integrity-tag section, if any.
     #[cfg(feature = "permissions")]
     pub(super) fn mac(&self) -> Option<[u8; 32]> {
         self.mac
     }
 
+    /// Sets (or replaces) the integrity-tag section.
     #[cfg(feature = "permissions")]
     pub(super) fn set_mac(&mut self, mac: [u8; 32]) {
         self.mac.replace(mac);

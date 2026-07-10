@@ -7,8 +7,15 @@
 //!
 //! Run with: `cargo run --example permissions --features permissions`
 
-use arbordb::acl::{Mode, Rights};
-use arbordb::{data::Scalar, AdbError, AdbResult, ArborDb, Value};
+use arbordb::{
+    acl::{Mode, Rights},
+    data::Scalar,
+    AdbError,
+    AdbResult,
+    ArborDb,
+    Value,
+};
+
 use std::collections::BTreeMap;
 
 /// A one-field object, so `get_as(path, "n")` reads its scalar.

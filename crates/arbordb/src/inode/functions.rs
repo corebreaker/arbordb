@@ -1,3 +1,8 @@
+//! The read/modify/write operations over the `$inodes` table: keying, timestamp
+//! touches and access bumps, and (with `permissions`) ACL and integrity-tag
+//! accessors. Every mutation decodes the whole inode, changes one section, and
+//! re-encodes it, so no operation ever drops another feature's metadata.
+
 use super::{node::Inode, datetime::NodeTimestamps, underlying_timestamps::UnderlyingTimestamps, InodeTable};
 use crate::{codec::put_bytes, error::AdbResult, AKey};
 use redb::ReadableTable;

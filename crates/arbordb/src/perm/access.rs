@@ -9,7 +9,7 @@
 //! - Otherwise the identity's owner/group/other class is checked against the ACL. Membership of the master or super
 //!   *group* grants no bypass here.
 
-use super::Principal;
+use super::{constants::GUEST_UID, Principal};
 use crate::{
     error::{AdbError, AdbResult},
     inode::{Acl, Class, Right},
@@ -54,7 +54,7 @@ pub(crate) fn authorize(principal: &Principal, akey: AKey, acl: Option<&Acl>, ri
 fn class_check(principal: &Principal, acl: &Acl, right: Right) -> AdbResult<()> {
     let (uid, gids): (u32, &[u32]) = match principal {
         Principal::User(session) => (session.uid(), session.gids()),
-        Principal::Guest => (super::GUEST_UID, &[]),
+        Principal::Guest => (GUEST_UID, &[]),
         // Unrestricted and the master user are handled by the caller.
         Principal::Unrestricted => return Ok(()),
     };

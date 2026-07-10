@@ -9,7 +9,9 @@ use syn::{
 
 /// A column of an `index(...)`: a field identifier and its `asc` (default) / `desc`.
 pub(crate) struct ColumnSpec {
+    /// The field this column indexes.
     field:      Ident,
+    /// Whether the column sorts descending (`desc`).
     descending: bool,
 }
 

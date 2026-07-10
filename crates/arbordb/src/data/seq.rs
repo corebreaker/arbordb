@@ -40,8 +40,11 @@ impl<T: AData> AData for Vec<T> {
 
 /// A read accessor for a list of `T`.
 pub struct Seq<'t, T: AData> {
+    /// The cursor this accessor reads through.
     reader:  Arc<dyn Reader + 't>,
+    /// The intra-value path of the list.
     base:    VPath,
+    /// Binds the element type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -86,8 +89,11 @@ impl<'t, T: AData> ARef<'t> for Seq<'t, T> {
 
 /// A read/write accessor for a list of `T`.
 pub struct SeqMut<'t, T: AData> {
+    /// The cursor this accessor reads and writes through.
     writer:  Arc<dyn Writer + 't>,
+    /// The intra-value path of the list.
     base:    VPath,
+    /// Binds the element type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 

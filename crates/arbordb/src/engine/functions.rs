@@ -2,8 +2,11 @@
 //! the read-side directory-tree walk. The concrete engine (redb) is confined to
 //! this layer.
 
-use super::entry::{get_entry_kind, entry_split, EntryKind};
-use super::features;
+use super::{
+    entry::{get_entry_kind, entry_split, EntryKind},
+    features,
+};
+
 use crate::{
     codec::ArchivedDir,
     constants::{FORMAT_VERSION, INDEX_TABLE_NAME, META_FORMAT_VERSION_KEY, METADATA_TABLE_NAME},

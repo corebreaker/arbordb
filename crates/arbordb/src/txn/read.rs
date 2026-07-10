@@ -37,21 +37,25 @@ use crate::{
 /// path cache, tagged with the snapshot's `generation` so a stale entry reads as
 /// a miss.
 pub struct ReadTxn {
+    /// The underlying engine read snapshot.
     txn:        ReadTransaction,
+    /// The table this snapshot reads.
     table:      String,
+    /// The table's shared path/blob cache.
     cache:      Arc<PathCache>,
+    /// The generation captured at snapshot start, tagging cache lookups.
     generation: u64,
 
-    // Shared state, held for depositing this snapshot's buffered access times.
+    /// Shared state, held for depositing this snapshot's buffered access times.
     #[cfg(feature = "entry-timestamps")]
     inner: Arc<DbInner>,
 
-    // Access times recorded by content reads in this snapshot, keyed by vnode.
-    // Deposited into the database-wide log on drop.
+    /// Access times recorded by content reads in this snapshot, keyed by vnode.
+    /// Deposited into the database-wide log on drop.
     #[cfg(feature = "entry-timestamps")]
     access_log: Mutex<HashMap<AKey, i64>>,
 
-    // The identity this snapshot reads as; drives ACL enforcement on a protected DB.
+    /// The identity this snapshot reads as; drives ACL enforcement on a protected DB.
     #[cfg(feature = "permissions")]
     principal: Arc<Principal>,
 }

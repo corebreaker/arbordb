@@ -39,8 +39,11 @@ impl<T: AData> AData for BTreeMap<String, T> {
 
 /// A read accessor for a `String`-keyed map of `T`.
 pub struct Map<'t, T: AData> {
+    /// The cursor this accessor reads through.
     reader:  Arc<dyn Reader + 't>,
+    /// The intra-value path of the map object.
     base:    VPath,
+    /// Binds the value type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -95,8 +98,11 @@ impl<'t, T: AData> ARef<'t> for Map<'t, T> {
 
 /// A read/write accessor for a `String`-keyed map of `T`.
 pub struct MapMut<'t, T: AData> {
+    /// The cursor this accessor reads and writes through.
     writer:  Arc<dyn Writer + 't>,
+    /// The intra-value path of the map object.
     base:    VPath,
+    /// Binds the value type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 

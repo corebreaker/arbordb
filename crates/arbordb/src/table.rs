@@ -20,8 +20,11 @@ use crate::perm::Principal;
 /// serialized by the engine.
 #[derive(Clone)]
 pub struct Table {
+    /// The database-wide shared state.
     inner: Arc<DbInner>,
+    /// This table's name.
     name:  String,
+    /// This table's shared path/blob cache.
     cache: Arc<PathCache>,
 
     /// The identity transactions from this handle act as (carried from the

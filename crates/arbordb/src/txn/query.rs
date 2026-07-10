@@ -20,10 +20,15 @@ use crate::{
 /// A pending index query: an exact or prefix match against an index, optionally
 /// reversed or subtree-scoped. Build it up, then [`run`](IndexQuery::run).
 pub struct IndexQuery<'t> {
+    /// The transaction the query runs against.
     txn:     &'t ReadTxn,
+    /// The name of the index to scan.
     index:   String,
+    /// The leading column values to match (empty matches every entity).
     prefix:  Vec<Scalar>,
+    /// Whether to return hits in reverse index order.
     reverse: bool,
+    /// The subtree scope; only entities at or under it are kept.
     root:    APath,
 }
 

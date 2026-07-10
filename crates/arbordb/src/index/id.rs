@@ -1,3 +1,6 @@
+//! [`IndexId`] — the compact numeric handle a named index is mapped to internally,
+//! keeping physical index keys short.
+
 /// Internal compact identifier for a named index.
 ///
 /// Index names are mapped to a small numeric id in `$metadata` so that index keys

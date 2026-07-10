@@ -70,7 +70,7 @@ mod value;
 mod vnode;
 
 #[cfg(feature = "permissions")]
-mod perm;
+mod crypto;
 
 pub mod access;
 pub mod data;
@@ -82,15 +82,8 @@ pub mod txn;
 #[cfg(feature = "permissions")]
 pub mod acl;
 
-pub use self::{
-    data::AData,
-    db::ArborDb,
-    error::{AdbError, AdbResult},
-    key::AKey,
-    vnode::NodeKind,
-    table::Table,
-    value::Value,
-};
+#[cfg(feature = "permissions")]
+pub mod perm;
 
 /// The per-inode timestamps exposed by the `entry-timestamps` feature.
 #[cfg(feature = "entry-timestamps")]
@@ -101,6 +94,16 @@ pub mod entry {
 
     pub use crate::engine::{Entry, EntryKind};
 }
+
+pub use self::{
+    data::AData,
+    db::ArborDb,
+    error::{AdbError, AdbResult},
+    key::AKey,
+    vnode::NodeKind,
+    table::Table,
+    value::Value,
+};
 
 /// Derives [`AData`] for a struct, generating its `ArborXxx` / `ArborXxxMut`
 /// accessors and an `ArborXxxDesc` companion. Shares the `AData` name with the

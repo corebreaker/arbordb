@@ -13,12 +13,12 @@ use crate::{
 /// single leaf), so decomposition is uniform: every field is stored and loaded
 /// through this same trait, at a [`VPath`] relative to the value's root.
 pub trait AData: Sized {
-    /// Read accessor produced by `ReadTxn::fetch` (an `ArborXxx` or [`Leaf`](super::Leaf)).
-    type Ref<'t>: ARef<'t>;
-
     /// Write accessor produced by `WriteTxn::fetch_mut` (an `ArborXxxMut` or
     /// [`LeafMut`](super::LeafMut)).
     type Mut<'t>: AMut<'t>;
+
+    /// Read accessor produced by `ReadTxn::fetch` (an `ArborXxx` or [`Leaf`](super::Leaf)).
+    type Ref<'t>: ARef<'t>;
 
     /// Writes `self` into the subtree rooted at `at`.
     fn store<W: Writer>(&self, writer: &W, at: &VPath) -> AdbResult<()>;

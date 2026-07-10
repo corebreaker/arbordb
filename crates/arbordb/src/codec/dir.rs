@@ -46,6 +46,7 @@ pub(crate) fn encode_dir(children: &BTreeMap<String, AKey>) -> Vec<u8> {
 
 /// A validated, zero-copy view over a directory blob.
 pub(crate) struct ArchivedDir<'a> {
+    /// The borrowed directory blob.
     blob: &'a [u8],
 }
 

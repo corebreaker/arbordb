@@ -20,8 +20,7 @@
 
 use arbordb::{data::Scalar, ArborDb, Table, Value};
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use std::collections::BTreeMap;
-use std::hint::black_box;
+use std::{collections::BTreeMap, hint::black_box};
 
 /// Field counts for the object sweep — up to a deliberately wide struct.
 const OBJECT_SIZES: [usize; 4] = [8, 32, 128, 512];

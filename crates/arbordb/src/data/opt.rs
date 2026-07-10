@@ -40,8 +40,11 @@ impl<T: AData> AData for Option<T> {
 
 /// A read accessor for an optional `T`.
 pub struct Opt<'t, T: AData> {
+    /// The cursor this accessor reads through.
     reader:  Arc<dyn Reader + 't>,
+    /// The intra-value path the optional value would occupy.
     base:    VPath,
+    /// Binds the inner type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 
@@ -85,8 +88,11 @@ impl<'t, T: AData> ARef<'t> for Opt<'t, T> {
 
 /// A read/write accessor for an optional `T`.
 pub struct OptMut<'t, T: AData> {
+    /// The cursor this accessor reads and writes through.
     writer:  Arc<dyn Writer + 't>,
+    /// The intra-value path the optional value would occupy.
     base:    VPath,
+    /// Binds the inner type `T` without storing one.
     _marker: PhantomData<fn() -> T>,
 }
 

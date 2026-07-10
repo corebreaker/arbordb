@@ -14,7 +14,6 @@
 //! reachable attack for a redb-only editor.
 
 use crate::AKey;
-
 use blake3::Hasher;
 
 /// The length of an integrity tag.

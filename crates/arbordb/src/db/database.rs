@@ -9,7 +9,11 @@ use crate::{
 };
 
 #[cfg(feature = "permissions")]
-use crate::perm::{self, Principal};
+use crate::perm::{
+    constants::{GUEST_USER, MASTER_UID, GUEST_UID},
+    Principal,
+    self,
+};
 
 use redb::{backends::InMemoryBackend, Database, ReadableDatabase, TableHandle};
 use std::{
@@ -22,6 +26,7 @@ use std::{
 /// named [`Table`]s.
 #[derive(Clone)]
 pub struct ArborDb {
+    /// The database-wide shared state, shared by every clone of this handle.
     inner: Arc<DbInner>,
 
     /// The identity this handle acts as. Re-authentication mints a new handle with
@@ -46,6 +51,12 @@ impl ArborDb {
         Self::wrap(Database::builder().create_with_backend(InMemoryBackend::new())?)
     }
 
+    /// Whether the database has a permission system installed — that is, whether it
+    /// has been promoted to a protected database by setting a master password
+    /// (`change_password` on an unprotected handle, `permissions` feature). A
+    /// protected database enforces authentication and per-vnode ACLs, and can only be
+    /// opened by a binary built with the `permissions` feature. Always `false` on a
+    /// build without that feature.
     pub fn is_protected(&self) -> AdbResult<bool> {
         #[cfg(feature = "permissions")]
         if cfg!(feature = "permissions") {
@@ -222,7 +233,7 @@ impl ArborDb {
     pub fn current_user(&self) -> Option<&str> {
         match self.principal.as_ref() {
             Principal::Unrestricted => None,
-            Principal::Guest => Some(crate::perm::GUEST_USER),
+            Principal::Guest => Some(GUEST_USER),
             Principal::User(session) => Some(session.name()),
         }
     }
@@ -348,7 +359,7 @@ impl ArborDb {
         }
         .ok_or_else(|| AdbError::CannotAccess(format!("no user named '{name}'")))?;
 
-        if uid == perm::MASTER_UID || uid == perm::GUEST_UID {
+        if uid == MASTER_UID || uid == GUEST_UID {
             return Err(AdbError::PermissionDenied(format!(
                 "the built-in user '{name}' cannot be removed"
             )));

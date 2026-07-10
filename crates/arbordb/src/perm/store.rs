@@ -5,11 +5,14 @@
 //! key `K` wrapped under that user's password. Authenticating unwraps `K`; a user
 //! with no keyring entry (the guest) simply cannot authenticate.
 
-use super::crypto::{self, KEY_LEN, NONCE_LEN, SALT_LEN};
-use super::principal::Session;
-use super::integrity;
-use super::{GUEST_UID, GUEST_USER, MASTER_GID, MASTER_GROUP, MASTER_UID, MASTER_USER, SUPER_GID, SUPER_GROUP};
+use super::{
+    constants::{GUEST_UID, GUEST_USER, MASTER_GID, MASTER_GROUP, MASTER_UID, MASTER_USER, SUPER_GID, SUPER_GROUP},
+    principal::Session,
+    integrity,
+};
+
 use crate::{
+    crypto::{self, KEY_LEN, NONCE_LEN, SALT_LEN},
     codec::{put_bytes, put_u32, Reader},
     constants::{META_CONTROL_MAC_KEY, META_EPOCH_KEY, META_GROUPS_KEY, META_USERS_KEY},
     engine::{data_def, required_features, require_feature, META_TABLE},
@@ -25,24 +28,35 @@ type MetaTable<'txn> = Table<'txn, &'static str, &'static [u8]>;
 
 /// The integrity key `K` wrapped under one user's password.
 struct KeyringEntry {
+    /// The per-user salt fed to the password key-derivation function.
     salt:    [u8; SALT_LEN],
+    /// The AEAD nonce used to wrap the integrity key.
     nonce:   [u8; NONCE_LEN],
+    /// The integrity key `K`, encrypted under the password-derived key.
     wrapped: Vec<u8>,
 }
 
 /// A stored user: identity, group memberships, frozen flag, and (unless the user
 /// has no password) its wrapped copy of the integrity key.
 struct UserRecord {
+    /// The user's name.
     name:    String,
+    /// The user's id.
     uid:     u32,
+    /// Whether the user is frozen (the guest): kept, but unable to authenticate or
+    /// be modified.
     frozen:  bool,
+    /// The ids of the groups the user belongs to.
     gids:    Vec<u32>,
+    /// The user's wrapped integrity key, or `None` for a passwordless user.
     keyring: Option<KeyringEntry>,
 }
 
 /// Every user plus the next id to allocate.
 struct Users {
+    /// The next user id to allocate.
     next_uid: u32,
+    /// Every stored user.
     users:    Vec<UserRecord>,
 }
 
@@ -136,13 +150,17 @@ impl Users {
 
 /// A stored group: a name and its id.
 struct GroupRecord {
+    /// The group's name.
     name: String,
+    /// The group's id.
     gid:  u32,
 }
 
 /// Every group plus the next id to allocate.
 struct Groups {
+    /// The next group id to allocate.
     next_gid: u32,
+    /// Every stored group.
     groups:   Vec<GroupRecord>,
 }
 
