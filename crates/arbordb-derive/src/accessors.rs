@@ -13,7 +13,7 @@ use syn::{Ident, Visibility};
 
 /// Generates both accessor types, their getters, and their trait impls.
 pub(crate) fn accessors(vis: &Visibility, ref_name: &Ident, mut_name: &Ident, fields: &[Field]) -> TokenStream {
-    let ref_getters = fields.iter().map(|field| {
+    let ref_getters = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
         let getter = field.ident;
         let ty = field.ty;
         let stored = &field.name;
@@ -28,7 +28,7 @@ pub(crate) fn accessors(vis: &Visibility, ref_name: &Ident, mut_name: &Ident, fi
         }
     });
 
-    let mut_getters = fields.iter().map(|field| {
+    let mut_getters = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
         let getter = format_ident!("{}_mut", field.ident);
         let ty = field.ty;
         let stored = &field.name;

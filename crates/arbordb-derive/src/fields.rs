@@ -8,14 +8,14 @@ use syn::{Data, DeriveInput, Fields, Ident, Type};
 /// One named field of the derived struct.
 pub(crate) struct Field<'a> {
     /// The field identifier (also the read getter name).
-    pub(crate) ident:   &'a Ident,
+    pub(crate) ident: &'a Ident,
     /// The field type.
-    pub(crate) ty:      &'a Type,
+    pub(crate) ty:    &'a Type,
     /// The stored node name: an explicit `rename`, else the container's
     /// `rename_all` applied to the identifier, else the identifier verbatim.
-    pub(crate) name:    String,
-    /// Extra names accepted on load (load-only; the stored name stays primary).
-    pub(crate) aliases: Vec<String>,
+    pub(crate) name:  String,
+    /// The field's parsed `#[arbor(...)]` attributes (aliases, skip family, default).
+    pub(crate) attrs: FieldAttrs,
 }
 
 /// Extracts the named fields of a struct, rejecting the shapes not yet supported
@@ -46,13 +46,14 @@ pub(crate) fn named_fields(input: &DeriveInput) -> syn::Result<Vec<Field<'_>>> {
 
             let name = attrs
                 .rename
+                .clone()
                 .unwrap_or_else(|| container.rename_all.apply_to_field(&ident.to_string()));
 
             Ok(Field {
                 ident,
                 ty: &field.ty,
                 name,
-                aliases: attrs.aliases,
+                attrs,
             })
         })
         .collect()

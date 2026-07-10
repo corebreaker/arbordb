@@ -6,6 +6,7 @@
 //! they never re-parse the `syn` AST for naming.
 
 mod container;
+mod default;
 mod field;
 mod rename;
 mod variant;

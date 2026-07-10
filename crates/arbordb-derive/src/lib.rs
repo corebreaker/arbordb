@@ -52,7 +52,11 @@ fn expand_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let ref_name = format_ident!("Arbor{}", name);
     let mut_name = format_ident!("Arbor{}Mut", name);
     let desc_name = format_ident!("Arbor{}Desc", name);
-    let field_names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
+    let field_names: Vec<String> = fields
+        .iter()
+        .filter(|field| field.attrs.in_shape())
+        .map(|field| field.name.clone())
+        .collect();
 
     let adata = adata::adata_impl(name, &ref_name, &mut_name, &fields);
     let accessors = accessors::accessors(vis, &ref_name, &mut_name, &fields);

@@ -336,3 +336,244 @@ fn enum_rename_all_variant_rename_and_alias() {
     // A node tagged "removed" (an alias for Deleted) still loads.
     assert_eq!(r.load::<Event>("legacy").unwrap(), Some(Event::Deleted));
 }
+
+// A plain type that does NOT implement AData — only Default. A `skip` field of
+// this type must still compile (no accessor, no store, no load through AData).
+#[derive(Debug, Default, PartialEq)]
+struct Scratch {
+    blob: Vec<u8>,
+}
+
+#[derive(AData, Debug, PartialEq)]
+struct HasSkipped {
+    id:      u32,
+    #[arbor(skip)]
+    scratch: Scratch,
+}
+
+#[test]
+fn skip_excludes_a_field_from_storage_and_loads_the_default() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<HasSkipped>(
+            "x",
+            &HasSkipped {
+                id:      3,
+                scratch: Scratch {
+                    blob: vec![1, 2, 3]
+                },
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // The skipped field is never stored, and loads as its Default.
+    assert_eq!(
+        r.load::<HasSkipped>("x").unwrap(),
+        Some(HasSkipped {
+            id:      3,
+            scratch: Scratch::default(),
+        }),
+    );
+    assert_eq!(r.get_as::<u32>("x", "id").unwrap(), Some(3));
+    assert!(r.get("x", "scratch").unwrap().is_none());
+
+    // Desc lists only the in-shape field.
+    assert_eq!(ArborHasSkippedDesc::FIELDS, &["id"]);
+}
+
+fn fallback_tag() -> String {
+    String::from("untagged")
+}
+
+#[derive(AData, Debug, PartialEq)]
+struct WithSkipDefault {
+    id:  u32,
+    #[arbor(skip, default = "fallback_tag")]
+    tag: String,
+}
+
+#[test]
+fn skip_with_a_default_path_uses_that_function() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<WithSkipDefault>(
+            "x",
+            &WithSkipDefault {
+                id:  1,
+                tag: String::from("ignored-on-store"),
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+    assert_eq!(
+        r.load::<WithSkipDefault>("x").unwrap(),
+        Some(WithSkipDefault {
+            id:  1,
+            tag: String::from("untagged"),
+        }),
+    );
+}
+
+#[derive(AData, Debug, PartialEq)]
+struct Timestamped {
+    value:  i64,
+    #[arbor(skip_load)]
+    cached: u32,
+}
+
+#[test]
+fn skip_load_stores_the_field_but_reads_the_default() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Timestamped>(
+            "x",
+            &Timestamped {
+                value: 7, cached: 99
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // The node IS written (99), but load ignores it and takes the default (0).
+    assert_eq!(r.get_as::<u32>("x", "cached").unwrap(), Some(99));
+    assert_eq!(
+        r.load::<Timestamped>("x").unwrap(),
+        Some(Timestamped {
+            value: 7, cached: 0
+        }),
+    );
+}
+
+// A "v1" writer without the `retries` node.
+#[derive(AData)]
+struct SettingsV1 {
+    name: String,
+}
+
+#[derive(AData, Debug, PartialEq)]
+struct SettingsV2 {
+    name:    String,
+    #[arbor(default)]
+    retries: u32,
+}
+
+#[test]
+fn default_fills_an_absent_field() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<SettingsV1>(
+            "old",
+            &SettingsV1 {
+                name: String::from("a"),
+            },
+        )
+        .unwrap();
+        w.store::<SettingsV2>(
+            "new",
+            &SettingsV2 {
+                name:    String::from("b"),
+                retries: 5,
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // The v1 blob has no `retries` node -> the default (0) fills it.
+    assert_eq!(
+        r.load::<SettingsV2>("old").unwrap(),
+        Some(SettingsV2 {
+            name:    String::from("a"),
+            retries: 0,
+        }),
+    );
+
+    // A present value is read as usual.
+    assert_eq!(
+        r.load::<SettingsV2>("new").unwrap(),
+        Some(SettingsV2 {
+            name:    String::from("b"),
+            retries: 5,
+        }),
+    );
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+#[derive(AData, Debug, PartialEq)]
+struct Sparse {
+    id:    u32,
+    #[arbor(skip_store_if = "is_zero", default)]
+    count: u32,
+}
+
+#[test]
+fn skip_store_if_conditionally_omits_a_field() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Sparse>(
+            "zero",
+            &Sparse {
+                id: 1, count: 0
+            },
+        )
+        .unwrap();
+        w.store::<Sparse>(
+            "some",
+            &Sparse {
+                id: 2, count: 7
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // Predicate true -> the node is omitted; load falls back to the default.
+    assert!(r.get("zero", "count").unwrap().is_none());
+    assert_eq!(
+        r.load::<Sparse>("zero").unwrap(),
+        Some(Sparse {
+            id: 1, count: 0
+        }),
+    );
+
+    // Predicate false -> the node is written and read back.
+    assert!(r.get("some", "count").unwrap().is_some());
+    assert_eq!(
+        r.load::<Sparse>("some").unwrap(),
+        Some(Sparse {
+            id: 2, count: 7
+        }),
+    );
+}
