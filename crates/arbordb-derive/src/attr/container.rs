@@ -2,6 +2,8 @@
 
 use crate::attr::rename::RenameRule;
 
+use proc_macro2::TokenStream;
+use quote::quote;
 use syn::{Attribute, LitStr, Type};
 
 /// Parsed container attributes.
@@ -16,6 +18,14 @@ pub(crate) struct ContainerAttrs {
     into:                  Option<Type>,
     /// `try_from = "U"`: load the value by reading a `U` and converting it fallibly.
     try_from:              Option<Type>,
+    /// `tag = "..."`: the field name carrying the variant tag (internal / adjacent).
+    tag:                   Option<String>,
+    /// `content = "..."`: the field name carrying the payload (adjacent tagging).
+    content:               Option<String>,
+    /// `untagged`: the payload is stored bare, with no variant tag.
+    untagged:              bool,
+    /// `expecting = "..."`: overrides the "no variant matched" load error message.
+    expecting:             Option<String>,
 }
 
 impl ContainerAttrs {
@@ -53,6 +63,30 @@ impl ContainerAttrs {
                     return Ok(());
                 }
 
+                if meta.path.is_ident("tag") {
+                    out.tag = Some(meta.value()?.parse::<LitStr>()?.value());
+
+                    return Ok(());
+                }
+
+                if meta.path.is_ident("content") {
+                    out.content = Some(meta.value()?.parse::<LitStr>()?.value());
+
+                    return Ok(());
+                }
+
+                if meta.path.is_ident("untagged") {
+                    out.untagged = true;
+
+                    return Ok(());
+                }
+
+                if meta.path.is_ident("expecting") {
+                    out.expecting = Some(meta.value()?.parse::<LitStr>()?.value());
+
+                    return Ok(());
+                }
+
                 Err(meta.error("unknown arbor container attribute"))
             })?;
         }
@@ -78,5 +112,29 @@ impl ContainerAttrs {
     /// Whether any of `from`/`into`/`try_from` makes this a delegated (stored-as-`U`) type.
     pub(crate) fn delegates(&self) -> bool {
         self.from.is_some() || self.into.is_some() || self.try_from.is_some()
+    }
+
+    /// The `tag` field name (internal / adjacent tagging).
+    pub(crate) fn tag(&self) -> Option<&str> {
+        self.tag.as_deref()
+    }
+
+    /// The `content` field name (adjacent tagging).
+    pub(crate) fn content(&self) -> Option<&str> {
+        self.content.as_deref()
+    }
+
+    /// Whether the enum is untagged.
+    pub(crate) fn untagged(&self) -> bool {
+        self.untagged
+    }
+
+    /// The error value for "no variant matched": the container's `expecting`
+    /// message if set, otherwise `default`.
+    pub(crate) fn no_match_error(&self, default: TokenStream) -> TokenStream {
+        match &self.expecting {
+            Some(message) => quote! { ::arbordb::AdbError::Corrupt(::std::string::String::from(#message)) },
+            None => quote! { ::arbordb::AdbError::Corrupt(#default) },
+        }
     }
 }

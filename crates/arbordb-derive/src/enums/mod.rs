@@ -1,0 +1,276 @@
+//! Codegen for `#[derive(AData)]` on enums (serde-style tagging representations).
+//!
+//! The default is EXTERNAL tagging: the value node is an object with ONE field
+//! named after the active variant's tag, holding the payload. `#[arbor(tag = ...)]`
+//! selects INTERNAL tagging, `tag` + `content` ADJACENT, and `untagged` UNTAGGED
+//! (see [`repr::EnumRepr`]). `store` clears the node first, so exactly one variant
+//! survives a change.
+//!
+//! The stored tag is the variant's `rename`, else the container's `rename_all`
+//! applied to the variant name, else the name verbatim. `alias` tags are accepted
+//! on load only. `#[arbor(other)]` marks a unit variant as the catch-all for an
+//! unknown tag; `#[arbor(expecting = "...")]` overrides the "no match" error.
+
+mod load;
+mod repr;
+mod store;
+
+use crate::attr::{ContainerAttrs, VariantAttrs};
+use crate::desc;
+use crate::enums::repr::EnumRepr;
+
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use syn::{DataEnum, DeriveInput, Error, Fields, Ident, Variant};
+
+/// One variant with its `#[arbor(...)]` naming resolved.
+struct VariantInfo<'a> {
+    /// The variant AST node (identifier + fields).
+    variant: &'a Variant,
+    /// The stored tag (primary name written on store).
+    tag:     String,
+    /// Extra tags accepted on load, in declaration order.
+    aliases: Vec<String>,
+    /// Whether this is the `#[arbor(other)]` catch-all variant.
+    other:   bool,
+}
+
+impl VariantInfo<'_> {
+    /// Whether the variant carries no payload.
+    fn is_unit(&self) -> bool {
+        matches!(self.variant.fields, Fields::Unit)
+    }
+}
+
+/// Expands `#[derive(AData)]` for an enum into its impl, accessors, and descriptor.
+pub(crate) fn expand_enum(
+    input: &DeriveInput,
+    data: &DataEnum,
+    container: &ContainerAttrs,
+) -> syn::Result<TokenStream> {
+    let name = &input.ident;
+    let vis = &input.vis;
+    let ref_name = format_ident!("Arbor{}", name);
+    let mut_name = format_ident!("Arbor{}Mut", name);
+    let desc_name = format_ident!("Arbor{}Desc", name);
+
+    let repr = EnumRepr::from_container(container, name)?;
+
+    let variants = data
+        .variants
+        .iter()
+        .map(|variant| {
+            let attrs = VariantAttrs::parse(&variant.attrs)?;
+
+            let tag = attrs
+                .rename
+                .unwrap_or_else(|| container.rename_all.apply_to_variant(&variant.ident.to_string()));
+
+            Ok(VariantInfo {
+                variant,
+                tag,
+                aliases: attrs.aliases,
+                other: attrs.other,
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    let other_variant = other_variant(&variants, &repr)?;
+
+    let store_arms = variants.iter().map(|info| store::store_arm(info, &repr));
+    let store_prelude = repr.store_prelude();
+    let load_body = load_body(&variants, &repr, container, other_variant);
+    let variant_names: Vec<String> = variants.iter().map(|info| info.tag.clone()).collect();
+
+    let adata = quote! {
+        #[automatically_derived]
+        impl ::arbordb::data::AData for #name {
+            type Ref<'t> = #ref_name<'t>;
+            type Mut<'t> = #mut_name<'t>;
+
+            fn store<__W: ::arbordb::access::Writer>(
+                &self,
+                writer: &__W,
+                at: &::arbordb::path::VPath,
+            ) -> ::arbordb::AdbResult<()> {
+                ::arbordb::access::Writer::remove(writer, at)?;
+                #store_prelude
+
+                match self {
+                    #(#store_arms)*
+                }
+
+                ::core::result::Result::Ok(())
+            }
+
+            fn load<__R: ::arbordb::access::Reader>(
+                reader: &__R,
+                at: &::arbordb::path::VPath,
+            ) -> ::arbordb::AdbResult<Self> {
+                #load_body
+            }
+        }
+    };
+
+    let accessors = accessors(input, &ref_name, &mut_name, &repr);
+    let desc = desc::desc_enum(vis, &desc_name, &name.to_string(), &variant_names);
+
+    Ok(quote! {
+        #adata
+        #accessors
+        #desc
+    })
+}
+
+/// Validates the `#[arbor(other)]` catch-all — at most one, unit, never untagged —
+/// and returns its identifier if present.
+fn other_variant<'a>(variants: &'a [VariantInfo<'a>], repr: &EnumRepr) -> syn::Result<Option<&'a Ident>> {
+    let mut others = variants.iter().filter(|info| info.other);
+
+    match (others.next(), others.next()) {
+        (None, _) => Ok(None),
+        (Some(_), Some(second)) => Err(Error::new(
+            second.variant.ident.span(),
+            "at most one variant may be `#[arbor(other)]`",
+        )),
+        (Some(first), None) => {
+            if repr.is_untagged() {
+                return Err(Error::new(
+                    first.variant.ident.span(),
+                    "`#[arbor(other)]` is not supported on untagged enums",
+                ));
+            }
+
+            if !first.is_unit() {
+                return Err(Error::new(
+                    first.variant.ident.span(),
+                    "an `#[arbor(other)]` variant must be a unit variant",
+                ));
+            }
+
+            Ok(Some(&first.variant.ident))
+        }
+    }
+}
+
+/// The body of the `load` fn: try-each-in-order for untagged, else a tag match
+/// with a catch-all (the `other` variant or a "no match" error).
+fn load_body(
+    variants: &[VariantInfo],
+    repr: &EnumRepr,
+    container: &ContainerAttrs,
+    other_variant: Option<&Ident>,
+) -> TokenStream {
+    if repr.is_untagged() {
+        let attempts = variants.iter().map(load::untagged_arm);
+        let error = container.no_match_error(quote! { ::std::format!("no untagged variant matched at '{at}'") });
+
+        return quote! {
+            #(#attempts)*
+
+            ::core::result::Result::Err(#error)
+        };
+    }
+
+    let tag_load = repr.tag_load();
+
+    // The `other` variant is the match's catch-all, so it gets no arm of its own.
+    let load_arms = variants
+        .iter()
+        .filter(|info| !info.other)
+        .map(|info| load::load_arm(info, repr));
+
+    let catch_all = match other_variant {
+        Some(id) => quote! {
+            _ => ::core::result::Result::Ok(Self::#id),
+        },
+        None => {
+            let error = container.no_match_error(quote! { ::std::format!("unknown enum variant tag: {tag}") });
+
+            quote! {
+                _ => ::core::result::Result::Err(#error),
+            }
+        }
+    };
+
+    quote! {
+        #tag_load
+
+        match tag.as_str() {
+            #(#load_arms)*
+            #catch_all
+        }
+    }
+}
+
+/// The minimal enum accessors: read and write cursors exposing only `variant()`
+/// (the active tag). The full payload is recomposed with `load::<E>`.
+fn accessors(input: &DeriveInput, ref_name: &Ident, mut_name: &Ident, repr: &EnumRepr) -> TokenStream {
+    let vis = &input.vis;
+    let ref_variant = repr.variant_body(quote! { self.reader });
+    let mut_variant = repr.variant_body(quote! { self.writer });
+
+    quote! {
+        #[allow(dead_code)]
+        #vis struct #ref_name<'t> {
+            reader: ::std::sync::Arc<dyn ::arbordb::access::Reader + 't>,
+            base:   ::arbordb::path::VPath,
+        }
+
+        impl<'t> #ref_name<'t> {
+            /// The active variant's tag name.
+            #vis fn variant(&self) -> ::arbordb::AdbResult<::std::string::String> {
+                #ref_variant
+            }
+        }
+
+        impl<'t> ::arbordb::data::ARef<'t> for #ref_name<'t> {
+            fn open(
+                reader: ::std::sync::Arc<dyn ::arbordb::access::Reader + 't>,
+                base: ::arbordb::path::VPath,
+            ) -> Self {
+                Self {
+                    reader,
+                    base,
+                }
+            }
+        }
+
+        impl<'t> ::arbordb::data::AIdentifiable for #ref_name<'t> {
+            fn path(&self) -> &::arbordb::path::VPath {
+                &self.base
+            }
+        }
+
+        #[allow(dead_code)]
+        #vis struct #mut_name<'t> {
+            writer: ::std::sync::Arc<dyn ::arbordb::access::Writer + 't>,
+            base:   ::arbordb::path::VPath,
+        }
+
+        impl<'t> #mut_name<'t> {
+            /// The active variant's tag name.
+            #vis fn variant(&self) -> ::arbordb::AdbResult<::std::string::String> {
+                #mut_variant
+            }
+        }
+
+        impl<'t> ::arbordb::data::AMut<'t> for #mut_name<'t> {
+            fn open(
+                writer: ::std::sync::Arc<dyn ::arbordb::access::Writer + 't>,
+                base: ::arbordb::path::VPath,
+            ) -> Self {
+                Self {
+                    writer,
+                    base,
+                }
+            }
+        }
+
+        impl<'t> ::arbordb::data::AIdentifiable for #mut_name<'t> {
+            fn path(&self) -> &::arbordb::path::VPath {
+                &self.base
+            }
+        }
+    }
+}

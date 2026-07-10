@@ -762,3 +762,200 @@ fn try_from_delegation_reports_conversion_failures() {
     // ...and an invalid one surfaces the TryFrom error as an AdbError.
     assert!(r.load::<Percent>("bad").is_err());
 }
+
+// Internal tagging: the tag lives in a named field alongside the flattened payload.
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(tag = "type")]
+enum Msg {
+    Ping,
+    Move { x: i64, y: i64 },
+    Ids(i64, i64),
+}
+
+#[test]
+fn internal_tagging_flattens_the_payload() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Msg>("ping", &Msg::Ping).unwrap();
+        w.store::<Msg>(
+            "move",
+            &Msg::Move {
+                x: 1, y: 2
+            },
+        )
+        .unwrap();
+        w.store::<Msg>("ids", &Msg::Ids(7, 8)).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // Round-trips through every shape.
+    assert_eq!(r.load::<Msg>("ping").unwrap(), Some(Msg::Ping));
+    assert_eq!(
+        r.load::<Msg>("move").unwrap(),
+        Some(Msg::Move {
+            x: 1, y: 2
+        })
+    );
+    assert_eq!(r.load::<Msg>("ids").unwrap(), Some(Msg::Ids(7, 8)));
+
+    // The tag sits in the `type` field, and the struct payload is flattened
+    // (`x`/`y` directly under the node, not nested).
+    let view: ArborMsg<'static> = r.fetch("move").unwrap().unwrap();
+    assert_eq!(view.variant().unwrap(), "Move");
+    assert_eq!(r.get_as::<i64>("move", "x").unwrap(), Some(1));
+    assert_eq!(r.get_as::<i64>("move", "y").unwrap(), Some(2));
+
+    // Tuple elements are flattened under decimal-string keys.
+    assert_eq!(r.get_as::<i64>("ids", "0").unwrap(), Some(7));
+    assert_eq!(r.get_as::<i64>("ids", "1").unwrap(), Some(8));
+}
+
+// Adjacent tagging: the tag and the payload live in two named fields.
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(tag = "kind", content = "data")]
+enum Payload {
+    Empty,
+    Num(i64),
+    Pair { a: i64, b: i64 },
+}
+
+#[test]
+fn adjacent_tagging_splits_tag_and_content() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Payload>("empty", &Payload::Empty).unwrap();
+        w.store::<Payload>("num", &Payload::Num(5)).unwrap();
+        w.store::<Payload>(
+            "pair",
+            &Payload::Pair {
+                a: 1, b: 2
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // Round-trips through every shape.
+    assert_eq!(r.load::<Payload>("empty").unwrap(), Some(Payload::Empty));
+    assert_eq!(r.load::<Payload>("num").unwrap(), Some(Payload::Num(5)));
+    assert_eq!(
+        r.load::<Payload>("pair").unwrap(),
+        Some(Payload::Pair {
+            a: 1, b: 2
+        })
+    );
+
+    // The tag sits in `kind`; the payload sits in `data`.
+    let view: ArborPayload<'static> = r.fetch("num").unwrap().unwrap();
+    assert_eq!(view.variant().unwrap(), "Num");
+    assert_eq!(r.get_as::<i64>("num", "data").unwrap(), Some(5));
+    assert_eq!(r.get_as::<i64>("pair", "data/a").unwrap(), Some(1));
+    assert_eq!(r.get_as::<i64>("pair", "data/b").unwrap(), Some(2));
+}
+
+// Untagged: the payload is stored bare; load tries each variant in order.
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(untagged)]
+enum Value {
+    Int(i64),
+    Text(String),
+    Nothing,
+}
+
+#[test]
+fn untagged_stores_bare_and_tries_variants_in_order() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Value>("int", &Value::Int(5)).unwrap();
+        w.store::<Value>("text", &Value::Text(String::from("hi"))).unwrap();
+        w.store::<Value>("nothing", &Value::Nothing).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // The int is stored bare (loadable directly as an i64).
+    assert_eq!(r.load::<i64>("int").unwrap(), Some(5));
+
+    // Each round-trips by trying Int, then Text, then Nothing.
+    assert_eq!(r.load::<Value>("int").unwrap(), Some(Value::Int(5)));
+    assert_eq!(r.load::<Value>("text").unwrap(), Some(Value::Text(String::from("hi"))));
+    assert_eq!(r.load::<Value>("nothing").unwrap(), Some(Value::Nothing));
+}
+
+// An external-tagged enum used to write an arbitrary unknown tag.
+#[derive(AData)]
+enum Foreign {
+    #[arbor(rename = "Weird")]
+    Weird,
+}
+
+// External tagging with a catch-all `other` variant.
+#[derive(AData, Debug, Clone, PartialEq)]
+enum Level {
+    Low,
+    High,
+    #[arbor(other)]
+    Unknown,
+}
+
+#[test]
+fn other_variant_catches_unknown_tags() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Level>("low", &Level::Low).unwrap();
+        w.store::<Level>("unknown", &Level::Unknown).unwrap();
+        w.store::<Foreign>("weird", &Foreign::Weird).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // A known tag loads normally.
+    assert_eq!(r.load::<Level>("low").unwrap(), Some(Level::Low));
+
+    // The `other` variant's own tag, and any foreign tag, both land on it.
+    assert_eq!(r.load::<Level>("unknown").unwrap(), Some(Level::Unknown));
+    assert_eq!(r.load::<Level>("weird").unwrap(), Some(Level::Unknown));
+}
+
+// A tagged enum with a custom `expecting` message and no catch-all.
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(expecting = "a traffic light color")]
+enum Color {
+    Red,
+    Green,
+}
+
+#[test]
+fn expecting_customizes_the_no_match_error() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Foreign>("weird", &Foreign::Weird).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    let error = r.load::<Color>("weird").unwrap_err();
+    assert!(error.to_string().contains("a traffic light color"));
+}

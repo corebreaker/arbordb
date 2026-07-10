@@ -10,6 +10,8 @@ pub(crate) struct VariantAttrs {
     /// Extra tags accepted on load, in declaration order. The stored tag is
     /// always the primary one; aliases are load-only.
     pub(crate) aliases: Vec<String>,
+    /// Catch-all: an otherwise-unknown tag loads as this (unit) variant.
+    pub(crate) other:   bool,
 }
 
 impl VariantAttrs {
@@ -33,6 +35,12 @@ impl VariantAttrs {
                 if meta.path.is_ident("alias") {
                     let lit: LitStr = meta.value()?.parse()?;
                     out.aliases.push(lit.value());
+
+                    return Ok(());
+                }
+
+                if meta.path.is_ident("other") {
+                    out.other = true;
 
                     return Ok(());
                 }
