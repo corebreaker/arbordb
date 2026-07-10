@@ -73,7 +73,13 @@ impl Writer for MemWriter {
 
     fn ensure_container(&self, at: &VPath, list: bool) -> AdbResult<()> {
         let mut value = self.value.borrow_mut();
-        if value.subtree(at).is_none() {
+        let matches = match value.subtree(at) {
+            Some(Value::List(_)) => list,
+            Some(Value::Node(_)) => !list,
+            _ => false,
+        };
+
+        if !matches {
             let empty = if list {
                 Value::new_empty_list()
             } else {
