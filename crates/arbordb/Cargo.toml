@@ -37,6 +37,23 @@ required-features = ["derive"]
 name = "indexed"
 required-features = ["derive"]
 
+# All benches use a `#[derive(AData)]` entity, so they need the derive macro; each
+# is a criterion binary (`harness = false`).
+[[bench]]
+name = "reads"
+harness = false
+required-features = ["derive"]
+
+[[bench]]
+name = "writes"
+harness = false
+required-features = ["derive"]
+
+[[bench]]
+name = "indexes"
+harness = false
+required-features = ["derive"]
+
 [features]
 default = []
 derive = ["dep:arbordb-derive"]
