@@ -28,12 +28,14 @@ mod node;
 mod table;
 mod value;
 
+pub mod access;
 pub mod data;
 pub mod error;
 pub mod path;
 pub mod txn;
 
 pub use self::{
+    data::AData,
     db::ArborDb,
     engine::EntryKind,
     error::{AdbError, AdbResult},

@@ -241,6 +241,17 @@ impl Value {
         set_in(self, base.segments(), value)
     }
 
+    /// Removes the subtree at `path`, returning whether anything was removed. The
+    /// root path resets the whole value to the [`Null`](Scalar::Null) default. A
+    /// path that leads nowhere (or does not parse) is a no-op returning `false`.
+    pub fn remove_value(&mut self, path: impl IntoPath) -> bool {
+        let Ok(base) = path.into_path() else {
+            return false;
+        };
+
+        remove_in(self, base.segments())
+    }
+
     /// Borrows the subtree at `base`, following each segment (`Name` into objects,
     /// `Index` into lists); `None` if a segment leads nowhere.
     pub(crate) fn subtree(&self, base: &VPath) -> Option<&Value> {
@@ -319,6 +330,54 @@ fn build_fresh(segments: &[Segment], value: Value) -> Option<Value> {
         Segment::Index(0) => Some(Value::List(vec![build_fresh(rest, value)?])),
         Segment::Index(_) => None,
     }
+}
+
+/// Removes the node at `segments` from `target`. An empty path resets `target` to
+/// the default; otherwise it descends to the parent and drops the last segment.
+fn remove_in(target: &mut Value, segments: &[Segment]) -> bool {
+    let Some((last, head)) = segments.split_last() else {
+        *target = Value::default();
+
+        return true;
+    };
+
+    let Some(parent) = descend_mut(target, head) else {
+        return false;
+    };
+
+    match last {
+        Segment::Name(name) => match parent {
+            Value::Node(map) => map.remove(name.as_str()).is_some(),
+            _ => false,
+        },
+        Segment::Index(index) => match parent {
+            Value::List(list) => {
+                let index = *index as usize;
+                if index < list.len() {
+                    list.remove(index);
+
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Descends `segments` into `target` by mutable reference; `None` if a segment
+/// leads nowhere or hits the wrong container kind.
+fn descend_mut<'a>(mut current: &'a mut Value, segments: &[Segment]) -> Option<&'a mut Value> {
+    for segment in segments {
+        current = match (current, segment) {
+            (Value::Node(map), Segment::Name(name)) => map.get_mut(name.as_str())?,
+            (Value::List(list), Segment::Index(index)) => list.get_mut(*index as usize)?,
+            _ => return None,
+        };
+    }
+
+    Some(current)
 }
 
 impl Default for Value {

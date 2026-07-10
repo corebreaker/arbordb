@@ -11,7 +11,7 @@ mod read;
 mod reader;
 
 pub(crate) use self::{
-    archived::{ArchivedNode, ArchivedValue, decode, encode},
+    archived::{ArchivedValue, decode, encode},
     dir::{ArchivedDir, encode_dir},
     putters::{put_bytes, put_u32},
     reader::Reader,

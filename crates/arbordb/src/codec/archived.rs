@@ -26,6 +26,7 @@ use crate::{
     data::Scalar,
     error::{AdbError, AdbResult},
     node::NodeKind,
+    path::{Segment, VPath},
     value::Value,
 };
 
@@ -294,6 +295,30 @@ impl<'a> ArchivedNode<'a> {
         let bytes = slice(self.blob, name_off, name_len)?;
 
         std::str::from_utf8(bytes).map_err(|_| AdbError::Corrupt("invalid utf-8 in a field name".into()))
+    }
+
+    /// Follows a [`VPath`] from this node, returning the node it lands on, or
+    /// `None` if a segment leads nowhere.
+    pub(crate) fn navigate(self, at: &VPath) -> AdbResult<Option<ArchivedNode<'a>>> {
+        let mut node = self;
+        for segment in at.segments() {
+            let next = match segment {
+                Segment::Name(name) => node.get(name.as_str())?,
+                Segment::Index(index) => node.at(*index as usize)?,
+            };
+
+            match next {
+                Some(child) => node = child,
+                None => return Ok(None),
+            }
+        }
+
+        Ok(Some(node))
+    }
+
+    /// The field names of this object node, in name order.
+    pub(crate) fn object_keys(&self) -> AdbResult<Vec<String>> {
+        Ok(self.entries()?.into_iter().map(|(name, _)| name.to_string()).collect())
     }
 
     /// Materialises this node's subtree into an owned [`Value`].

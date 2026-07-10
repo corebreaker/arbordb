@@ -1,8 +1,14 @@
 //! The [`AValue`] trait, mapping Rust types to and from a [`Scalar`].
 
-use super::Scalar;
+use super::{
+    definition::AData,
+    leaf::{Leaf, LeafMut},
+    Scalar,
+};
 use crate::{
+    access::{Reader, Writer},
     error::{AdbError, AdbResult},
+    path::VPath,
     AKey,
 };
 
@@ -146,6 +152,51 @@ impl<T: AValue> AValue for Option<T> {
         }
     }
 }
+
+// Every scalar type is also `AData`: it stores as a single leaf, so a scalar field
+// and a composite field decompose through the same trait. The impls are concrete
+// (not a blanket over `AValue`) to stay coherent with the container and derived impls.
+macro_rules! scalar_adata {
+    ($t:ty) => {
+        impl AData for $t {
+            type Mut<'t> = LeafMut<'t, $t>;
+            type Ref<'t> = Leaf<'t, $t>;
+
+            fn store<W: Writer>(&self, writer: &W, at: &VPath) -> AdbResult<()> {
+                writer.put_scalar(at, self.to_scalar())
+            }
+
+            fn load<R: Reader>(reader: &R, at: &VPath) -> AdbResult<Self> {
+                match reader.scalar_at(at)? {
+                    Some(scalar) => <$t>::from_scalar(&scalar),
+                    None => Err(AdbError::PathNotFound(at.clone())),
+                }
+            }
+        }
+    };
+}
+
+scalar_adata!(bool);
+scalar_adata!(i8);
+scalar_adata!(i16);
+scalar_adata!(i32);
+scalar_adata!(i64);
+scalar_adata!(i128);
+scalar_adata!(u8);
+scalar_adata!(u16);
+scalar_adata!(u32);
+scalar_adata!(u64);
+scalar_adata!(u128);
+scalar_adata!(f32);
+scalar_adata!(f64);
+scalar_adata!(usize);
+scalar_adata!(isize);
+scalar_adata!(String);
+scalar_adata!(Uuid);
+scalar_adata!(NaiveDate);
+scalar_adata!(NaiveTime);
+scalar_adata!(DateTime<Utc>);
+scalar_adata!(TimeDelta);
 
 #[cfg(test)]
 mod tests {

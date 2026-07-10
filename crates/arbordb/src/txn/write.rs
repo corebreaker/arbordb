@@ -1,7 +1,9 @@
 //! The opaque write transaction: serialized mutation of one table.
 
 use crate::{
+    access::MemWriter,
     codec::{encode, encode_dir, ArchivedDir},
+    data::AData,
     db::DbInner,
     engine::{
         child_of,
@@ -16,7 +18,7 @@ use crate::{
         EntryKind,
     },
     error::{AdbError, AdbResult},
-    path::APath,
+    path::{APath, VPath},
     value::Value,
     AKey,
 };
@@ -43,10 +45,20 @@ impl WriteTxn {
         }
     }
 
-    /// Stores `value` as a file at `path`, creating parent directories as needed.
-    /// Replaces whatever was there: a file overwrite keeps the node's identity; a
-    /// directory is removed with its whole subtree first.
-    pub fn store(&self, path: impl AsRef<str>, value: &Value) -> AdbResult<()> {
+    /// Stores a typed value as a file at `path`, creating parent directories as
+    /// needed and replacing whatever was there. The value is decomposed into an
+    /// in-memory tree, then encoded to one blob.
+    pub fn store<T: AData>(&self, path: impl AsRef<str>, value: &T) -> AdbResult<()> {
+        let writer = MemWriter::new();
+        value.store(&writer, &VPath::root())?;
+
+        self.store_value(path, &writer.into_value())
+    }
+
+    /// Stores a dynamic [`Value`] as a file at `path`, creating parent directories
+    /// as needed. Replaces whatever was there: a file overwrite keeps the node's
+    /// identity; a directory is removed with its whole subtree first.
+    pub fn store_value(&self, path: impl AsRef<str>, value: &Value) -> AdbResult<()> {
         let path = APath::parse(path.as_ref())?;
         let Some((parent_path, name)) = path.split_last() else {
             return Err(AdbError::CannotAccess(String::from("cannot store a file at the root")));

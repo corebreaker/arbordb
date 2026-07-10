@@ -1,13 +1,14 @@
 //! The opaque read transaction: a consistent snapshot of one table.
 
 use crate::{
+    access::{ArchivedReader, Reader},
     cache::PathCache,
-    codec::{decode, ArchivedDir, ArchivedNode, ArchivedValue},
-    data::{AValue, Scalar},
+    codec::{decode, ArchivedDir, ArchivedValue},
+    data::{AData, ARef, AValue, Scalar},
     engine::{data_def, split, EntryBytes, EntryKind},
     error::{AdbError, AdbResult},
     node::NodeKind,
-    path::{APath, Segment, VPath},
+    path::{APath, VPath},
     value::Value,
     AKey,
 };
@@ -97,9 +98,9 @@ impl ReadTxn {
         Ok(Some(akey))
     }
 
-    /// Loads the whole [`Value`] stored in the file at `path`, or `None` if there
-    /// is nothing there. Errors if `path` names a directory.
-    pub fn load(&self, path: impl AsRef<str>) -> AdbResult<Option<Value>> {
+    /// Loads the whole dynamic [`Value`] stored in the file at `path`, or `None` if
+    /// there is nothing there. Errors if `path` names a directory.
+    pub fn load_value(&self, path: impl AsRef<str>) -> AdbResult<Option<Value>> {
         let path = APath::parse(path.as_ref())?;
         let Some(table) = self.open()? else {
             return Ok(None);
@@ -116,6 +117,62 @@ impl ReadTxn {
         let (kind, payload) = split(&blob)?;
         match kind {
             EntryKind::File => Ok(Some(decode(payload)?)),
+            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
+        }
+    }
+
+    /// Loads a typed value from the file at `path`, or `None` if absent. Errors if
+    /// `path` names a directory.
+    pub fn load<T: AData>(&self, path: impl AsRef<str>) -> AdbResult<Option<T>> {
+        let path = APath::parse(path.as_ref())?;
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        let Some(akey) = self.resolve_cached(&table, &path)? else {
+            return Ok(None);
+        };
+
+        let Some(blob) = self.entry_blob(&table, akey)? else {
+            return Ok(None);
+        };
+
+        let kind = split(&blob)?.0;
+        match kind {
+            EntryKind::File => {
+                // Skip the one-byte entry tag; the value payload starts at offset 1.
+                let reader = ArchivedReader::new(blob, 1);
+
+                Ok(Some(T::load(&reader, &VPath::root())?))
+            }
+            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
+        }
+    }
+
+    /// Opens a read accessor over the file at `path`, navigating its value blob
+    /// zero-copy. `None` if the file is absent; errors if `path` names a directory.
+    /// The accessor owns a snapshot of the blob, so it may outlive the transaction.
+    pub fn fetch<A: ARef<'static>>(&self, path: impl AsRef<str>) -> AdbResult<Option<A>> {
+        let path = APath::parse(path.as_ref())?;
+        let Some(table) = self.open()? else {
+            return Ok(None);
+        };
+
+        let Some(akey) = self.resolve_cached(&table, &path)? else {
+            return Ok(None);
+        };
+
+        let Some(blob) = self.entry_blob(&table, akey)? else {
+            return Ok(None);
+        };
+
+        let kind = split(&blob)?.0;
+        match kind {
+            EntryKind::File => {
+                let reader: Arc<dyn Reader> = Arc::new(ArchivedReader::new(blob, 1));
+
+                Ok(Some(A::open(reader, VPath::root())))
+            }
             EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
         }
     }
@@ -144,8 +201,7 @@ impl ReadTxn {
             return Ok(None);
         }
 
-        let root = ArchivedValue::new(payload)?.root();
-        let Some(node) = navigate(root, &at)? else {
+        let Some(node) = ArchivedValue::new(payload)?.root().navigate(&at)? else {
             return Ok(None);
         };
 
@@ -155,7 +211,7 @@ impl ReadTxn {
         }
     }
 
-    /// Reads a typed value at `at` inside the file at `path`.
+    /// Reads a typed scalar at `at` inside the file at `path`.
     pub fn get_as<V: AValue>(&self, path: impl AsRef<str>, at: impl AsRef<str>) -> AdbResult<Option<V>> {
         match self.get(path, at)? {
             Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
@@ -218,22 +274,4 @@ impl ReadTxn {
 
         Ok(out)
     }
-}
-
-/// Follows a [`VPath`] from `node`, returning the node it lands on, or `None` if a
-/// segment leads nowhere.
-fn navigate<'a>(mut node: ArchivedNode<'a>, at: &VPath) -> AdbResult<Option<ArchivedNode<'a>>> {
-    for segment in at.segments() {
-        let next = match segment {
-            Segment::Name(name) => node.get(name.as_str())?,
-            Segment::Index(index) => node.at(*index as usize)?,
-        };
-
-        match next {
-            Some(child) => node = child,
-            None => return Ok(None),
-        }
-    }
-
-    Ok(Some(node))
 }

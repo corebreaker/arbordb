@@ -18,17 +18,17 @@ fn stores_and_loads_a_value() {
     let table = db.open_table("t").unwrap();
 
     let w = table.write().unwrap();
-    w.store("users/alice", &user("Alice", 30)).unwrap();
+    w.store_value("users/alice", &user("Alice", 30)).unwrap();
     w.commit().unwrap();
 
     let r = table.read().unwrap();
-    assert_eq!(r.load("users/alice").unwrap(), Some(user("Alice", 30)));
+    assert_eq!(r.load_value("users/alice").unwrap(), Some(user("Alice", 30)));
     assert_eq!(
         r.get("users/alice", "name").unwrap(),
         Some(Scalar::Str(String::from("Alice")))
     );
     assert_eq!(r.get_as::<u32>("users/alice", "age").unwrap(), Some(30));
-    assert_eq!(r.load("users/bob").unwrap(), None);
+    assert_eq!(r.load_value("users/bob").unwrap(), None);
 }
 
 #[test]
@@ -37,8 +37,8 @@ fn reports_kinds_and_lists_a_directory() {
     let table = db.open_table("t").unwrap();
 
     let w = table.write().unwrap();
-    w.store("users/alice", &user("Alice", 30)).unwrap();
-    w.store("users/bob", &user("Bob", 40)).unwrap();
+    w.store_value("users/alice", &user("Alice", 30)).unwrap();
+    w.store_value("users/bob", &user("Bob", 40)).unwrap();
     w.mkdir("users/teams").unwrap();
     w.commit().unwrap();
 
@@ -75,7 +75,7 @@ fn navigates_nested_values_by_vpath() {
     );
 
     let w = table.write().unwrap();
-    w.store("p", &Value::Node(doc)).unwrap();
+    w.store_value("p", &Value::Node(doc)).unwrap();
     w.commit().unwrap();
 
     let r = table.read().unwrap();
@@ -95,12 +95,12 @@ fn overwrites_a_file_then_removes_it() {
 
     {
         let w = table.write().unwrap();
-        w.store("a/x", &user("X", 1)).unwrap();
+        w.store_value("a/x", &user("X", 1)).unwrap();
         w.commit().unwrap();
     }
     {
         let w = table.write().unwrap();
-        w.store("a/x", &user("X", 2)).unwrap();
+        w.store_value("a/x", &user("X", 2)).unwrap();
         w.commit().unwrap();
     }
 
@@ -117,7 +117,7 @@ fn overwrites_a_file_then_removes_it() {
     }
 
     let r = table.read().unwrap();
-    assert_eq!(r.load("a/x").unwrap(), None);
+    assert_eq!(r.load_value("a/x").unwrap(), None);
     assert!(r.exists("a").unwrap()); // the parent directory survives
 }
 
@@ -127,8 +127,8 @@ fn removing_a_directory_cascades() {
     let table = db.open_table("t").unwrap();
 
     let w = table.write().unwrap();
-    w.store("org/team/alice", &user("Alice", 30)).unwrap();
-    w.store("org/team/bob", &user("Bob", 40)).unwrap();
+    w.store_value("org/team/alice", &user("Alice", 30)).unwrap();
+    w.store_value("org/team/bob", &user("Bob", 40)).unwrap();
     w.commit().unwrap();
 
     let w = table.write().unwrap();
@@ -136,7 +136,7 @@ fn removing_a_directory_cascades() {
     w.commit().unwrap();
 
     let r = table.read().unwrap();
-    assert_eq!(r.load("org/team/alice").unwrap(), None);
+    assert_eq!(r.load_value("org/team/alice").unwrap(), None);
     assert!(!r.exists("org/team").unwrap());
     assert!(r.exists("org").unwrap());
 }
@@ -150,7 +150,7 @@ fn persists_across_reopen() {
         let db = ArborDb::create(&path).unwrap();
         let table = db.open_table("t").unwrap();
         let w = table.write().unwrap();
-        w.store("users/alice", &user("Alice", 30)).unwrap();
+        w.store_value("users/alice", &user("Alice", 30)).unwrap();
         w.commit().unwrap();
     }
 
@@ -158,7 +158,7 @@ fn persists_across_reopen() {
         let db = ArborDb::open(&path).unwrap();
         let table = db.open_table("t").unwrap();
         let r = table.read().unwrap();
-        assert_eq!(r.load("users/alice").unwrap(), Some(user("Alice", 30)));
+        assert_eq!(r.load_value("users/alice").unwrap(), Some(user("Alice", 30)));
     }
 }
 
@@ -177,8 +177,8 @@ fn moves_a_node_and_rejects_bad_targets() {
     let table = db.open_table("t").unwrap();
 
     let w = table.write().unwrap();
-    w.store("a/x", &user("X", 7)).unwrap();
-    w.store("d/f", &user("F", 1)).unwrap();
+    w.store_value("a/x", &user("X", 7)).unwrap();
+    w.store_value("d/f", &user("F", 1)).unwrap();
     w.commit().unwrap();
 
     let w = table.write().unwrap();
@@ -188,8 +188,8 @@ fn moves_a_node_and_rejects_bad_targets() {
     w.commit().unwrap();
 
     let r = table.read().unwrap();
-    assert_eq!(r.load("b/y").unwrap(), Some(user("X", 7)));
-    assert_eq!(r.load("a/x").unwrap(), None);
+    assert_eq!(r.load_value("b/y").unwrap(), Some(user("X", 7)));
+    assert_eq!(r.load_value("a/x").unwrap(), None);
     assert!(r.exists("d/f").unwrap());
 }
 
@@ -199,8 +199,8 @@ fn copies_a_subtree_independently() {
     let table = db.open_table("t").unwrap();
 
     let w = table.write().unwrap();
-    w.store("org/team/alice", &user("Alice", 30)).unwrap();
-    w.store("org/team/bob", &user("Bob", 40)).unwrap();
+    w.store_value("org/team/alice", &user("Alice", 30)).unwrap();
+    w.store_value("org/team/bob", &user("Bob", 40)).unwrap();
     w.commit().unwrap();
 
     let w = table.write().unwrap();
@@ -208,12 +208,12 @@ fn copies_a_subtree_independently() {
     w.commit().unwrap();
 
     let r = table.read().unwrap();
-    assert_eq!(r.load("backup/team/alice").unwrap(), Some(user("Alice", 30)));
-    assert_eq!(r.load("org/team/alice").unwrap(), Some(user("Alice", 30)));
+    assert_eq!(r.load_value("backup/team/alice").unwrap(), Some(user("Alice", 30)));
+    assert_eq!(r.load_value("org/team/alice").unwrap(), Some(user("Alice", 30)));
 
     // The copy is independent: overwriting the original leaves the copy untouched.
     let w = table.write().unwrap();
-    w.store("org/team/alice", &user("Alice", 99)).unwrap();
+    w.store_value("org/team/alice", &user("Alice", 99)).unwrap();
     w.commit().unwrap();
 
     let r = table.read().unwrap();
@@ -228,7 +228,7 @@ fn reads_stay_coherent_across_commits() {
 
     {
         let w = table.write().unwrap();
-        w.store("x", &user("X", 1)).unwrap();
+        w.store_value("x", &user("X", 1)).unwrap();
         w.commit().unwrap();
     }
 
@@ -240,7 +240,7 @@ fn reads_stay_coherent_across_commits() {
 
     {
         let w = table.write().unwrap();
-        w.store("x", &user("X", 2)).unwrap();
+        w.store_value("x", &user("X", 2)).unwrap();
         w.commit().unwrap();
     }
 

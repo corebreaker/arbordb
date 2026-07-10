@@ -1,9 +1,16 @@
-//! The typed data model: [`Scalar`] leaves and the [`AValue`] scalar-mapping trait.
-//!
-//! The composite `AData` trait, the container adapters, and the accessor types
-//! land with the typed layer in a later phase.
+//! The typed data model: [`Scalar`] leaves, the [`AValue`] scalar-mapping trait,
+//! the composite [`AData`] trait, and the accessor types.
 
+mod definition;
+mod leaf;
+mod refs;
 mod scalar;
 mod value;
 
-pub use self::{scalar::Scalar, value::AValue};
+pub use self::{
+    definition::AData,
+    leaf::{Leaf, LeafMut},
+    refs::{AIdentifiable, AMut, ARef},
+    scalar::Scalar,
+    value::AValue,
+};
