@@ -4,8 +4,7 @@
 //!
 //! Run with: `cargo run --example indexed --features derive`
 
-use arbordb::data::Scalar;
-use arbordb::{AData, AdbResult, ArborDb};
+use arbordb::{data::Scalar, AData, AdbResult, ArborDb};
 
 #[derive(AData, Debug, Clone, PartialEq)]
 #[arbor(index(name = "by_city_age", columns(city, age)))]

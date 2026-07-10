@@ -2,7 +2,6 @@
 
 use super::{IndexId, key};
 use crate::{error::AdbResult, AKey};
-
 use redb::ReadableTable;
 
 /// Every entity of index `id` whose encoded columns start with `cols_prefix`, in

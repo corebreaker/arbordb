@@ -12,7 +12,7 @@
 
 use crate::{
     codec::ArchivedDir,
-    engine::{split, EntryBytes, EntryKind, read_entry},
+    engine::{entry_split, EntryBytes, EntryKind, read_entry},
     error::{AdbError, AdbResult},
     path::APath,
     AKey,
@@ -121,7 +121,7 @@ impl Pattern {
                 } else {
                     // Past the mutation's path: it sits above these entities, so
                     // every child is in scope.
-                    for child in children(data, cur)? {
+                    for child in Self::children(data, cur)? {
                         self.walk(data, si + 1, child, scope, depth + 1, out)?;
                     }
                 }
@@ -130,26 +130,26 @@ impl Pattern {
 
         Ok(())
     }
-}
 
-/// The child keys of directory `akey` (empty if it is absent or not a directory).
-fn children<R>(data: &R, akey: AKey) -> AdbResult<Vec<AKey>>
-where
-    R: ReadableTable<u128, EntryBytes>, {
-    let Some(entry) = read_entry(data, akey)? else {
-        return Ok(Vec::new());
-    };
+    /// The child keys of directory `akey` (empty if it is absent or not a directory).
+    fn children<R>(data: &R, akey: AKey) -> AdbResult<Vec<AKey>>
+    where
+        R: ReadableTable<u128, EntryBytes>, {
+        let Some(entry) = read_entry(data, akey)? else {
+            return Ok(Vec::new());
+        };
 
-    let (kind, payload) = split(&entry)?;
-    if kind != EntryKind::Dir {
-        return Ok(Vec::new());
+        let (kind, payload) = entry_split(&entry)?;
+        if kind != EntryKind::Dir {
+            return Ok(Vec::new());
+        }
+
+        Ok(ArchivedDir::new(payload)?
+            .entries()?
+            .into_iter()
+            .map(|(_, child)| child)
+            .collect())
     }
-
-    Ok(ArchivedDir::new(payload)?
-        .entries()?
-        .into_iter()
-        .map(|(_, child)| child)
-        .collect())
 }
 
 #[cfg(test)]

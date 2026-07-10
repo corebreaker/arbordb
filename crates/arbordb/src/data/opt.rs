@@ -6,6 +6,7 @@ use super::{
     AData,
     Scalar,
 };
+
 use crate::{
     access::{Reader, Writer},
     error::AdbResult,

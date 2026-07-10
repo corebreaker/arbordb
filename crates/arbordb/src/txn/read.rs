@@ -1,13 +1,13 @@
 //! The opaque read transaction: a consistent snapshot of one table.
 
-use super::query::IndexQuery;
-use super::rooted::RootedRead;
+use super::{query::IndexQuery, rooted::RootedRead};
 use crate::{
     access::{ArchivedReader, Reader},
     cache::PathCache,
     codec::{decode, ArchivedDir, ArchivedValue},
     data::{AData, ARef, AValue, Scalar},
-    engine::{data_def, split, EntryBytes, EntryKind, INDEX_TABLE, META_TABLE},
+    engine::{data_def, get_entry_kind, entry_split, EntryBytes, INDEX_TABLE, META_TABLE},
+    entry::{Entry, EntryKind},
     error::{AdbError, AdbResult},
     index::{registry, scan, Pattern},
     node::NodeKind,
@@ -17,8 +17,7 @@ use crate::{
 };
 
 use redb::{ReadOnlyTable, ReadTransaction, ReadableTable, TableError};
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// A read transaction over one table — a consistent, concurrent snapshot.
 ///
@@ -86,7 +85,7 @@ impl ReadTxn {
                 return Ok(None);
             };
 
-            let (kind, payload) = split(&blob)?;
+            let (kind, payload) = entry_split(&blob)?;
             if kind != EntryKind::Dir {
                 return Ok(None);
             }
@@ -118,7 +117,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let (kind, payload) = split(&blob)?;
+        let (kind, payload) = entry_split(&blob)?;
         match kind {
             EntryKind::File => Ok(Some(decode(payload)?)),
             EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
@@ -141,8 +140,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let kind = split(&blob)?.0;
-        match kind {
+        match get_entry_kind(&blob)? {
             EntryKind::File => {
                 // Skip the one-byte entry tag; the value payload starts at offset 1.
                 let reader = ArchivedReader::new(blob, 1);
@@ -170,8 +168,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let kind = split(&blob)?.0;
-        match kind {
+        match get_entry_kind(&blob)? {
             EntryKind::File => {
                 let reader: Arc<dyn Reader> = Arc::new(ArchivedReader::new(blob, 1));
 
@@ -200,7 +197,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let (kind, payload) = split(&blob)?;
+        let (kind, payload) = entry_split(&blob)?;
         if kind != EntryKind::File {
             return Ok(None);
         }
@@ -235,7 +232,7 @@ impl ReadTxn {
         };
 
         match self.entry_blob(&table, akey)? {
-            Some(blob) => Ok(Some(split(&blob)?.0)),
+            Some(blob) => Ok(Some(get_entry_kind(&blob)?)),
             None => Ok(None),
         }
     }
@@ -347,7 +344,7 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        match split(&blob)?.0 {
+        match get_entry_kind(&blob)? {
             EntryKind::File => {
                 let reader = ArchivedReader::new(blob, 1);
 
@@ -359,7 +356,7 @@ impl ReadTxn {
 
     /// Lists the direct children of the directory at `path`, as `(name, kind)`
     /// pairs in name order. Errors if `path` names a file.
-    pub fn ls(&self, path: impl AsRef<str>) -> AdbResult<Vec<(String, EntryKind)>> {
+    pub fn ls(&self, path: impl AsRef<str>) -> AdbResult<Vec<Entry>> {
         let path = APath::parse(path.as_ref())?;
         let Some(table) = self.open()? else {
             return Ok(Vec::new());
@@ -373,7 +370,7 @@ impl ReadTxn {
             return Ok(Vec::new()); // the root directory, not yet materialized
         };
 
-        let (kind, payload) = split(&blob)?;
+        let (kind, payload) = entry_split(&blob)?;
         if kind != EntryKind::Dir {
             return Err(AdbError::CannotAccess(format!("'{path}' is a file, not a directory")));
         }
@@ -385,7 +382,7 @@ impl ReadTxn {
                 .entry_blob(&table, child)?
                 .ok_or_else(|| AdbError::Corrupt("a directory entry points at a missing node".into()))?;
 
-            out.push((name.to_string(), split(&child_blob)?.0));
+            out.push(Entry::new(name.to_string(), get_entry_kind(&child_blob)?));
         }
 
         Ok(out)

@@ -15,7 +15,7 @@ use super::{IndexId, definitions::IndexDef, key, pattern::Pattern, registry::Ind
 use crate::{
     codec::ArchivedValue,
     data::Scalar,
-    engine::{split, EntryBytes, EntryKind, read_entry},
+    engine::{entry_split, EntryBytes, EntryKind, read_entry},
     error::{AdbError, AdbResult},
     node::NodeKind,
     path::{APath, VPath},
@@ -146,7 +146,7 @@ where
         return Ok(Scalar::Null);
     };
 
-    let (kind, payload) = split(&entry)?;
+    let (kind, payload) = entry_split(&entry)?;
     if kind != EntryKind::File {
         return Ok(Scalar::Null);
     }

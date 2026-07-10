@@ -28,6 +28,8 @@ pub struct IndexDef {
 }
 
 impl IndexDef {
+    /// Assembles a definition from its `name`, entity `pattern`, sort `columns`,
+    /// and uniqueness flag.
     pub fn new(name: String, pattern: String, columns: Vec<IndexColumn>, unique: bool) -> Self {
         Self {
             name,
@@ -106,18 +108,22 @@ impl IndexDef {
         cols
     }
 
+    /// The index name (unique per table).
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    /// The path pattern selecting indexed entities.
     pub fn pattern(&self) -> &str {
         &self.pattern
     }
 
+    /// The sort-key columns, in priority order.
     pub fn columns(&self) -> &Vec<IndexColumn> {
         &self.columns
     }
 
+    /// Whether the column tuple must be unique across entities.
     pub fn unique(&self) -> bool {
         self.unique
     }

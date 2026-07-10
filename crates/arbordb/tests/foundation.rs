@@ -1,6 +1,12 @@
 //! Foundation storage tests: the virtual-filesystem API and value round-trips.
 
-use arbordb::{data::Scalar, ArborDb, EntryKind, Value};
+use arbordb::{
+    data::Scalar,
+    entry::{Entry, EntryKind},
+    ArborDb,
+    Value,
+};
+
 use std::collections::BTreeMap;
 
 /// A small `{ name, age }` document.
@@ -52,9 +58,9 @@ fn reports_kinds_and_lists_a_directory() {
     assert_eq!(
         r.ls("users").unwrap(),
         vec![
-            (String::from("alice"), EntryKind::File),
-            (String::from("bob"), EntryKind::File),
-            (String::from("teams"), EntryKind::Dir),
+            Entry::new(String::from("alice"), EntryKind::File),
+            Entry::new(String::from("bob"), EntryKind::File),
+            Entry::new(String::from("teams"), EntryKind::Dir),
         ]
     );
 }

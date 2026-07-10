@@ -6,7 +6,7 @@ use crate::{
     Value,
 };
 
-/// A [`WriteTxn`](crate::txn::WriteTxn) whose access paths are relative to a fixed root.
+/// A [`WriteTxn`] whose access paths are relative to a fixed root.
 pub struct RootedWrite<'a> {
     txn:  &'a WriteTxn,
     root: APath,

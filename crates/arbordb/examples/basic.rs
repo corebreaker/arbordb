@@ -3,9 +3,8 @@
 //!
 //! Run with: `cargo run --example basic`
 
-use std::collections::BTreeMap;
-
 use arbordb::{data::Scalar, AdbResult, ArborDb, Value};
+use std::collections::BTreeMap;
 
 fn user(name: &str, age: i64) -> Value {
     Value::Node(BTreeMap::from([
@@ -28,12 +27,15 @@ fn main() -> AdbResult<()> {
     }
 
     let r = table.read()?;
-
     println!("alice's age: {:?}", r.get_as::<i64>("users/alice", "age")?);
 
-    let names: Vec<String> = r.ls("users")?.into_iter().map(|(name, _)| name).collect();
-    println!("users/: {names:?}");
+    let names: Vec<String> = r
+        .ls("users")?
+        .into_iter()
+        .map(|entry| entry.name().to_string())
+        .collect();
 
+    println!("users/: {names:?}");
     println!("archived copy age: {:?}", r.get_as::<i64>("archive/alice", "age")?);
 
     Ok(())

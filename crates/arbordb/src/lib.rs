@@ -58,8 +58,8 @@
 mod cache;
 mod codec;
 mod constants;
-mod datetime;
 mod db;
+mod decode_time;
 mod engine;
 mod error;
 mod key;
@@ -76,13 +76,18 @@ pub mod txn;
 pub use self::{
     data::AData,
     db::ArborDb,
-    engine::EntryKind,
     error::{AdbError, AdbResult},
     key::AKey,
     node::NodeKind,
     table::Table,
     value::Value,
 };
+
+pub mod entry {
+    //! Directory-listing types: the [`Entry`] rows (name + [`EntryKind`]) yielded by `ls`.
+
+    pub use crate::engine::{Entry, EntryKind};
+}
 
 /// Derives [`AData`] for a struct, generating its `ArborXxx` / `ArborXxxMut`
 /// accessors and an `ArborXxxDesc` companion. Shares the `AData` name with the

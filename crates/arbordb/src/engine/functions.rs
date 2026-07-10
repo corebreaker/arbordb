@@ -2,7 +2,7 @@
 //! the read-side directory-tree walk. The concrete engine (redb) is confined to
 //! this layer.
 
-use super::entry::{split, EntryKind};
+use super::entry::{get_entry_kind, entry_split, EntryKind};
 use crate::{
     codec::ArchivedDir,
     constants::{FORMAT_VERSION, INDEX_TABLE_NAME, META_FORMAT_VERSION_KEY, METADATA_TABLE_NAME},
@@ -74,11 +74,11 @@ where
 }
 
 /// The filesystem kind of node `akey`, or `None` if absent.
-pub(crate) fn entry_kind<R>(table: &R, akey: AKey) -> AdbResult<Option<EntryKind>>
+pub(crate) fn fetch_entry_kind<R>(table: &R, akey: AKey) -> AdbResult<Option<EntryKind>>
 where
     R: ReadableTable<u128, EntryBytes>, {
     match read_entry(table, akey)? {
-        Some(entry) => Ok(Some(split(&entry)?.0)),
+        Some(entry) => Ok(Some(get_entry_kind(&entry)?)),
         None => Ok(None),
     }
 }
@@ -92,7 +92,7 @@ where
         return Ok(None);
     };
 
-    let (kind, payload) = split(&entry)?;
+    let (kind, payload) = entry_split(&entry)?;
     if kind != EntryKind::Dir {
         return Ok(None);
     }

@@ -7,11 +7,11 @@
 //!
 //! Run with: `cargo bench -p arbordb --features derive --bench reads`.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use std::hint::black_box;
-
 mod common;
 use common::{ArborUser, User, DATASET};
+
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use std::hint::black_box;
 
 fn reads(c: &mut Criterion) {
     let (_db, table) = common::populated(DATASET, false);

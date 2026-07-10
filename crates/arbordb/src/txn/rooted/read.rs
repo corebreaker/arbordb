@@ -2,12 +2,12 @@ use super::super::{IndexQuery, ReadTxn};
 use crate::{
     data::{AData, AValue, ARef, Scalar},
     error::AdbResult,
+    entry::{Entry, EntryKind},
     path::APath,
-    EntryKind,
     Value,
 };
 
-/// A [`ReadTxn`](crate::txn::ReadTxn) whose access paths are relative to a fixed root.
+/// A [`ReadTxn`] whose access paths are relative to a fixed root.
 pub struct RootedRead<'a> {
     txn:  &'a ReadTxn,
     root: APath,
@@ -70,7 +70,7 @@ impl<'a> RootedRead<'a> {
     }
 
     /// Lists the direct children of the directory at `path` (relative to the root).
-    pub fn ls(&self, path: impl AsRef<str>) -> AdbResult<Vec<(String, EntryKind)>> {
+    pub fn ls(&self, path: impl AsRef<str>) -> AdbResult<Vec<Entry>> {
         self.txn.ls(self.absolute(path)?)
     }
 

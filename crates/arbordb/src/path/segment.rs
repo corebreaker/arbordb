@@ -1,3 +1,6 @@
+//! [`Segment`]: one component of a [`VPath`](super::VPath) — a field name or a
+//! list index — plus its inline-optimized storage.
+
 use smallvec::SmallVec;
 use smol_str::SmolStr;
 

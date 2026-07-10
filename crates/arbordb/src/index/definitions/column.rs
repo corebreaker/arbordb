@@ -12,6 +12,7 @@ pub struct IndexColumn {
 }
 
 impl IndexColumn {
+    /// A column over `path` with an explicit sort `direction`.
     pub(super) fn new(path: VPath, direction: Direction) -> Self {
         Self {
             path,
@@ -35,10 +36,12 @@ impl IndexColumn {
         }
     }
 
+    /// The column value's path, relative to a matched entity.
     pub fn path(&self) -> &VPath {
         &self.path
     }
 
+    /// This column's sort direction.
     pub fn direction(&self) -> Direction {
         self.direction
     }

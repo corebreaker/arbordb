@@ -1,3 +1,5 @@
+//! Shared path-parsing helpers: segment name validation and token parsing.
+
 use super::segment::{Segment, Segments};
 use crate::error::{AdbError, AdbResult};
 

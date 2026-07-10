@@ -1,3 +1,5 @@
+//! [`PathTail`]: a value appendable to a [`VPath`] with `/` and `/=`.
+
 use super::VPath;
 
 /// A value that can be appended to a [`VPath`] with `/` or `/=`.

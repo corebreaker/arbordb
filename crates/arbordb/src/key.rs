@@ -8,20 +8,6 @@ use std::{
     str::FromStr,
 };
 
-/// Opaque key identifying one node — a file or a directory — in the virtual
-/// filesystem.
-///
-/// An [`AKey`] is a node's **stable identity**: it survives renames and moves (a
-/// `mv` relinks the name, the key is unchanged). It addresses a whole file or
-/// directory, never a [`Scalar`](crate::data::Scalar) or a node *inside* a file's
-/// value (that is a [`VPath`](crate::path::VPath)). A fresh key is 128 random bits
-/// drawn from a fast per-thread generator (see [`generate`](Self::generate)):
-/// unique, fixed 16-byte size, and cheap to mint. Keys are only ever compared for
-/// equality and point-looked-up, so no time-ordering is needed. The internal
-/// representation is not part of the public API.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AKey(Uuid);
-
 thread_local! {
     /// splitmix64 state, seeded once per thread from OS entropy. A dedicated fast
     /// PRNG (not a clock + `getrandom` per key like a UUID v7/v4) — minting a key
@@ -39,28 +25,42 @@ fn seed() -> u64 {
     mixed | 1
 }
 
-/// One 64-bit splitmix64 draw, advancing `state`.
-fn splitmix64(state: &Cell<u64>) -> u64 {
-    let next = state.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
-    state.set(next);
-
-    let mut z = next;
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
-
-    z ^ (z >> 31)
-}
+/// Opaque key identifying one node — a file or a directory — in the virtual
+/// filesystem.
+///
+/// An [`AKey`] is a node's **stable identity**: it survives renames and moves (a
+/// `mv` relinks the name, the key is unchanged). It addresses a whole file or
+/// directory, never a [`Scalar`](crate::data::Scalar) or a node *inside* a file's
+/// value (that is a [`VPath`](crate::path::VPath)). A fresh key is 128 random bits
+/// drawn from a fast per-thread generator (see [`generate`](Self::generate)):
+/// unique, fixed 16-byte size, and cheap to mint. Keys are only ever compared for
+/// equality and point-looked-up, so no time-ordering is needed. The internal
+/// representation is not part of the public API.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AKey(Uuid);
 
 impl AKey {
     /// The fixed key of a table's root directory; path resolution walks from here.
     /// The nil UUID is distinct from any generated key (which is random).
     pub const ROOT: AKey = AKey(Uuid::nil());
 
+    /// One 64-bit split-mix64 draw, advancing `state`.
+    fn split_mix64(state: &Cell<u64>) -> u64 {
+        let next = state.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+        state.set(next);
+
+        let mut z = next;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+
+        z ^ (z >> 31)
+    }
+
     /// Generates a fresh, random key from the per-thread fast PRNG.
     pub fn generate() -> Self {
         KEY_RNG.with(|state| {
-            let hi = splitmix64(state);
-            let lo = splitmix64(state);
+            let hi = Self::split_mix64(state);
+            let lo = Self::split_mix64(state);
 
             Self(Uuid::from_u128((u128::from(hi) << 64) | u128::from(lo)))
         })

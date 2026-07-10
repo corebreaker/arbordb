@@ -4,12 +4,12 @@
 //!
 //! Run with: `cargo bench -p arbordb --features derive --bench indexes`.
 
+mod common;
+use common::{User, DATASET};
+
 use arbordb::data::Scalar;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use std::hint::black_box;
-
-mod common;
-use common::{User, DATASET};
 
 fn indexes(c: &mut Criterion) {
     let (_db, table) = common::populated(DATASET, true);

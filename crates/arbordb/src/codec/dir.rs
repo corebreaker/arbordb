@@ -11,6 +11,7 @@ use super::{
     put_u32,
     read::{read_u32, slice},
 };
+
 use crate::{
     error::{AdbError, AdbResult},
     AKey,

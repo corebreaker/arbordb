@@ -1,8 +1,6 @@
 //! Rooted transaction views: paths relative to a fixed root, and root-scoped queries.
 
-use arbordb::data::Scalar;
-use arbordb::{ArborDb, Value};
-
+use arbordb::{data::Scalar, ArborDb, Value};
 use std::collections::BTreeMap;
 
 fn user(age: i64) -> Value {
@@ -34,7 +32,13 @@ fn rooted_read_and_write_forward_relative_paths() {
     assert!(users.exists("carol").unwrap());
 
     // `ls("")` lists the view's own root, in name order.
-    let names: Vec<String> = users.ls("").unwrap().into_iter().map(|(name, _)| name).collect();
+    let names: Vec<String> = users
+        .ls("")
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name().to_string())
+        .collect();
+
     assert_eq!(names, ["alice", "carol"]);
 
     // A nested view descends further; the empty path addresses the nested root itself.

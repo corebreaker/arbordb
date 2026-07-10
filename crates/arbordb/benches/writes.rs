@@ -8,11 +8,11 @@
 //!
 //! Run with: `cargo bench -p arbordb --features derive --bench writes`.
 
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use std::hint::black_box;
-
 mod common;
 use common::{Ring, User, RING};
+
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use std::hint::black_box;
 
 fn writes(c: &mut Criterion) {
     let plain = Ring::new(false);

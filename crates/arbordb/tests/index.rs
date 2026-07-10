@@ -2,10 +2,14 @@
 
 #![cfg(feature = "derive")]
 
-use arbordb::data::Scalar;
-use arbordb::index::{IndexColumn, IndexDef};
-use arbordb::path::VPath;
-use arbordb::{AData, AdbError, ArborDb};
+use arbordb::{
+    data::Scalar,
+    index::{IndexColumn, IndexDef},
+    path::VPath,
+    AData,
+    AdbError,
+    ArborDb,
+};
 
 #[derive(AData, Debug, Clone, PartialEq)]
 #[arbor(index(name = "by_age", columns(age)))]

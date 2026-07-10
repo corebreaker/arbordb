@@ -1,3 +1,5 @@
+//! [`APath`]: a slash-separated, name-only address of a whole stored value.
+
 use super::functions::validate_name;
 use crate::error::{AdbError, AdbResult};
 use smallvec::SmallVec;

@@ -2,9 +2,10 @@
 
 use arbordb::{
     data::{Bytes, Seq},
+    entry::EntryKind,
     ArborDb,
-    EntryKind,
 };
+
 use std::collections::BTreeMap;
 
 #[test]

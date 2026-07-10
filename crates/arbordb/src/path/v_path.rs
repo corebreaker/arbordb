@@ -1,8 +1,11 @@
+//! [`VPath`]: an intra-value navigation path of field names and list indices.
+
 use super::{
     functions::parse_token,
     segment::{Segment, Segments},
     PathTail,
 };
+
 use crate::error::{AdbError, AdbResult};
 use std::{
     fmt::{Debug, Display, Formatter, Result as FmtResult},

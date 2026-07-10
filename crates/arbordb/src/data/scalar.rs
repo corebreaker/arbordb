@@ -2,7 +2,7 @@
 
 use crate::{
     codec::{self, Reader},
-    datetime::decode_time,
+    decode_time::decode_time,
     error::{AdbError, AdbResult},
 };
 
