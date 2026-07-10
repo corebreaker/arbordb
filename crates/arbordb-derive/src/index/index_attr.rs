@@ -1,11 +1,7 @@
 //! The parsed `#[arbor(index(...))]` declaration.
 
-use crate::index::column_spec::ColumnSpec;
-use crate::index::item::Item;
-
-use syn::parse::ParseStream;
-use syn::punctuated::Punctuated;
-use syn::{Error, LitStr, Token};
+use crate::index::{column_spec::ColumnSpec, item::Item};
+use syn::{parse::ParseStream, punctuated::Punctuated, Error, LitStr, Token, Result as SynResult};
 
 /// A parsed `index(name = "...", columns(...), unique)` declaration.
 pub(crate) struct IndexAttr {
@@ -17,7 +13,7 @@ pub(crate) struct IndexAttr {
 impl IndexAttr {
     /// Parses the body of an `index(...)` item — `input` is the parenthesized
     /// content (`name = "x", columns(a), unique`).
-    pub(crate) fn from_body(input: ParseStream) -> syn::Result<Self> {
+    pub(crate) fn from_body(input: ParseStream) -> SynResult<Self> {
         let span = input.span();
         let items = Punctuated::<Item, Token![,]>::parse_terminated(input)?;
 

@@ -12,9 +12,9 @@ pub(crate) type Bounds = Punctuated<WherePredicate, Token![,]>;
 /// by [`Generics::analyze`]; for a non-generic type every fragment is empty (bar
 /// the accessors' `'t`), so the generated code is unchanged.
 pub(crate) struct Generics {
-    adata_impl:     TokenStream,
-    adata_ty:       TokenStream,
-    adata_where:    TokenStream,
+    a_data_impl:    TokenStream,
+    a_data_ty:      TokenStream,
+    a_data_where:   TokenStream,
     accessor_impl:  TokenStream,
     accessor_ty:    TokenStream,
     accessor_where: TokenStream,
@@ -68,9 +68,9 @@ impl Generics {
         };
 
         Self {
-            adata_impl: quote! { #adata_impl },
-            adata_ty: quote! { #adata_ty },
-            adata_where: quote! { #adata_where },
+            a_data_impl: quote! { #adata_impl },
+            a_data_ty: quote! { #adata_ty },
+            a_data_where: quote! { #adata_where },
             accessor_impl: quote! { #accessor_impl },
             accessor_ty: quote! { #accessor_ty },
             accessor_where: quote! { #accessor_where },
@@ -81,17 +81,17 @@ impl Generics {
 
     /// The impl generics for the `AData` impl on the original type (`<T>`).
     pub(crate) fn adata_impl(&self) -> &TokenStream {
-        &self.adata_impl
+        &self.a_data_impl
     }
 
     /// The type generics for the original type (`<T>`).
     pub(crate) fn adata_ty(&self) -> &TokenStream {
-        &self.adata_ty
+        &self.a_data_ty
     }
 
     /// The where-clause for the `AData` impl (`where T: AData`, or the custom bound).
     pub(crate) fn adata_where(&self) -> &TokenStream {
-        &self.adata_where
+        &self.a_data_where
     }
 
     /// The accessor impl generics, including the extra `'t` (`<'t, T>`).

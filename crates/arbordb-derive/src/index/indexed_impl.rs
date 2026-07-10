@@ -1,12 +1,9 @@
 //! Codegen for the `AIndexed` impl from the `#[arbor(index(...))]` attributes.
 
-use crate::fields::Field;
-use crate::generics::Generics;
-use crate::index::IndexAttr;
-
+use crate::{fields::Field, generics::Generics, index::IndexAttr};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Error, Ident};
+use syn::{Error, Ident, Result as SynResult};
 
 /// Generates `impl AIndexed for #name`, turning each `index(...)` declaration into
 /// an `IndexDef` scoped to the caller-supplied `pattern`. A struct with no index
@@ -16,11 +13,11 @@ pub(crate) fn indexed_impl(
     fields: &[Field],
     indexes: &[IndexAttr],
     generics: &Generics,
-) -> syn::Result<TokenStream> {
+) -> SynResult<TokenStream> {
     // Every column must name a field of the struct.
     for index in indexes {
         for column in index.columns() {
-            if !fields.iter().any(|field| field.ident == column.field()) {
+            if !fields.iter().any(|field| field.ident() == column.field()) {
                 return Err(Error::new(
                     column.field().span(),
                     format!("index column `{col}` is not a field of `{name}`", col = column.field()),
@@ -36,10 +33,10 @@ pub(crate) fn indexed_impl(
             // The column path uses the field's STORED node name (rename-aware).
             let stored = fields
                 .iter()
-                .find(|field| field.ident == column.field())
+                .find(|field| field.ident() == column.field())
                 .expect("column validated above")
-                .name
-                .clone();
+                .name()
+                .to_string();
 
             let path = quote! { ::arbordb::path::VPath::root().child_name(#stored) };
 

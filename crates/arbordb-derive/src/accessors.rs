@@ -6,9 +6,7 @@
 //! getter, …). This is the ArborDb difference from StratoDb: navigation is by
 //! `VPath`, so no per-node key is resolved or stored.
 
-use crate::fields::Field;
-use crate::generics::Generics;
-
+use crate::{fields::Field, generics::Generics};
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Ident, Visibility};
@@ -21,15 +19,15 @@ pub(crate) fn accessors(
     fields: &[Field],
     generics: &Generics,
 ) -> TokenStream {
-    let ref_getters = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
-        let getter = field.ident;
-        let ty = field.ty;
+    let ref_getters = fields.iter().filter(|field| field.attrs().in_shape()).map(|field| {
+        let getter = field.ident();
+        let ty = field.ty();
 
         // A flattened field shares the parent's node: open the accessor right there.
-        let base = if field.attrs.is_flatten() {
+        let base = if field.attrs().is_flatten() {
             quote! { self.base.clone() }
         } else {
-            let stored = &field.name;
+            let stored = field.name();
 
             quote! { self.base.child_name(#stored) }
         };
@@ -44,15 +42,15 @@ pub(crate) fn accessors(
         }
     });
 
-    let mut_getters = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
-        let getter = format_ident!("{}_mut", field.ident);
-        let ty = field.ty;
+    let mut_getters = fields.iter().filter(|field| field.attrs().in_shape()).map(|field| {
+        let getter = format_ident!("{}_mut", field.ident());
+        let ty = field.ty();
 
         // A flattened field shares the parent's node: open the accessor right there.
-        let base = if field.attrs.is_flatten() {
+        let base = if field.attrs().is_flatten() {
             quote! { self.base.clone() }
         } else {
-            let stored = &field.name;
+            let stored = field.name();
 
             quote! { self.base.child_name(#stored) }
         };

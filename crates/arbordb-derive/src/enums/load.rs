@@ -1,8 +1,7 @@
 //! Load codegen for enum variants, per representation.
 
-use crate::enums::VariantInfo;
+use super::variant::VariantInfo;
 use crate::enums::repr::EnumRepr;
-
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Fields, Ident};
@@ -11,19 +10,16 @@ use syn::{Fields, Ident};
 /// dispatched to [`internal_load_arm`]). The arm matches the primary tag or any
 /// alias.
 pub(super) fn load_arm(info: &VariantInfo, repr: &EnumRepr) -> TokenStream {
-    if let EnumRepr::Internal {
-        ..
-    } = repr
-    {
+    if repr.is_internal() {
         return internal_load_arm(info);
     }
 
-    let id = &info.variant.ident;
-    let tag = &info.tag;
-    let aliases = &info.aliases;
+    let id = info.ident();
+    let tag = info.tag();
+    let aliases = info.aliases();
     let base = repr.payload_base_load();
 
-    match &info.variant.fields {
+    match info.fields() {
         Fields::Unit => quote! {
             #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#id),
         },
@@ -79,11 +75,11 @@ pub(super) fn load_arm(info: &VariantInfo, repr: &EnumRepr) -> TokenStream {
 /// Internal tagging: rebuild from the flattened object at `at`; tuple/newtype
 /// elements are keyed by their decimal index.
 fn internal_load_arm(info: &VariantInfo) -> TokenStream {
-    let id = &info.variant.ident;
-    let tag = &info.tag;
-    let aliases = &info.aliases;
+    let id = info.ident();
+    let tag = info.tag();
+    let aliases = info.aliases();
 
-    match &info.variant.fields {
+    match info.fields() {
         Fields::Unit => quote! {
             #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#id),
         },
@@ -122,9 +118,9 @@ fn internal_load_arm(info: &VariantInfo) -> TokenStream {
 /// Untagged: one attempt block per variant, tried in declaration order; the first
 /// that decodes wins.
 pub(super) fn untagged_arm(info: &VariantInfo) -> TokenStream {
-    let id = &info.variant.ident;
+    let id = info.ident();
 
-    match &info.variant.fields {
+    match info.fields() {
         Fields::Unit => quote! {
             if let ::core::result::Result::Ok(::core::option::Option::Some(::arbordb::data::Scalar::Null)) =
                 ::arbordb::access::Reader::scalar_at(reader, at)

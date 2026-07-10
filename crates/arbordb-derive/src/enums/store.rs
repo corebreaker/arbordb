@@ -1,8 +1,7 @@
 //! Store codegen for enum variants, per representation.
 
-use crate::enums::VariantInfo;
+use super::variant::VariantInfo;
 use crate::enums::repr::EnumRepr;
-
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Fields, Ident};
@@ -17,12 +16,12 @@ pub(super) fn store_arm(info: &VariantInfo, repr: &EnumRepr) -> TokenStream {
         return internal_store_arm(info, repr);
     }
 
-    let id = &info.variant.ident;
-    let tag = &info.tag;
+    let id = info.ident();
+    let tag = info.tag();
     let tag_store = repr.tag_store(tag);
     let base = repr.payload_base_store(tag);
 
-    match &info.variant.fields {
+    match info.fields() {
         Fields::Unit => {
             let unit_body = repr.unit_store(tag);
 
@@ -76,10 +75,10 @@ pub(super) fn store_arm(info: &VariantInfo, repr: &EnumRepr) -> TokenStream {
 /// Internal tagging: the tag plus the payload flattened into a single object at
 /// `at`; tuple/newtype elements are keyed by their decimal index.
 fn internal_store_arm(info: &VariantInfo, repr: &EnumRepr) -> TokenStream {
-    let id = &info.variant.ident;
-    let tag_store = repr.tag_store(&info.tag);
+    let id = info.ident();
+    let tag_store = repr.tag_store(info.tag());
 
-    match &info.variant.fields {
+    match info.fields() {
         Fields::Unit => quote! {
             Self::#id => {
                 #tag_store

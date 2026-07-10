@@ -1,7 +1,11 @@
 //! One column entry inside `columns(...)`: a field name plus an optional direction.
 
-use syn::parse::{Parse, ParseStream};
-use syn::{Error, Ident};
+use syn::{
+    parse::{Parse, ParseStream},
+    Error,
+    Ident,
+    Result as SynResult,
+};
 
 /// A column of an `index(...)`: a field identifier and its `asc` (default) / `desc`.
 pub(crate) struct ColumnSpec {
@@ -22,7 +26,7 @@ impl ColumnSpec {
 }
 
 impl Parse for ColumnSpec {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
+    fn parse(input: ParseStream) -> SynResult<Self> {
         let field = input.parse::<Ident>()?;
 
         let descending = if input.peek(Ident) {

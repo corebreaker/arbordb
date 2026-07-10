@@ -1,10 +1,15 @@
 //! One comma-separated entry inside `index(...)`: `name = "..."`, `columns(...)`, or `unique`.
 
 use crate::index::column_spec::ColumnSpec;
-
-use syn::parse::{Parse, ParseStream};
-use syn::punctuated::Punctuated;
-use syn::{Error, Ident, LitStr, Token};
+use syn::{
+    parse::{Parse, ParseStream},
+    punctuated::Punctuated,
+    Error,
+    Ident,
+    LitStr,
+    Token,
+    Result as SynResult,
+};
 
 /// One item of an `index(...)` declaration.
 pub(super) enum Item {
@@ -17,7 +22,7 @@ pub(super) enum Item {
 }
 
 impl Parse for Item {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
+    fn parse(input: ParseStream) -> SynResult<Self> {
         let key = input.parse::<Ident>()?;
 
         match key.to_string().as_str() {

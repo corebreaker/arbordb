@@ -1,14 +1,12 @@
 //! Codegen for the struct's `AData` impl (store / load).
 
-use crate::fields::Field;
-use crate::generics::Generics;
-
+use crate::{fields::Field, generics::Generics};
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Ident;
 
 /// Generates `impl AData for Struct`, storing/loading one child node per field.
-pub(crate) fn adata_impl(
+pub(crate) fn a_data_impl(
     name: &Ident,
     ref_name: &Ident,
     mut_name: &Ident,
@@ -17,19 +15,19 @@ pub(crate) fn adata_impl(
 ) -> TokenStream {
     // Only in-shape fields are written; `skip_store_if` makes the write conditional,
     // and `store_with` / `with` replace the field type's `AData::store`.
-    let stores = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
-        let ident = field.ident;
+    let stores = fields.iter().filter(|field| field.attrs().in_shape()).map(|field| {
+        let ident = field.ident();
 
         // Flattened: store the value at the parent's node, merging its fields in.
-        if field.attrs.is_flatten() {
+        if field.attrs().is_flatten() {
             return quote! {
                 ::arbordb::data::AData::store(&self.#ident, writer, at)?;
             };
         }
 
-        let stored = &field.name;
+        let stored = field.name();
 
-        let store = match field.attrs.store_fn() {
+        let store = match field.attrs().store_fn() {
             Some(path) => quote! {
                 #path(&self.#ident, writer, &at.child_name(#stored))?;
             },
@@ -38,7 +36,7 @@ pub(crate) fn adata_impl(
             },
         };
 
-        match &field.attrs.skip_store_if {
+        match &field.attrs().skip_store_if() {
             Some(predicate) => quote! {
                 if !#predicate(&self.#ident) {
                     #store
@@ -49,13 +47,13 @@ pub(crate) fn adata_impl(
     });
 
     let loads = fields.iter().map(|field| {
-        let ident = field.ident;
-        let ty = field.ty;
-        let stored = &field.name;
+        let ident = field.ident();
+        let ty = field.ty();
+        let stored = field.name();
 
         // Out of shape or `skip_load`: never read the node — produce the default.
-        if !field.attrs.loads_from_node() {
-            let default = field.attrs.default_expr();
+        if !field.attrs().loads_from_node() {
+            let default = field.attrs().default_expr();
 
             return quote! {
                 #ident: #default,
@@ -63,21 +61,21 @@ pub(crate) fn adata_impl(
         }
 
         // Flattened: the value occupies the parent's node, so load from `at` directly.
-        if field.attrs.is_flatten() {
+        if field.attrs().is_flatten() {
             return quote! {
                 #ident: <#ty as ::arbordb::data::AData>::load(reader, at)?,
             };
         }
 
         // `load_with` / `with` replace the field type's `AData::load`.
-        let load_fn = field.attrs.load_fn();
+        let load_fn = field.attrs().load_fn();
         let load_from = |name: TokenStream| match &load_fn {
             Some(path) => quote! { #path(reader, &#name)? },
             None => quote! { <#ty as ::arbordb::data::AData>::load(reader, &#name)? },
         };
 
         // Fast path: no aliases and no default — load straight from the stored name.
-        if field.attrs.aliases.is_empty() && field.attrs.default.is_none() {
+        if field.attrs().aliases().is_empty() && field.attrs().field_default().is_none() {
             let load = load_from(quote! { at.child_name(#stored) });
 
             return quote! {
@@ -87,10 +85,10 @@ pub(crate) fn adata_impl(
 
         // Resolve the primary name, then each alias in order; on none present fall
         // back to the default when set, else to a direct (erroring) primary load.
-        let aliases = &field.attrs.aliases;
+        let aliases = &field.attrs().aliases();
         let chosen_load = load_from(quote! { at.child_name(__candidate) });
-        let fallback = match &field.attrs.default {
-            Some(_) => field.attrs.default_expr(),
+        let fallback = match field.attrs().field_default() {
+            Some(_) => field.attrs().default_expr(),
             None => load_from(quote! { at.child_name(#stored) }),
         };
 

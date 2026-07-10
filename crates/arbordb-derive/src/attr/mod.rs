@@ -9,8 +9,7 @@ mod container;
 mod default;
 mod field;
 mod rename;
+mod strings;
 mod variant;
 
-pub(crate) use container::ContainerAttrs;
-pub(crate) use field::FieldAttrs;
-pub(crate) use variant::VariantAttrs;
+pub(crate) use self::{container::ContainerAttrs, field::FieldAttrs, variant::VariantAttrs};

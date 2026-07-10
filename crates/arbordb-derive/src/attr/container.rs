@@ -1,12 +1,9 @@
 //! Container-level `#[arbor(...)]` attributes (on the struct or enum itself).
 
-use crate::attr::rename::RenameRule;
-use crate::generics::Bounds;
-use crate::index::IndexAttr;
-
+use crate::{attr::rename::RenameRule, generics::Bounds, index::IndexAttr};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Attribute, LitStr, Type};
+use syn::{Attribute, LitStr, Type, Result as SynResult};
 
 /// Parsed container attributes.
 #[derive(Default)]
@@ -37,7 +34,7 @@ pub(crate) struct ContainerAttrs {
 
 impl ContainerAttrs {
     /// Parses the `#[arbor(...)]` attributes attached to a container.
-    pub(crate) fn parse(attrs: &[Attribute]) -> syn::Result<Self> {
+    pub(crate) fn parse(attrs: &[Attribute]) -> SynResult<Self> {
         let mut out = Self::default();
 
         for attr in attrs {

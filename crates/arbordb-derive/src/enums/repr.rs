@@ -6,10 +6,9 @@
 //! payload bare and, on load, tries each variant in declaration order.
 
 use crate::attr::ContainerAttrs;
-
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{Error, Ident};
+use syn::{Error, Ident, Result as SynResult};
 
 /// How an enum maps onto the tree; `External` is the default.
 pub(super) enum EnumRepr {
@@ -35,7 +34,7 @@ pub(super) enum EnumRepr {
 impl EnumRepr {
     /// Derives the representation from the container attributes, rejecting the
     /// combinations that cannot hold.
-    pub(super) fn from_container(container: &ContainerAttrs, name: &Ident) -> syn::Result<Self> {
+    pub(super) fn from_container(container: &ContainerAttrs, name: &Ident) -> SynResult<Self> {
         match (container.tag(), container.content(), container.untagged()) {
             (None, None, false) => Ok(Self::External),
             (Some(tag), Some(content), false) => Ok(Self::Adjacent {
@@ -57,6 +56,11 @@ impl EnumRepr {
     /// Whether the enum stores no tag (payload bare, variants tried in order).
     pub(super) fn is_untagged(&self) -> bool {
         matches!(self, Self::Untagged)
+    }
+
+    /// Whether the tag lives inside the payload object (internal tagging).
+    pub(super) fn is_internal(&self) -> bool {
+        matches!(self, Self::Internal { .. })
     }
 
     /// The top-of-`store` statements after `remove`: object-shape the node for the

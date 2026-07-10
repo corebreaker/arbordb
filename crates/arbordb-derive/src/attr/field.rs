@@ -1,46 +1,44 @@
 //! Field-level `#[arbor(...)]` attributes.
 
-use crate::attr::default::FieldDefault;
-
+use super::default::FieldDefault;
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
-use syn::spanned::Spanned;
-use syn::{parse_quote, Attribute, LitStr, Path, Token};
+use syn::{spanned::Spanned, parse_quote, Attribute, LitStr, Path, Result as SynResult, Token};
 
 /// Parsed field attributes.
 #[derive(Default)]
 pub(crate) struct FieldAttrs {
     /// An explicit stored name, overriding the container's `rename_all`.
-    pub(crate) rename:        Option<String>,
+    rename:        Option<String>,
     /// Extra names accepted on load, in declaration order. The stored name is
     /// always the primary one; aliases are load-only.
-    pub(crate) aliases:       Vec<String>,
+    aliases:       Vec<String>,
     /// Never store or load this field; load produces the default.
-    pub(crate) skip:          bool,
+    skip:          bool,
     /// Never store this field; load produces the default (like `skip`).
-    pub(crate) skip_store:    bool,
+    skip_store:    bool,
     /// Store this field, but never read it on load; load produces the default.
-    pub(crate) skip_load:     bool,
+    skip_load:     bool,
     /// Skip storing when this predicate (`fn(&T) -> bool`) returns true.
-    pub(crate) skip_store_if: Option<Path>,
+    skip_store_if: Option<Path>,
     /// How to produce the value on load when the node is absent or the field is
     /// skipped.
-    pub(crate) default:       Option<FieldDefault>,
+    field_default: Option<FieldDefault>,
     /// Custom store function (`store_with = "path"`) replacing `AData::store`.
-    pub(crate) store_with:    Option<Path>,
+    store_with:    Option<Path>,
     /// Custom load function (`load_with = "path"`) replacing `AData::load`.
-    pub(crate) load_with:     Option<Path>,
+    load_with:     Option<Path>,
     /// Module supplying both `store` and `load` (`with = "module"`); sugar for the
     /// two above.
-    pub(crate) with:          Option<Path>,
+    with:          Option<Path>,
     /// Flatten the field's (object) value into the parent's node — stored and
     /// loaded at the parent's path rather than a named child.
-    pub(crate) flatten:       Option<Span>,
+    flatten:       Option<Span>,
 }
 
 impl FieldAttrs {
     /// Parses the `#[arbor(...)]` attributes attached to a field.
-    pub(crate) fn parse(attrs: &[Attribute]) -> syn::Result<Self> {
+    pub(crate) fn parse(attrs: &[Attribute]) -> SynResult<Self> {
         let mut out = Self::default();
 
         for attr in attrs {
@@ -86,7 +84,7 @@ impl FieldAttrs {
                 }
 
                 if meta.path.is_ident("default") {
-                    out.default = Some(if meta.input.peek(Token![=]) {
+                    out.field_default = Some(if meta.input.peek(Token![=]) {
                         FieldDefault::Path(meta.value()?.parse::<LitStr>()?.parse()?)
                     } else {
                         FieldDefault::Trait
@@ -128,6 +126,26 @@ impl FieldAttrs {
         Ok(out)
     }
 
+    /// The explicit stored name (`rename = "..."`), if set.
+    pub(crate) fn rename(&self) -> Option<&str> {
+        self.rename.as_deref()
+    }
+
+    /// Extra names accepted on load, in declaration order.
+    pub(crate) fn aliases(&self) -> &[String] {
+        &self.aliases
+    }
+
+    /// The `skip_store_if = "path"` predicate (`fn(&T) -> bool`), if set.
+    pub(crate) fn skip_store_if(&self) -> Option<&Path> {
+        self.skip_store_if.as_ref()
+    }
+
+    /// The `default` / `default = "path"` load fallback, if set.
+    pub(crate) fn field_default(&self) -> Option<&FieldDefault> {
+        self.field_default.as_ref()
+    }
+
     /// Whether the field has a stored node — written on store, navigable by an
     /// accessor, listed in `Desc`. False for `skip` / `skip_store`.
     pub(crate) fn in_shape(&self) -> bool {
@@ -143,7 +161,7 @@ impl FieldAttrs {
     /// The default-value expression: `path()` for `default = "path"`, else
     /// `Default::default()` (for `default`, `skip`, `skip_store`, or `skip_load`).
     pub(crate) fn default_expr(&self) -> TokenStream {
-        match &self.default {
+        match &self.field_default {
             Some(FieldDefault::Path(path)) => quote! { #path() },
             _ => quote! { ::core::default::Default::default() },
         }
@@ -174,7 +192,7 @@ impl FieldAttrs {
     }
 
     /// Rejects attribute combinations that cannot both hold.
-    fn check_conflicts(&self) -> syn::Result<()> {
+    fn check_conflicts(&self) -> SynResult<()> {
         // A flattened field has no named node of its own, so no other attribute applies.
         if let Some(span) = self.flatten
             && (self.rename.is_some()
@@ -183,7 +201,7 @@ impl FieldAttrs {
                 || self.skip_store
                 || self.skip_load
                 || self.skip_store_if.is_some()
-                || self.default.is_some()
+                || self.field_default.is_some()
                 || self.with.is_some()
                 || self.store_with.is_some()
                 || self.load_with.is_some())

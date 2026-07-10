@@ -6,19 +6,17 @@
 //! so newtype/tuple structs and enums are all accepted. No `ArborXxx` /
 //! `ArborXxxDesc` is generated; the accessors ARE `U`'s.
 
-use crate::attr::ContainerAttrs;
-use crate::generics::Generics;
-
+use crate::{attr::ContainerAttrs, generics::Generics};
 use proc_macro2::TokenStream;
 use quote::quote;
-use syn::{DeriveInput, Error};
+use syn::{DeriveInput, Error, Result as SynResult};
 
 /// Expands a delegated `AData` impl for a container carrying `from`/`into`/`try_from`.
 pub(crate) fn convert_impl(
     input: &DeriveInput,
     container: &ContainerAttrs,
     generics: &Generics,
-) -> syn::Result<TokenStream> {
+) -> SynResult<TokenStream> {
     let name = &input.ident;
 
     // Index columns name a struct's fields; a delegated type exposes none.

@@ -6,7 +6,8 @@
 //! characters pass through unchanged, and there is no acronym grouping
 //! (`HTTPServer` snakes to `h_t_t_p_server`).
 
-use syn::{Error, LitStr};
+use super::strings::{capitalize, lower_first, split_pascal};
+use syn::{Error, LitStr, Result as SynResult};
 
 /// A casing rule set by `#[arbor(rename_all = "...")]` on a container and applied
 /// to every field name / variant tag that has no explicit `rename`.
@@ -35,7 +36,7 @@ pub(crate) enum RenameRule {
 
 impl RenameRule {
     /// Parses a `rename_all` string literal, erroring on an unknown casing.
-    pub(crate) fn from_lit(lit: &LitStr) -> syn::Result<Self> {
+    pub(crate) fn from_lit(lit: &LitStr) -> SynResult<Self> {
         let rule = match lit.value().as_str() {
             "lowercase" => Self::Lower,
             "UPPERCASE" => Self::Upper,
@@ -84,45 +85,5 @@ impl RenameRule {
             Self::Kebab => split_pascal(variant, '-', false),
             Self::ScreamingKebab => split_pascal(variant, '-', true),
         }
-    }
-}
-
-/// Lower- or upper-cases `variant`, inserting `sep` before each interior capital
-/// (`FooBar` -> `foo_bar` / `FOO-BAR`).
-fn split_pascal(variant: &str, sep: char, screaming: bool) -> String {
-    let mut out = String::new();
-
-    for (i, ch) in variant.chars().enumerate() {
-        if i > 0 && ch.is_ascii_uppercase() {
-            out.push(sep);
-        }
-
-        out.push(if screaming {
-            ch.to_ascii_uppercase()
-        } else {
-            ch.to_ascii_lowercase()
-        });
-    }
-
-    out
-}
-
-/// Upper-cases the first character of `word`, leaving the rest unchanged.
-fn capitalize(word: &str) -> String {
-    let mut chars = word.chars();
-
-    match chars.next() {
-        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
-    }
-}
-
-/// Lower-cases the first character of `s`, leaving the rest unchanged.
-fn lower_first(s: &str) -> String {
-    let mut chars = s.chars();
-
-    match chars.next() {
-        Some(first) => first.to_ascii_lowercase().to_string() + chars.as_str(),
-        None => String::new(),
     }
 }
