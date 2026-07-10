@@ -27,6 +27,15 @@ arbordb-derive = { workspace = true, optional = true }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 tempfile = "3.27"
 
+# `basic` uses only the default API; the rest need the derive macro.
+[[example]]
+name = "typed"
+required-features = ["derive"]
+
+[[example]]
+name = "indexed"
+required-features = ["derive"]
+
 [features]
 default = []
 derive = ["dep:arbordb-derive"]
