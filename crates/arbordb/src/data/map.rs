@@ -1,4 +1,4 @@
-//! `BTreeMap<String, T>` as `AData`: an object node with one `T` node per entry.
+//! `BTreeMap<String, T>` as `AData`: an object vnode with one `T` vnode per entry.
 
 use super::{
     refs::{AIdentifiable, AMut, ARef},

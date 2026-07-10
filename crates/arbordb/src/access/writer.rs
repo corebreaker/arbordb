@@ -1,10 +1,10 @@
 //! Read/write access to one value's tree, addressed by an intra-value [`VPath`].
 
 use super::Reader;
-use crate::{data::Scalar, error::AdbResult, node::NodeKind, path::VPath};
+use crate::{data::Scalar, error::AdbResult, vnode::NodeKind, path::VPath};
 use std::sync::Arc;
 
-/// Read/write access to the node tree of a single value being built or edited.
+/// Read/write access to the vnode tree of a single value being built or edited.
 pub trait Writer: Reader {
     /// Sets `scalar` at `at`, creating missing containers along the way.
     fn put_scalar(&self, at: &VPath, scalar: Scalar) -> AdbResult<()>;

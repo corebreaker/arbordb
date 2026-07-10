@@ -13,7 +13,7 @@ use std::{
     str::FromStr,
 };
 
-/// A parsed value-path identifying a node inside a stored [`Value`](crate::Value).
+/// A parsed value-path identifying a vnode inside a stored [`Value`](crate::Value).
 ///
 /// Object fields are named (`a/b`); list elements are indexed (`a/t[5]`). It is
 /// the intra-value navigation path — the counterpart of an

@@ -7,7 +7,7 @@ use crate::{
     path::VPath,
 };
 
-/// A type that stores into, and loads from, one value's node tree.
+/// A type that stores into, and loads from, one value's vnode tree.
 ///
 /// Implemented automatically by `#[derive(AData)]`. Scalars implement it too (as a
 /// single leaf), so decomposition is uniform: every field is stored and loaded

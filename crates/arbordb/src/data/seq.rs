@@ -1,4 +1,4 @@
-//! `Vec<T>` as `AData`: a list node with one `T` node per element.
+//! `Vec<T>` as `AData`: a list vnode with one `T` vnode per element.
 
 use super::{
     refs::{AIdentifiable, AMut, ARef},

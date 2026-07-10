@@ -3,7 +3,7 @@
 //! Backs `WriteTxn::fetch_mut`. It is a thin, stateless handle — a borrow of the
 //! transaction plus the file's access path — so an `Arc` of it is `Send + Sync`.
 //! A scalar overwrite that keeps the leaf's byte width is patched into the blob in
-//! place — no decode, no re-encode; a structural change (adding or removing a node,
+//! place — no decode, no re-encode; a structural change (adding or removing a vnode,
 //! or a width-changing scalar) still re-encodes and rewrites the whole blob. Reads
 //! and structural edits load the current value; sequential edits accumulate because
 //! each reads the latest committed-in-txn state.
@@ -12,7 +12,7 @@ use super::{Reader, Writer};
 use crate::{
     data::Scalar,
     error::{AdbError, AdbResult},
-    node::NodeKind,
+    vnode::NodeKind,
     path::{APath, VPath},
     txn::WriteTxn,
     value::Value,

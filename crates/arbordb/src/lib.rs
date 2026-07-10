@@ -5,10 +5,10 @@
 //! a tree of objects, lists and scalar leaves — serialized into a **single blob**
 //! and navigated **zero-copy**: a dedicated codec reads a field straight out of
 //! the engine's page bytes, without decoding the rest. A *directory* maps child
-//! names to child nodes. Every node — file or directory — has an opaque, stable
+//! names to child nodes. Every vnode — file or directory — has an opaque, stable
 //! [`AKey`] identity that survives renames and moves.
 //!
-//! A node is addressed by an [`APath`](path::APath), a filesystem-like path of
+//! A vnode is addressed by an [`APath`](path::APath), a filesystem-like path of
 //! names (`users/alice`); navigation *inside* a file's value, down to a scalar
 //! leaf, uses a [`VPath`](path::VPath) (names plus list indices). The underlying
 //! storage engine is an implementation detail, never exposed in the public API.
@@ -25,6 +25,8 @@
 //!   with `#[arbor(index(...))]` or built with [`Table::create_index`], and queried with
 //!   [`ReadTxn::find`](txn::ReadTxn::find).
 //! - [Rooted views](txn::RootedRead) that make every path relative to a fixed root.
+//! - Optional per-vnode `created` / `modified` / `accessed` timestamps (`entry-timestamps`), and user/password
+//!   authentication with per-vnode ACLs and keyed-MAC tamper detection (`permissions`).
 //! - An optional big-number scalar/data feature matrix (`bignum`).
 //!
 //! # Quick start
@@ -59,13 +61,16 @@ mod cache;
 mod codec;
 mod constants;
 mod db;
-mod decode_time;
 mod engine;
 mod error;
 mod key;
-mod node;
 mod table;
+mod time;
 mod value;
+mod vnode;
+
+#[cfg(feature = "permissions")]
+mod perm;
 
 pub mod access;
 pub mod data;
@@ -73,15 +78,23 @@ pub mod index;
 pub mod path;
 pub mod txn;
 
+/// Public access-control types (`Mode`, `Rights`, `NodeAcl`) for the `permissions` feature.
+#[cfg(feature = "permissions")]
+pub mod acl;
+
 pub use self::{
     data::AData,
     db::ArborDb,
     error::{AdbError, AdbResult},
     key::AKey,
-    node::NodeKind,
+    vnode::NodeKind,
     table::Table,
     value::Value,
 };
+
+/// The per-inode timestamps exposed by the `entry-timestamps` feature.
+#[cfg(feature = "entry-timestamps")]
+pub mod inode;
 
 pub mod entry {
     //! Directory-listing types: the [`Entry`] rows (name + [`EntryKind`]) yielded by `ls`.

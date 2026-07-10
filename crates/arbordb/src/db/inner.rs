@@ -23,6 +23,12 @@ pub(crate) struct DbInner {
     generation:   AtomicU64,
     version_lock: RwLock<()>,
     caches:       Mutex<HashMap<String, Arc<PathCache>>>,
+
+    // Buffered vnode access times awaiting a flush to `$inodes`: reads record here
+    // (cheap, in memory) and a committed write or an explicit flush persists them.
+    // Keyed by `(table, vnode)`, valued by the latest access time (epoch millis).
+    #[cfg(feature = "entry-timestamps")]
+    access_log: Mutex<HashMap<(String, crate::AKey), i64>>,
 }
 
 impl DbInner {
@@ -38,6 +44,8 @@ impl DbInner {
             generation,
             version_lock,
             caches,
+            #[cfg(feature = "entry-timestamps")]
+            access_log: Mutex::new(HashMap::new()),
         }
     }
 
@@ -74,5 +82,34 @@ impl DbInner {
             .or_insert_with(|| Arc::new(PathCache::new()));
 
         Ok(Arc::clone(cache))
+    }
+
+    /// Buffers access times for `table`'s nodes, keeping the latest time per vnode.
+    /// Called when a read transaction ends; best-effort (a poisoned lock drops the
+    /// batch rather than propagating, since access times are advisory).
+    #[cfg(feature = "entry-timestamps")]
+    pub(crate) fn deposit_access(&self, table: &str, entries: Vec<(crate::AKey, i64)>) {
+        if entries.is_empty() {
+            return;
+        }
+
+        let Ok(mut log) = self.access_log.lock() else {
+            return;
+        };
+
+        for (akey, when) in entries {
+            log.entry((table.to_string(), akey))
+                .and_modify(|current| *current = (*current).max(when))
+                .or_insert(when);
+        }
+    }
+
+    /// Drains every buffered access time, for a flush into `$inodes`.
+    #[cfg(feature = "entry-timestamps")]
+    pub(crate) fn drain_access_log(&self) -> Vec<((String, crate::AKey), i64)> {
+        match self.access_log.lock() {
+            Ok(mut log) => log.drain().collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }

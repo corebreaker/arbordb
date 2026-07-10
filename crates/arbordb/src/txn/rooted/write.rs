@@ -48,7 +48,7 @@ impl<'a> RootedWrite<'a> {
         self.txn.mkdir(self.absolute(path)?)
     }
 
-    /// Removes the node at `path` (relative to the root). Reports if it existed.
+    /// Removes the vnode at `path` (relative to the root). Reports if it existed.
     pub fn rm(&self, path: impl IntoArborPath) -> AdbResult<bool> {
         self.txn.rm(self.absolute(path)?)
     }

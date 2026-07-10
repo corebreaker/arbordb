@@ -11,3 +11,6 @@ pub use self::{
     rooted::{RootedRead, RootedWrite},
     write::WriteTxn,
 };
+
+#[cfg(feature = "permissions")]
+pub(crate) use self::write::reap_owned_in;

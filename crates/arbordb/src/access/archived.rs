@@ -10,7 +10,7 @@ use crate::{
     codec::ArchivedValue,
     data::Scalar,
     error::{AdbError, AdbResult},
-    node::NodeKind,
+    vnode::NodeKind,
     path::VPath,
 };
 

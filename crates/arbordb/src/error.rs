@@ -29,18 +29,18 @@ pub enum AdbError {
     #[error("value not found: {0}")]
     ValueNotFound(APath),
 
-    /// No node exists at the requested path inside a value.
+    /// No vnode exists at the requested path inside a value.
     #[error("path not found: {0}")]
     PathNotFound(VPath),
 
-    /// The node at a path was not of the kind the operation required.
-    #[error("unexpected node at '{path}': expected {expected}, found {found}")]
+    /// The vnode at a path was not of the kind the operation required.
+    #[error("unexpected vnode at '{path}': expected {expected}, found {found}")]
     UnexpectedNode {
         /// The path that was being accessed.
         path:     VPath,
-        /// The node kind the operation required.
+        /// The vnode kind the operation required.
         expected: &'static str,
-        /// The node kind actually stored.
+        /// The vnode kind actually stored.
         found:    &'static str,
     },
 
@@ -108,6 +108,42 @@ pub enum AdbError {
     /// A `try_from` conversion (`#[arbor(try_from = ...)]`) rejected a loaded value.
     #[error("conversion failed: {0}")]
     Conversion(String),
+
+    /// The database file is access-controlled (it requires the `permissions`
+    /// feature), but this build was compiled without that feature.
+    #[error("this database is protected and requires the permissions feature to open")]
+    DatabaseProtected,
+
+    /// The database file requires an optional on-disk feature this build lacks.
+    #[error("this database requires the '{feature}' feature, which this build lacks")]
+    FeatureRequired {
+        /// The cargo feature name the file needs the reader to have been built with.
+        feature: String,
+    },
+
+    /// Authentication failed: the user is unknown or the password is wrong. The
+    /// two cases are deliberately indistinguishable.
+    #[error("authentication failed")]
+    AuthenticationFailed,
+
+    /// The authenticated principal lacks a right required for the operation.
+    #[error("permission denied: {0}")]
+    PermissionDenied(String),
+
+    /// An authenticated operation was attempted on a database that has no
+    /// permission system (it was created without the `permissions` feature).
+    #[error("this database has no permission system")]
+    NoPermissions,
+
+    /// A reserved (`$`-prefixed) table's contents failed their integrity check —
+    /// evidence of tampering or corruption outside the library.
+    #[error("integrity check failed: {0}")]
+    Tampered(String),
+
+    /// An operation targeted a frozen principal (such as moving the `guest` user
+    /// into a group), which is immutable by design.
+    #[error("'{0}' is frozen and cannot be modified")]
+    Frozen(String),
 }
 
 impl AdbError {

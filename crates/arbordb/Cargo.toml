@@ -21,14 +21,23 @@ thiserror = "2.0"
 uuid = { version = "1.23", features = ["v7"] }
 arbordb-derive = { workspace = true, optional = true }
 
+# Cryptography for the `permissions` feature (all optional). Passwords are never
+# stored: a per-user Argon2id-derived key wraps the database integrity key, and
+# authentication succeeds only if that unwrap does. BLAKE3 is the per-value MAC.
+argon2 = { version = "0.5", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+blake3 = { version = "1", optional = true }
+getrandom = { version = "0.2", optional = true }
+
 # ArborDb writes its own zero-copy codec, so there is deliberately NO rkyv dependency.
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 num-bigint = "0.4"  # the bignum cross-feature test constructs `BigInt`s directly
+redb = "4.1"        # the tamper tests edit the raw file the way an attacker with redb alone would
 tempfile = "3.27"
 
-# `basic` uses only the default API; the rest need the derive macro.
+# `basic` uses only the default API; the rest need a feature.
 [[example]]
 name = "typed"
 required-features = ["derive"]
@@ -36,6 +45,14 @@ required-features = ["derive"]
 [[example]]
 name = "indexed"
 required-features = ["derive"]
+
+[[example]]
+name = "timestamps"
+required-features = ["entry-timestamps"]
+
+[[example]]
+name = "permissions"
+required-features = ["permissions"]
 
 # All benches use a `#[derive(AData)]` entity, so they need the derive macro; each
 # is a criterion binary (`harness = false`).
@@ -75,10 +92,31 @@ required-features = ["derive"]
 name = "scaling"
 harness = false
 
+# `permissions` contrasts a protected database against an unprotected one, so it needs
+# the `permissions` feature on top of the derived entity.
+[[bench]]
+name = "permissions"
+harness = false
+required-features = ["derive", "permissions"]
+
 [features]
 default = []
 derive = ["dep:arbordb-derive"]
 parallel = ["dep:rayon"]
+# Per-vnode created/modified/accessed datetime, stored out-of-band in the reserved
+# `$inodes` table. A binary compiled without this feature never opens that table,
+# so it opens a timestamped database and simply ignores the timestamps.
+entry-timestamps = []
+# User/password authentication + ACLs. Implies `entry-timestamps`. A database
+# protected with this feature records it as required, so a binary compiled without
+# it refuses to open the file (see `AdbError::DatabaseProtected`).
+permissions = [
+    "entry-timestamps",
+    "dep:argon2",
+    "dep:chacha20poly1305",
+    "dep:blake3",
+    "dep:getrandom",
+]
 bignum = ["bignum-as-scalar", "bignum-as-data"]
 bignum-as-scalar = ["bigint-as-scalar", "bigfloat-as-scalar", "rational-as-scalar"]
 bigint-as-scalar = ["dep:num-bigint"]

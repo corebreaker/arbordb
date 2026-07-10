@@ -21,7 +21,7 @@ pub(crate) struct FieldAttrs {
     skip_load:     bool,
     /// Skip storing when this predicate (`fn(&T) -> bool`) returns true.
     skip_store_if: Option<Path>,
-    /// How to produce the value on load when the node is absent or the field is
+    /// How to produce the value on load when the vnode is absent or the field is
     /// skipped.
     field_default: Option<FieldDefault>,
     /// Custom store function (`store_with = "path"`) replacing `AData::store`.
@@ -31,7 +31,7 @@ pub(crate) struct FieldAttrs {
     /// Module supplying both `store` and `load` (`with = "module"`); sugar for the
     /// two above.
     with:          Option<Path>,
-    /// Flatten the field's (object) value into the parent's node — stored and
+    /// Flatten the field's (object) value into the parent's vnode — stored and
     /// loaded at the parent's path rather than a named child.
     flatten:       Option<Span>,
 }
@@ -146,13 +146,13 @@ impl FieldAttrs {
         self.field_default.as_ref()
     }
 
-    /// Whether the field has a stored node — written on store, navigable by an
+    /// Whether the field has a stored vnode — written on store, navigable by an
     /// accessor, listed in `Desc`. False for `skip` / `skip_store`.
     pub(crate) fn in_shape(&self) -> bool {
         !self.skip && !self.skip_store
     }
 
-    /// Whether the field's value is read from its node on load. False for
+    /// Whether the field's value is read from its vnode on load. False for
     /// `skip` / `skip_store` / `skip_load` — those produce the default instead.
     pub(crate) fn loads_from_node(&self) -> bool {
         self.in_shape() && !self.skip_load
@@ -185,7 +185,7 @@ impl FieldAttrs {
         self.with.as_ref().map(|module| parse_quote! { #module::load })
     }
 
-    /// Whether the field is flattened into the parent's node (stored and loaded at
+    /// Whether the field is flattened into the parent's vnode (stored and loaded at
     /// the parent's path rather than a named child).
     pub(crate) fn is_flatten(&self) -> bool {
         self.flatten.is_some()
@@ -193,7 +193,7 @@ impl FieldAttrs {
 
     /// Rejects attribute combinations that cannot both hold.
     fn check_conflicts(&self) -> SynResult<()> {
-        // A flattened field has no named node of its own, so no other attribute applies.
+        // A flattened field has no named vnode of its own, so no other attribute applies.
         if let Some(span) = self.flatten
             && (self.rename.is_some()
                 || !self.aliases.is_empty()

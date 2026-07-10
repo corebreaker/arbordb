@@ -25,7 +25,7 @@ use crate::{
     },
     data::Scalar,
     error::{AdbError, AdbResult},
-    node::NodeKind,
+    vnode::NodeKind,
     path::{Segment, VPath},
     value::Value,
 };
@@ -38,7 +38,7 @@ const FORMAT_VERSION: u8 = 1;
 /// The header length: `version` (1 byte) + root offset (`u32`, 4 bytes).
 const HEADER_LEN: usize = 5;
 
-/// Node discriminants, the first byte of every node.
+/// Node discriminants, the first byte of every vnode.
 const LEAF: u8 = 0;
 const LIST: u8 = 1;
 const NODE: u8 = 2;
@@ -61,7 +61,7 @@ pub(crate) fn decode(blob: &[u8]) -> AdbResult<Value> {
 }
 
 /// Appends `value`'s subtree to `buf` (children first) and returns the absolute
-/// offset of the node's own header byte.
+/// offset of the vnode's own header byte.
 fn encode_node(value: &Value, buf: &mut Vec<u8>) -> u32 {
     match value {
         Value::Leaf(scalar) => {
@@ -119,7 +119,7 @@ fn offset(buf: &[u8]) -> u32 {
 /// A validated, zero-copy view over a value blob.
 ///
 /// Holds a borrow of the blob (the redb page, on a read) and the offset of its
-/// root node. Navigation reads happen straight out of the borrowed bytes.
+/// root vnode. Navigation reads happen straight out of the borrowed bytes.
 pub(crate) struct ArchivedValue<'a> {
     blob: &'a [u8],
     root: u32,
@@ -146,7 +146,7 @@ impl<'a> ArchivedValue<'a> {
         })
     }
 
-    /// The root node.
+    /// The root vnode.
     pub(crate) fn root(&self) -> ArchivedNode<'a> {
         ArchivedNode {
             blob: self.blob,
@@ -170,7 +170,7 @@ impl<'a> ArchivedValue<'a> {
     }
 }
 
-/// A cursor at one node inside a value blob, navigated zero-copy.
+/// A cursor at one vnode inside a value blob, navigated zero-copy.
 #[derive(Clone, Copy)]
 pub(crate) struct ArchivedNode<'a> {
     blob: &'a [u8],
@@ -178,13 +178,13 @@ pub(crate) struct ArchivedNode<'a> {
 }
 
 impl<'a> ArchivedNode<'a> {
-    /// The kind of this node.
+    /// The kind of this vnode.
     pub(crate) fn kind(&self) -> AdbResult<NodeKind> {
         match read_u8(self.blob, self.off as usize)? {
             LEAF => Ok(NodeKind::Leaf),
             LIST => Ok(NodeKind::List),
             NODE => Ok(NodeKind::Object),
-            other => Err(AdbError::Corrupt(format!("unknown value node tag {other}"))),
+            other => Err(AdbError::Corrupt(format!("unknown value vnode tag {other}"))),
         }
     }
 
@@ -192,7 +192,7 @@ impl<'a> ArchivedNode<'a> {
     pub(crate) fn scalar(&self) -> AdbResult<Scalar> {
         let off = self.off as usize;
         if read_u8(self.blob, off)? != LEAF {
-            return Err(AdbError::Corrupt("a scalar was read from a non-leaf node".into()));
+            return Err(AdbError::Corrupt("a scalar was read from a non-leaf vnode".into()));
         }
 
         let body = self
@@ -226,11 +226,11 @@ impl<'a> ArchivedNode<'a> {
         Ok(Some((scalar_off, reader.position())))
     }
 
-    /// The number of elements, if this is a list node.
+    /// The number of elements, if this is a list vnode.
     pub(crate) fn len(&self) -> AdbResult<usize> {
         let off = self.off as usize;
         if read_u8(self.blob, off)? != LIST {
-            return Err(AdbError::Corrupt("the length of a non-list node was requested".into()));
+            return Err(AdbError::Corrupt("the length of a non-list vnode was requested".into()));
         }
 
         Ok(read_u32(self.blob, off + 1)? as usize)
@@ -291,12 +291,12 @@ impl<'a> ArchivedNode<'a> {
         Ok(None)
     }
 
-    /// Every `(field name, child node)` of this object, in name order.
+    /// Every `(field name, child vnode)` of this object, in name order.
     fn entries(&self) -> AdbResult<Vec<(&'a str, ArchivedNode<'a>)>> {
         let off = self.off as usize;
         if read_u8(self.blob, off)? != NODE {
             return Err(AdbError::Corrupt(
-                "the entries of a non-object node were requested".into(),
+                "the entries of a non-object vnode were requested".into(),
             ));
         }
 
@@ -330,7 +330,7 @@ impl<'a> ArchivedNode<'a> {
         std::str::from_utf8(bytes).map_err(|_| AdbError::Corrupt("invalid utf-8 in a field name".into()))
     }
 
-    /// Follows a [`VPath`] from this node, returning the node it lands on, or
+    /// Follows a [`VPath`] from this vnode, returning the vnode it lands on, or
     /// `None` if a segment leads nowhere.
     pub(crate) fn navigate(self, at: &VPath) -> AdbResult<Option<ArchivedNode<'a>>> {
         let mut node = self;
@@ -349,12 +349,12 @@ impl<'a> ArchivedNode<'a> {
         Ok(Some(node))
     }
 
-    /// The field names of this object node, in name order.
+    /// The field names of this object vnode, in name order.
     pub(crate) fn object_keys(&self) -> AdbResult<Vec<String>> {
         Ok(self.entries()?.into_iter().map(|(name, _)| name.to_string()).collect())
     }
 
-    /// Materialises this node's subtree into an owned [`Value`].
+    /// Materialises this vnode's subtree into an owned [`Value`].
     pub(crate) fn to_value(self) -> AdbResult<Value> {
         let value = match self.kind()? {
             NodeKind::Leaf => Value::Leaf(self.scalar()?),

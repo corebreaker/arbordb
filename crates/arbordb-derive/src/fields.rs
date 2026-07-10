@@ -10,7 +10,7 @@ pub(crate) struct Field<'a> {
     ident: &'a Ident,
     /// The field type.
     ty:    &'a Type,
-    /// The stored node name: an explicit `rename`, else the container's
+    /// The stored vnode name: an explicit `rename`, else the container's
     /// `rename_all` applied to the identifier, else the identifier verbatim.
     name:  String,
     /// The field's parsed `#[arbor(...)]` attributes (aliases, skip family, default).
@@ -28,7 +28,7 @@ impl<'a> Field<'a> {
         self.ty
     }
 
-    /// The stored node name (rename-aware; see the struct docs).
+    /// The stored vnode name (rename-aware; see the struct docs).
     pub(crate) fn name(&self) -> &str {
         &self.name
     }

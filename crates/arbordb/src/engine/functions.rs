@@ -3,6 +3,7 @@
 //! this layer.
 
 use super::entry::{get_entry_kind, entry_split, EntryKind};
+use super::features;
 use crate::{
     codec::ArchivedDir,
     constants::{FORMAT_VERSION, INDEX_TABLE_NAME, META_FORMAT_VERSION_KEY, METADATA_TABLE_NAME},
@@ -13,7 +14,7 @@ use crate::{
 
 use redb::{Database, ReadableTable, TableDefinition};
 
-/// The value type of a data table: a node's entry blob. redb hands back a slice
+/// The value type of a data table: a vnode's entry blob. redb hands back a slice
 /// borrowing the page, which is exactly the zero-copy read path.
 pub(crate) type EntryBytes = &'static [u8];
 
@@ -50,9 +51,9 @@ pub(crate) fn bootstrap_metadata(db: &Database) -> AdbResult<()> {
         };
 
         match current {
-            Some(version) if version != FORMAT_VERSION => {
+            Some(version) if version > FORMAT_VERSION => {
                 return Err(AdbError::SchemaMismatch(format!(
-                    "on-disk format version {version}, this build expects {FORMAT_VERSION}"
+                    "on-disk format version {version} is newer than this build's {FORMAT_VERSION}"
                 )));
             }
             Some(_) => {}
@@ -60,20 +61,25 @@ pub(crate) fn bootstrap_metadata(db: &Database) -> AdbResult<()> {
                 meta.insert(META_FORMAT_VERSION_KEY, FORMAT_VERSION.to_be_bytes().as_slice())?;
             }
         }
+
+        // Reject a file that requires an optional feature this build lacks — e.g. a
+        // protected (`permissions`) file opened by a binary compiled without it.
+        // Gracefully-degrading features are never recorded, so this never rejects them.
+        features::check(&meta)?;
     }
     txn.commit()?;
 
     Ok(())
 }
 
-/// Reads a node's raw entry blob (an owned copy), or `None` if absent.
+/// Reads a vnode's raw entry blob (an owned copy), or `None` if absent.
 pub(crate) fn read_entry<R>(table: &R, akey: AKey) -> AdbResult<Option<Vec<u8>>>
 where
     R: ReadableTable<u128, EntryBytes>, {
     Ok(table.get(u128::from(akey))?.map(|guard| guard.value().to_vec()))
 }
 
-/// The filesystem kind of node `akey`, or `None` if absent.
+/// The filesystem kind of vnode `akey`, or `None` if absent.
 pub(crate) fn fetch_entry_kind<R>(table: &R, akey: AKey) -> AdbResult<Option<EntryKind>>
 where
     R: ReadableTable<u128, EntryBytes>, {
@@ -100,7 +106,7 @@ where
     ArchivedDir::new(payload)?.get(name)
 }
 
-/// Resolves `path` to its node key by walking directories from [`AKey::ROOT`], or
+/// Resolves `path` to its vnode key by walking directories from [`AKey::ROOT`], or
 /// `None` if any segment along the way is missing.
 pub(crate) fn resolve<R>(table: &R, path: &APath) -> AdbResult<Option<AKey>>
 where

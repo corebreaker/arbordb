@@ -13,6 +13,9 @@ use crate::{
 use redb::ReadableDatabase;
 use std::sync::Arc;
 
+#[cfg(feature = "permissions")]
+use crate::perm::Principal;
+
 /// A handle to one named table. Cheap to clone; reads are concurrent, writes are
 /// serialized by the engine.
 #[derive(Clone)]
@@ -20,14 +23,26 @@ pub struct Table {
     inner: Arc<DbInner>,
     name:  String,
     cache: Arc<PathCache>,
+
+    /// The identity transactions from this handle act as (carried from the
+    /// [`ArborDb`](crate::ArborDb) that opened it).
+    #[cfg(feature = "permissions")]
+    principal: Arc<Principal>,
 }
 
 impl Table {
-    pub(crate) fn new(inner: Arc<DbInner>, name: String, cache: Arc<PathCache>) -> Self {
+    pub(crate) fn new(
+        inner: Arc<DbInner>,
+        name: String,
+        cache: Arc<PathCache>,
+        #[cfg(feature = "permissions")] principal: Arc<Principal>,
+    ) -> Self {
         Self {
             inner,
             name,
             cache,
+            #[cfg(feature = "permissions")]
+            principal,
         }
     }
 
@@ -54,14 +69,30 @@ impl Table {
             self.name.clone(),
             Arc::clone(&self.cache),
             generation,
+            #[cfg(feature = "entry-timestamps")]
+            Arc::clone(&self.inner),
+            #[cfg(feature = "permissions")]
+            Arc::clone(&self.principal),
         ))
     }
 
-    /// Begins a write transaction (serialized against other writers).
+    /// Begins a write transaction (serialized against other writers). The guest
+    /// user is read-only and cannot obtain one.
     pub fn write(&self) -> AdbResult<WriteTxn> {
+        #[cfg(feature = "permissions")]
+        if matches!(self.principal.as_ref(), Principal::Guest) {
+            return Err(AdbError::PermissionDenied(String::from("the guest user is read-only")));
+        }
+
         let txn = self.inner.db().begin_write()?;
 
-        Ok(WriteTxn::new(txn, self.name.clone(), Arc::clone(&self.inner)))
+        Ok(WriteTxn::new(
+            txn,
+            self.name.clone(),
+            Arc::clone(&self.inner),
+            #[cfg(feature = "permissions")]
+            Arc::clone(&self.principal),
+        ))
     }
 
     /// Registers a secondary index on this table and back-fills it.

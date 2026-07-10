@@ -1,4 +1,4 @@
-//! The opaque key identifying a file or directory node.
+//! The opaque key identifying a file or directory vnode.
 
 use crate::error::AdbError;
 use uuid::Uuid;
@@ -25,12 +25,12 @@ fn seed() -> u64 {
     mixed | 1
 }
 
-/// Opaque key identifying one node — a file or a directory — in the virtual
+/// Opaque key identifying one vnode — a file or a directory — in the virtual
 /// filesystem.
 ///
-/// An [`AKey`] is a node's **stable identity**: it survives renames and moves (a
+/// An [`AKey`] is a vnode's **stable identity**: it survives renames and moves (a
 /// `mv` relinks the name, the key is unchanged). It addresses a whole file or
-/// directory, never a [`Scalar`](crate::data::Scalar) or a node *inside* a file's
+/// directory, never a [`Scalar`](crate::data::Scalar) or a vnode *inside* a file's
 /// value (that is a [`VPath`](crate::path::VPath)). A fresh key is 128 random bits
 /// drawn from a fast per-thread generator (see [`generate`](Self::generate)):
 /// unique, fixed 16-byte size, and cheap to mint. Keys are only ever compared for

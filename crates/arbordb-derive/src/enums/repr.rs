@@ -63,7 +63,7 @@ impl EnumRepr {
         matches!(self, Self::Internal { .. })
     }
 
-    /// The top-of-`store` statements after `remove`: object-shape the node for the
+    /// The top-of-`store` statements after `remove`: object-shape the vnode for the
     /// tag-based reprs; leave it to each arm for `Untagged`.
     pub(super) fn store_prelude(&self) -> TokenStream {
         match self {
@@ -105,7 +105,7 @@ impl EnumRepr {
                     ::arbordb::data::Scalar::Null,
                 )?;
             },
-            // Untagged: a bare `Null` at the node itself.
+            // Untagged: a bare `Null` at the vnode itself.
             Self::Untagged => quote! {
                 ::arbordb::access::Writer::put_scalar(writer, at, ::arbordb::data::Scalar::Null)?;
             },
@@ -142,7 +142,7 @@ impl EnumRepr {
                     .into_iter()
                     .next()
                     .ok_or_else(|| {
-                        ::arbordb::AdbError::Corrupt(::std::string::String::from("enum node has no variant tag"))
+                        ::arbordb::AdbError::Corrupt(::std::string::String::from("enum vnode has no variant tag"))
                     })?;
             },
             Self::Adjacent {
@@ -179,7 +179,7 @@ impl EnumRepr {
                     .into_iter()
                     .next()
                     .ok_or_else(|| {
-                        ::arbordb::AdbError::Corrupt(::std::string::String::from("enum node has no variant tag"))
+                        ::arbordb::AdbError::Corrupt(::std::string::String::from("enum vnode has no variant tag"))
                     })
             },
             Self::Adjacent {

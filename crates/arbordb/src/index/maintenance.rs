@@ -17,7 +17,7 @@ use crate::{
     data::Scalar,
     engine::{entry_split, EntryBytes, EntryKind, read_entry},
     error::{AdbError, AdbResult},
-    node::NodeKind,
+    vnode::NodeKind,
     path::{APath, VPath},
     AKey,
 };

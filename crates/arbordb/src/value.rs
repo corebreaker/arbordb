@@ -5,7 +5,7 @@
 //! dynamic value type; a value is serialized into a single blob (one redb entry)
 //! and read back — losslessly — through the value codec.
 //!
-//! Beyond the in-memory accessors (`leaf` / `list` / `node`, `get` / `at`,
+//! Beyond the in-memory accessors (`leaf` / `list` / `vnode`, `get` / `at`,
 //! `push` / `insert` / `merge`, …) it carries path-addressed
 //! [`get_value`](Value::get_value) / [`set_value`](Value::set_value), which create
 //! containers as needed and never silently destroy data along the way.
@@ -40,7 +40,7 @@ impl Value {
         Value::List(Vec::new())
     }
 
-    /// An empty node (named map).
+    /// An empty vnode (named map).
     pub fn new_empty_node() -> Self {
         Value::Node(BTreeMap::new())
     }
@@ -50,7 +50,7 @@ impl Value {
         Value::List(list)
     }
 
-    /// A node wrapping the given map.
+    /// A vnode wrapping the given map.
     pub fn new_node(node: BTreeMap<String, Value>) -> Self {
         Value::Node(node)
     }
@@ -120,7 +120,7 @@ impl Value {
         }
     }
 
-    /// Whether this is a node containing `key`. `false` for a leaf or list.
+    /// Whether this is a vnode containing `key`. `false` for a leaf or list.
     pub fn contains_key(&self, key: impl AsRef<str>) -> bool {
         if let Self::Node(node) = self {
             node.contains_key(key.as_ref())
@@ -129,7 +129,7 @@ impl Value {
         }
     }
 
-    /// The value under `key`, if this is a node containing it.
+    /// The value under `key`, if this is a vnode containing it.
     pub fn get(&self, key: impl AsRef<str>) -> Option<&Value> {
         match self {
             Self::Node(node) => node.get(key.as_ref()),
@@ -137,7 +137,7 @@ impl Value {
         }
     }
 
-    /// A mutable reference to the value under `key`, if this is a node containing
+    /// A mutable reference to the value under `key`, if this is a vnode containing
     /// it.
     pub fn get_mut(&mut self, key: impl AsRef<str>) -> Option<&mut Value> {
         match self {
@@ -155,7 +155,7 @@ impl Value {
         }
     }
 
-    /// The number of direct children: a list's element count, a node's entry
+    /// The number of direct children: a list's element count, a vnode's entry
     /// count, and `0` for a leaf — a scalar has no children. Pairs with
     /// [`is_empty`](Self::is_empty).
     pub fn len(&self) -> usize {
@@ -166,7 +166,7 @@ impl Value {
         }
     }
 
-    /// Whether this value has no direct children — an empty list or node. A leaf
+    /// Whether this value has no direct children — an empty list or vnode. A leaf
     /// counts as empty (structurally, a scalar has no children), so use
     /// [`node_kind`](Self::node_kind) to tell a leaf apart from an empty container.
     pub fn is_empty(&self) -> bool {
@@ -180,7 +180,7 @@ impl Value {
     }
 
     /// Empties the value in place: a leaf becomes [`Null`](Scalar::Null), a list
-    /// or node drops its children (keeping its kind).
+    /// or vnode drops its children (keeping its kind).
     pub fn clear(&mut self) {
         match self {
             Self::Leaf(scalar) => {
@@ -193,14 +193,14 @@ impl Value {
         }
     }
 
-    /// Appends `value` if this is a list; a no-op on a leaf or node.
+    /// Appends `value` if this is a list; a no-op on a leaf or vnode.
     pub fn push(&mut self, value: Value) {
         if let Self::List(list) = self {
             list.push(value);
         }
     }
 
-    /// Inserts (or replaces) the `key` → `value` entry if this is a node; a no-op
+    /// Inserts (or replaces) the `key` → `value` entry if this is a vnode; a no-op
     /// on a leaf or list.
     pub fn insert(&mut self, key: String, value: Value) {
         if let Self::Node(node) = self {
@@ -209,14 +209,14 @@ impl Value {
     }
 
     /// Removes the element at `index` if this is a list; a no-op on a leaf or
-    /// node. Panics if `index` is out of bounds (see [`Vec::remove`]).
+    /// vnode. Panics if `index` is out of bounds (see [`Vec::remove`]).
     pub fn remove_at(&mut self, index: usize) {
         if let Self::List(list) = self {
             list.remove(index);
         }
     }
 
-    /// Removes the `key` entry if this is a node; a no-op on a leaf or list.
+    /// Removes the `key` entry if this is a vnode; a no-op on a leaf or list.
     pub fn remove_key(&mut self, key: impl AsRef<str>) {
         if let Self::Node(node) = self {
             node.remove(key.as_ref());
@@ -227,8 +227,8 @@ impl Value {
     ///
     /// - a [`Leaf`](Value::Leaf) is replaced wholesale by `with`;
     /// - a [`List`](Value::List) extends with another list's elements, or pushes a non-list `with` as one more element;
-    /// - a [`Node`](Value::Node) extends with another node (overwriting duplicate keys), or is replaced wholesale by a
-    ///   non-node `with`.
+    /// - a [`Node`](Value::Node) extends with another vnode (overwriting duplicate keys), or is replaced wholesale by a
+    ///   non-vnode `with`.
     pub fn merge(&mut self, with: Self) {
         match self {
             Self::Leaf(_) => {
@@ -253,20 +253,20 @@ impl Value {
         }
     }
 
-    /// Returns a clone of the subtree at `path`, or `None` if no node sits there
+    /// Returns a clone of the subtree at `path`, or `None` if no vnode sits there
     /// (or `path` does not parse). The root path returns the whole value. Use
     /// [`get_value_ref`](Self::get_value_ref) to borrow it without cloning.
     pub fn get_value(&self, path: impl IntoValuePath) -> Option<Value> {
         Some(self.get_value_ref(path)?.clone())
     }
 
-    /// Borrows the subtree at `path` without cloning, or `None` if no node sits
+    /// Borrows the subtree at `path` without cloning, or `None` if no vnode sits
     /// there (or `path` does not parse). The root path borrows the whole value.
     pub fn get_value_ref(&self, path: impl IntoValuePath) -> Option<&Value> {
         self.subtree(&path.into_value_path().ok()?)
     }
 
-    /// Mutably borrows the subtree at `path`, or `None` if no node sits there (or
+    /// Mutably borrows the subtree at `path`, or `None` if no vnode sits there (or
     /// `path` does not parse). The root path borrows the whole value. Unlike
     /// [`set_value`](Self::set_value) it creates nothing along the way — a path
     /// leading nowhere yields `None`.
@@ -382,7 +382,7 @@ fn build_fresh(segments: &[Segment], value: Value) -> Option<Value> {
     }
 }
 
-/// Removes the node at `segments` from `target`. An empty path resets `target` to
+/// Removes the vnode at `segments` from `target`. An empty path resets `target` to
 /// the default; otherwise it descends to the parent and drops the last segment.
 fn remove_in(target: &mut Value, segments: &[Segment]) -> bool {
     let Some((last, head)) = segments.split_last() else {
@@ -573,7 +573,7 @@ mod tests {
         ls.merge(leaf(4));
         assert_eq!(ls.list().map(<[Value]>::len), Some(4));
 
-        // Node extends with another node, or is replaced by a non-node.
+        // Node extends with another vnode, or is replaced by a non-vnode.
         let mut a = Value::new_empty_node();
         a.insert(String::from("x"), leaf(1));
         let mut b = Value::new_empty_node();
@@ -617,7 +617,7 @@ mod tests {
         assert!(Value::new_empty_list().is_empty());
         assert!(ls.keys().next().is_none());
 
-        // A node counts its entries and lists its keys in sorted order.
+        // A vnode counts its entries and lists its keys in sorted order.
         let mut nd = Value::new_empty_node();
         nd.insert(String::from("b"), leaf(1));
         nd.insert(String::from("a"), leaf(2));
@@ -632,7 +632,7 @@ mod tests {
         let mut root = Value::new_empty_node();
         root.set_value("a/b", leaf(1));
 
-        // A borrow reaches the same node the cloning getter returns.
+        // A borrow reaches the same vnode the cloning getter returns.
         assert_eq!(root.get_value_ref("a/b"), Some(&leaf(1)));
         let whole = root.clone();
         assert_eq!(root.get_value_ref(""), Some(&whole));
@@ -688,7 +688,7 @@ mod tests {
         assert!(!root.set_value("a/b", leaf(2)));
         assert_eq!(root.get_value("a"), Some(leaf(1)));
 
-        // Wrong container kind: indexing into a node, naming into a list.
+        // Wrong container kind: indexing into a vnode, naming into a list.
         assert!(!root.set_value("a[0]", leaf(3)));
         assert_eq!(root.get_value("a"), Some(leaf(1)));
     }

@@ -1,4 +1,4 @@
-//! A node's stored value: a tagged blob that is either a directory or a file.
+//! A vnode's stored value: a tagged blob that is either a directory or a file.
 
 use crate::error::{AdbError, AdbResult};
 
@@ -7,7 +7,7 @@ mod tag {
     pub(super) const FILE: u8 = 1;
 }
 
-/// Whether a node is a directory or a file — the filesystem-level kind, distinct
+/// Whether a vnode is a directory or a file — the filesystem-level kind, distinct
 /// from a value's [`NodeKind`](crate::NodeKind).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum EntryKind {
@@ -17,10 +17,10 @@ pub enum EntryKind {
     File,
 }
 
-/// One child in a directory listing: a name paired with its node kind.
+/// One child in a directory listing: a name paired with its vnode kind.
 ///
 /// Yielded by `ls` for each direct child of a directory, in name order. It
-/// carries no [`AKey`](crate::AKey) — a listing exposes names and kinds, not node
+/// carries no [`AKey`](crate::AKey) — a listing exposes names and kinds, not vnode
 /// identities.
 #[derive(Clone, PartialEq, Eq, Debug, Hash)]
 pub struct Entry {
@@ -72,12 +72,12 @@ pub(crate) fn get_entry_kind(entry: &[u8]) -> AdbResult<EntryKind> {
     let tag = entry
         .first()
         .copied()
-        .ok_or_else(|| AdbError::Corrupt("empty node entry".into()))?;
+        .ok_or_else(|| AdbError::Corrupt("empty vnode entry".into()))?;
 
     let kind = match tag {
         tag::DIR => EntryKind::Dir,
         tag::FILE => EntryKind::File,
-        other => return Err(AdbError::Corrupt(format!("unknown node entry tag {other}"))),
+        other => return Err(AdbError::Corrupt(format!("unknown vnode entry tag {other}"))),
     };
 
     Ok(kind)
@@ -87,12 +87,12 @@ pub(crate) fn get_entry_kind(entry: &[u8]) -> AdbResult<EntryKind> {
 pub(crate) fn entry_split(entry: &[u8]) -> AdbResult<(EntryKind, &[u8])> {
     let (tag, payload) = entry
         .split_first()
-        .ok_or_else(|| AdbError::Corrupt("empty node entry".into()))?;
+        .ok_or_else(|| AdbError::Corrupt("empty vnode entry".into()))?;
 
     let kind = match *tag {
         tag::DIR => EntryKind::Dir,
         tag::FILE => EntryKind::File,
-        other => return Err(AdbError::Corrupt(format!("unknown node entry tag {other}"))),
+        other => return Err(AdbError::Corrupt(format!("unknown vnode entry tag {other}"))),
     };
 
     Ok((kind, payload))

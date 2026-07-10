@@ -1,4 +1,4 @@
-//! Per-table LRU caches that amortize path resolution and hot-node reads.
+//! Per-table LRU caches that amortize path resolution and hot-vnode reads.
 //!
 //! Two caches, both keyed by the database **generation** so a snapshot never
 //! reuses another version's resolution:
@@ -33,7 +33,7 @@ const BLOB_CAPACITY: usize = 16 * 1024;
 /// The path-resolution cache: an [`APath`] to its `(generation, key)`.
 type PathEntries = LruCache<APath, (u64, AKey)>;
 
-/// The entry-blob cache: a `(generation, key)` to the node's entry bytes.
+/// The entry-blob cache: a `(generation, key)` to the vnode's entry bytes.
 type BlobEntries = LruCache<(u64, AKey), Arc<Vec<u8>>>;
 
 /// A per-table pair of bounded LRU caches, shared across that table's read

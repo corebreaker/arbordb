@@ -5,7 +5,7 @@ use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Ident;
 
-/// Generates `impl AData for Struct`, storing/loading one child node per field.
+/// Generates `impl AData for Struct`, storing/loading one child vnode per field.
 pub(crate) fn a_data_impl(
     name: &Ident,
     ref_name: &Ident,
@@ -18,7 +18,7 @@ pub(crate) fn a_data_impl(
     let stores = fields.iter().filter(|field| field.attrs().in_shape()).map(|field| {
         let ident = field.ident();
 
-        // Flattened: store the value at the parent's node, merging its fields in.
+        // Flattened: store the value at the parent's vnode, merging its fields in.
         if field.attrs().is_flatten() {
             return quote! {
                 ::arbordb::data::AData::store(&self.#ident, writer, at)?;
@@ -51,7 +51,7 @@ pub(crate) fn a_data_impl(
         let ty = field.ty();
         let stored = field.name();
 
-        // Out of shape or `skip_load`: never read the node — produce the default.
+        // Out of shape or `skip_load`: never read the vnode — produce the default.
         if !field.attrs().loads_from_node() {
             let default = field.attrs().default_expr();
 
@@ -60,7 +60,7 @@ pub(crate) fn a_data_impl(
             };
         }
 
-        // Flattened: the value occupies the parent's node, so load from `at` directly.
+        // Flattened: the value occupies the parent's vnode, so load from `at` directly.
         if field.attrs().is_flatten() {
             return quote! {
                 #ident: <#ty as ::arbordb::data::AData>::load(reader, at)?,

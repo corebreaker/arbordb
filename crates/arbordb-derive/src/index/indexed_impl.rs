@@ -30,7 +30,7 @@ pub(crate) fn indexed_impl(
         let index_name = index.name();
         let unique = index.unique();
         let columns = index.columns().iter().map(|column| {
-            // The column path uses the field's STORED node name (rename-aware).
+            // The column path uses the field's STORED vnode name (rename-aware).
             let stored = fields
                 .iter()
                 .find(|field| field.ident() == column.field())

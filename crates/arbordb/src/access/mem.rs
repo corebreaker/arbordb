@@ -8,7 +8,7 @@ use super::{Reader, Writer};
 use crate::{
     data::Scalar,
     error::{AdbError, AdbResult},
-    node::NodeKind,
+    vnode::NodeKind,
     path::VPath,
     value::Value,
 };

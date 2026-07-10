@@ -2,7 +2,7 @@
 
 use crate::{
     codec::{self, Reader},
-    decode_time::decode_time,
+    time::decode_time,
     error::{AdbError, AdbResult},
 };
 
@@ -58,7 +58,7 @@ mod tag {
     pub(super) const BIG_RATIONAL: u8 = 28;
 }
 
-/// A persisted scalar value: the content of a leaf node.
+/// A persisted scalar value: the content of a leaf vnode.
 ///
 /// This is the dynamic, runtime representation of any value ArborDb can store in
 /// a leaf. Rust types map to and from it through the [`AValue`](super::AValue) trait.
@@ -114,7 +114,7 @@ pub enum Scalar {
     /// An opaque byte string.
     Bytes(Vec<u8>),
 
-    /// A free-standing UUID value (not a node key).
+    /// A free-standing UUID value (not a vnode key).
     Uuid(Uuid),
 
     /// A calendar date with no time zone.

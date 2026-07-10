@@ -1,4 +1,4 @@
-//! Access traits and cursors over a single value's node tree.
+//! Access traits and cursors over a single value's vnode tree.
 //!
 //! A value is one blob; navigation inside it is by [`VPath`](crate::path::VPath).
 //! The [`Reader`] / [`Writer`] traits are what `AData` and the generated accessors

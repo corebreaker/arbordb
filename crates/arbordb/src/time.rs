@@ -15,3 +15,9 @@ pub(crate) fn decode_time(r: &mut Reader<'_>) -> AdbResult<NaiveTime> {
     NaiveTime::from_num_seconds_from_midnight_opt(secs, nanos)
         .ok_or_else(|| AdbError::Corrupt("out-of-range time scalar".into()))
 }
+
+/// The current wall-clock time as Unix-epoch milliseconds — the on-disk unit.
+#[cfg(feature = "entry-timestamps")]
+pub(crate) fn timestamp_now() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}

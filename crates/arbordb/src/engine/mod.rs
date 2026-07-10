@@ -3,6 +3,7 @@
 
 mod entry;
 mod errors;
+mod features;
 mod functions;
 
 pub(crate) use self::{
@@ -11,5 +12,8 @@ pub(crate) use self::{
 };
 
 pub(crate) use self::functions::{INDEX_TABLE, META_TABLE};
+
+#[cfg(feature = "permissions")]
+pub(crate) use self::features::{list as required_features, require as require_feature};
 
 pub use self::entry::{Entry, EntryKind};

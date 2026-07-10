@@ -1,11 +1,11 @@
-//! A resolved enum variant: its AST node paired with the `#[arbor(...)]` naming
+//! A resolved enum variant: its AST vnode paired with the `#[arbor(...)]` naming
 //! (stored tag, load-only aliases, and the `other` catch-all flag).
 
 use syn::{Fields, Ident, Variant};
 
 /// One variant with its `#[arbor(...)]` naming resolved.
 pub(super) struct VariantInfo<'a> {
-    /// The variant AST node (identifier + fields).
+    /// The variant AST vnode (identifier + fields).
     variant: &'a Variant,
     /// The stored tag (primary name written on store).
     tag:     String,
@@ -16,7 +16,7 @@ pub(super) struct VariantInfo<'a> {
 }
 
 impl<'a> VariantInfo<'a> {
-    /// Pairs a variant's AST node with its resolved `#[arbor(...)]` naming.
+    /// Pairs a variant's AST vnode with its resolved `#[arbor(...)]` naming.
     pub(super) fn new(variant: &'a Variant, tag: String, aliases: Vec<String>, other: bool) -> Self {
         Self {
             variant,

@@ -1,6 +1,6 @@
 //! The directory blob format: a name-sorted `Name → AKey` map of a directory's
 //! children, navigated zero-copy by binary search — the filesystem-level mirror
-//! of the value codec's object node.
+//! of the value codec's object vnode.
 //!
 //! Layout: a `count` (`u32`), then that many fixed-width entries
 //! `(name offset, name length, child key)`, then the name bytes. Entries are kept

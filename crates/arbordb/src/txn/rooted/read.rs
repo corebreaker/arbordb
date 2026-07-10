@@ -59,12 +59,12 @@ impl<'a> RootedRead<'a> {
         self.txn.get_as(self.absolute(path)?, at)
     }
 
-    /// The kind of node at `path` (relative to the root), if any.
+    /// The kind of vnode at `path` (relative to the root), if any.
     pub fn kind(&self, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
         self.txn.kind(self.absolute(path)?)
     }
 
-    /// Whether a node exists at `path` (relative to the root).
+    /// Whether a vnode exists at `path` (relative to the root).
     pub fn exists(&self, path: impl IntoArborPath) -> AdbResult<bool> {
         self.txn.exists(self.absolute(path)?)
     }

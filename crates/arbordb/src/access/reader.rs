@@ -1,18 +1,18 @@
 //! Read access to one value's tree, addressed by an intra-value [`VPath`].
 
-use crate::{data::Scalar, error::AdbResult, node::NodeKind, path::VPath};
+use crate::{data::Scalar, error::AdbResult, vnode::NodeKind, path::VPath};
 use std::sync::Arc;
 
-/// Read access to the node tree of a single stored value.
+/// Read access to the vnode tree of a single stored value.
 ///
-/// Every method addresses a node by a [`VPath`] relative to the value's root.
+/// Every method addresses a vnode by a [`VPath`] relative to the value's root.
 /// Implemented by the codec-backed cursor over a stored blob and by the in-memory
 /// builder; accessors hold one behind an `Arc<dyn Reader + 't>`.
 pub trait Reader {
     /// The scalar at `at`, or `None` if nothing is there or it is not a leaf.
     fn scalar_at(&self, at: &VPath) -> AdbResult<Option<Scalar>>;
 
-    /// The node kind at `at`, or `None` if nothing is there.
+    /// The vnode kind at `at`, or `None` if nothing is there.
     fn kind_at(&self, at: &VPath) -> AdbResult<Option<NodeKind>>;
 
     /// The length of the list at `at`; errors if `at` is not a list.
@@ -22,7 +22,7 @@ pub trait Reader {
     /// object.
     fn keys_at(&self, at: &VPath) -> AdbResult<Vec<String>>;
 
-    /// Whether any node exists at `at`.
+    /// Whether any vnode exists at `at`.
     fn exists_at(&self, at: &VPath) -> AdbResult<bool>;
 }
 
