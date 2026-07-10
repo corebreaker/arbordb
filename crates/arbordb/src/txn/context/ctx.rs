@@ -22,6 +22,7 @@ use crate::{
     perm::{self, Principal},
 };
 
+use redb::ReadableTable;
 use std::collections::BTreeMap;
 
 /// The per-transaction data table (borrows the write transaction).
@@ -141,49 +142,66 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(entry)
     }
 
-    /// The child of directory `parent` named `name`, verifying `parent`'s
-    /// integrity first. `None` if `parent` is absent, is a file, or has no such child.
-    pub(super) fn child(&self, parent: AKey, name: &str) -> AdbResult<Option<AKey>> {
-        let Some(entry) = self.read_verified(parent)? else {
+    /// Fetches `akey`'s entry, verifies its integrity tag (for a keyed principal),
+    /// and hands the **borrowed** entry bytes to `f`. Unlike [`read_verified`], it
+    /// never copies the blob into an owned buffer — a read-only navigation (a child
+    /// lookup, a kind probe, a directory listing) reads what it needs straight out
+    /// of the engine page and drops the guard. `None` if the vnode is absent.
+    ///
+    /// [`read_verified`]: Self::read_verified
+    fn with_entry<R>(&self, akey: AKey, f: impl FnOnce(&[u8]) -> AdbResult<R>) -> AdbResult<Option<R>> {
+        let Some(guard) = self.data.get(u128::from(akey))? else {
             return Ok(None);
         };
 
-        let (kind, payload) = entry_split(&entry)?;
-        if kind != EntryKind::Dir {
-            return Ok(None);
-        }
+        let entry = guard.value();
 
-        ArchivedDir::new(payload)?.get(name)
+        #[cfg(feature = "permissions")]
+        self.verify_integrity(akey, entry)?;
+
+        f(entry).map(Some)
+    }
+
+    /// The child of directory `parent` named `name`, verifying `parent`'s
+    /// integrity first. `None` if `parent` is absent, is a file, or has no such child.
+    pub(super) fn child(&self, parent: AKey, name: &str) -> AdbResult<Option<AKey>> {
+        Ok(self
+            .with_entry(parent, |entry| {
+                let (kind, payload) = entry_split(entry)?;
+                if kind != EntryKind::Dir {
+                    return Ok(None);
+                }
+
+                ArchivedDir::new(payload)?.get(name)
+            })?
+            .flatten())
     }
 
     /// The filesystem kind of `akey`, verifying its integrity first. `None` if
     /// the vnode is absent.
     pub(super) fn kind(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
-        match self.read_verified(akey)? {
-            Some(entry) => Ok(Some(entry_split(&entry)?.0)),
-            None => Ok(None),
-        }
+        self.with_entry(akey, |entry| Ok(entry_split(entry)?.0))
     }
 
     /// Directory `akey`'s children as an owned map, verifying its integrity first
     /// (empty if the vnode is absent). Errors if `akey` is a file.
     pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<String, AKey>> {
-        let Some(entry) = self.read_verified(akey)? else {
-            return Ok(BTreeMap::new());
-        };
+        let children = self.with_entry(akey, |entry| {
+            let (kind, payload) = entry_split(entry)?;
+            if kind != EntryKind::Dir {
+                return Err(AdbError::CannotAccess(String::from(
+                    "a path component is a file, not a directory",
+                )));
+            }
 
-        let (kind, payload) = entry_split(&entry)?;
-        if kind != EntryKind::Dir {
-            return Err(AdbError::CannotAccess(String::from(
-                "a path component is a file, not a directory",
-            )));
-        }
+            Ok(ArchivedDir::new(payload)?
+                .entries()?
+                .into_iter()
+                .map(|(name, child)| (name.to_string(), child))
+                .collect())
+        })?;
 
-        Ok(ArchivedDir::new(payload)?
-            .entries()?
-            .into_iter()
-            .map(|(name, child)| (name.to_string(), child))
-            .collect())
+        Ok(children.unwrap_or_default())
     }
 
     /// Verifies `akey`'s integrity tag over `entry` and its current ACL, erroring
