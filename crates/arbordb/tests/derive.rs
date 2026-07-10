@@ -577,3 +577,106 @@ fn skip_store_if_conditionally_omits_a_field() {
         }),
     );
 }
+
+// A module supplying both `store` and `load`: an f64 is stored as a rounded i64.
+mod celsius {
+    use arbordb::access::{Reader, Writer};
+    use arbordb::data::AData;
+    use arbordb::path::VPath;
+    use arbordb::AdbResult;
+
+    pub fn store<W: Writer>(value: &f64, writer: &W, at: &VPath) -> AdbResult<()> {
+        AData::store(&(*value as i64), writer, at)
+    }
+
+    pub fn load<R: Reader>(reader: &R, at: &VPath) -> AdbResult<f64> {
+        Ok(<i64 as AData>::load(reader, at)? as f64)
+    }
+}
+
+#[derive(AData, Debug, PartialEq)]
+struct Reading {
+    #[arbor(with = "celsius")]
+    temp: f64,
+}
+
+#[test]
+fn with_module_replaces_both_store_and_load() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Reading>(
+            "x",
+            &Reading {
+                temp: 21.7
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // The custom store rounded the f64 to an integer scalar...
+    assert_eq!(r.get_as::<i64>("x", "temp").unwrap(), Some(21));
+
+    // ...and the custom load reads it back as an f64.
+    assert_eq!(
+        r.load::<Reading>("x").unwrap(),
+        Some(Reading {
+            temp: 21.0
+        })
+    );
+}
+
+// Independent custom store/load functions: the stored value is doubled.
+fn store_doubled<W: arbordb::access::Writer>(
+    value: &i64,
+    writer: &W,
+    at: &arbordb::path::VPath,
+) -> arbordb::AdbResult<()> {
+    arbordb::data::AData::store(&(value * 2), writer, at)
+}
+
+fn load_halved<R: arbordb::access::Reader>(reader: &R, at: &arbordb::path::VPath) -> arbordb::AdbResult<i64> {
+    Ok(<i64 as arbordb::data::AData>::load(reader, at)? / 2)
+}
+
+#[derive(AData, Debug, PartialEq)]
+struct Doubled {
+    #[arbor(store_with = "store_doubled", load_with = "load_halved")]
+    n: i64,
+}
+
+#[test]
+fn store_with_and_load_with_replace_each_side() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Doubled>(
+            "x",
+            &Doubled {
+                n: 5
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // Stored doubled on the way in...
+    assert_eq!(r.get_as::<i64>("x", "n").unwrap(), Some(10));
+
+    // ...and halved on the way out, round-tripping to the original.
+    assert_eq!(
+        r.load::<Doubled>("x").unwrap(),
+        Some(Doubled {
+            n: 5
+        })
+    );
+}

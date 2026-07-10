@@ -7,13 +7,19 @@ use syn::Ident;
 
 /// Generates `impl AData for Struct`, storing/loading one child node per field.
 pub(crate) fn adata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, fields: &[Field]) -> TokenStream {
-    // Only in-shape fields are written; `skip_store_if` makes the write conditional.
+    // Only in-shape fields are written; `skip_store_if` makes the write conditional,
+    // and `store_with` / `with` replace the field type's `AData::store`.
     let stores = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
         let ident = field.ident;
         let stored = &field.name;
 
-        let store = quote! {
-            ::arbordb::data::AData::store(&self.#ident, writer, &at.child_name(#stored))?;
+        let store = match field.attrs.store_fn() {
+            Some(path) => quote! {
+                #path(&self.#ident, writer, &at.child_name(#stored))?;
+            },
+            None => quote! {
+                ::arbordb::data::AData::store(&self.#ident, writer, &at.child_name(#stored))?;
+            },
         };
 
         match &field.attrs.skip_store_if {
@@ -40,19 +46,29 @@ pub(crate) fn adata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, field
             };
         }
 
+        // `load_with` / `with` replace the field type's `AData::load`.
+        let load_fn = field.attrs.load_fn();
+        let load_from = |name: TokenStream| match &load_fn {
+            Some(path) => quote! { #path(reader, &#name)? },
+            None => quote! { <#ty as ::arbordb::data::AData>::load(reader, &#name)? },
+        };
+
         // Fast path: no aliases and no default — load straight from the stored name.
         if field.attrs.aliases.is_empty() && field.attrs.default.is_none() {
+            let load = load_from(quote! { at.child_name(#stored) });
+
             return quote! {
-                #ident: <#ty as ::arbordb::data::AData>::load(reader, &at.child_name(#stored))?,
+                #ident: #load,
             };
         }
 
         // Resolve the primary name, then each alias in order; on none present fall
         // back to the default when set, else to a direct (erroring) primary load.
         let aliases = &field.attrs.aliases;
+        let chosen_load = load_from(quote! { at.child_name(__candidate) });
         let fallback = match &field.attrs.default {
             Some(_) => field.attrs.default_expr(),
-            None => quote! { <#ty as ::arbordb::data::AData>::load(reader, &at.child_name(#stored))? },
+            None => load_from(quote! { at.child_name(#stored) }),
         };
 
         quote! {
@@ -67,9 +83,7 @@ pub(crate) fn adata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, field
                 }
 
                 match __chosen {
-                    ::core::option::Option::Some(__candidate) => {
-                        <#ty as ::arbordb::data::AData>::load(reader, &at.child_name(__candidate))?
-                    }
+                    ::core::option::Option::Some(__candidate) => #chosen_load,
                     ::core::option::Option::None => #fallback,
                 }
             },
