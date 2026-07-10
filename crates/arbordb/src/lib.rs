@@ -31,10 +31,6 @@ mod value;
 pub mod access;
 pub mod data;
 pub mod error;
-// The index layer is built bottom-up; several entry points (and the registry
-// facade re-exports) are wired into the write and query paths in later
-// sub-phases, so silence dead-code / unused-imports until then.
-#[allow(dead_code, unused_imports)]
 pub mod index;
 pub mod path;
 pub mod txn;
