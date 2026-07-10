@@ -1,12 +1,20 @@
 //! Codegen for the struct's `AData` impl (store / load).
 
 use crate::fields::Field;
+use crate::generics::Generics;
+
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::Ident;
 
 /// Generates `impl AData for Struct`, storing/loading one child node per field.
-pub(crate) fn adata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, fields: &[Field]) -> TokenStream {
+pub(crate) fn adata_impl(
+    name: &Ident,
+    ref_name: &Ident,
+    mut_name: &Ident,
+    fields: &[Field],
+    generics: &Generics,
+) -> TokenStream {
     // Only in-shape fields are written; `skip_store_if` makes the write conditional,
     // and `store_with` / `with` replace the field type's `AData::store`.
     let stores = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
@@ -90,11 +98,16 @@ pub(crate) fn adata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, field
         }
     });
 
+    let impl_generics = generics.adata_impl();
+    let ty_generics = generics.adata_ty();
+    let where_clause = generics.adata_where();
+    let accessor_ty = generics.accessor_ty();
+
     quote! {
         #[automatically_derived]
-        impl ::arbordb::data::AData for #name {
-            type Ref<'t> = #ref_name<'t>;
-            type Mut<'t> = #mut_name<'t>;
+        impl #impl_generics ::arbordb::data::AData for #name #ty_generics #where_clause {
+            type Ref<'t> = #ref_name #accessor_ty;
+            type Mut<'t> = #mut_name #accessor_ty;
 
             fn store<__W: ::arbordb::access::Writer>(
                 &self,

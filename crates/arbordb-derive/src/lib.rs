@@ -10,8 +10,10 @@ mod convert;
 mod desc;
 mod enums;
 mod fields;
+mod generics;
 
 use crate::attr::ContainerAttrs;
+use crate::generics::Generics;
 
 use proc_macro::TokenStream;
 use quote::format_ident;
@@ -28,25 +30,19 @@ pub fn derive_adata(input: TokenStream) -> TokenStream {
 }
 
 /// Dispatches on the input's shape (delegated conversion, struct, or enum; unions
-/// and generics rejected).
+/// rejected). Generics are supported via [`Generics`].
 fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    if !input.generics.params.is_empty() {
-        return Err(syn::Error::new_spanned(
-            &input.generics,
-            "#[derive(AData)] does not support generics yet",
-        ));
-    }
-
     let container = ContainerAttrs::parse(&input.attrs)?;
+    let generics = Generics::analyze(&input.generics, container.bound());
 
     // `from`/`into`/`try_from` store the value AS a target type, bypassing shredding.
     if container.delegates() {
-        return convert::convert_impl(input, &container);
+        return convert::convert_impl(input, &container, &generics);
     }
 
     match &input.data {
-        Data::Struct(_) => expand_struct(input, &container),
-        Data::Enum(data) => enums::expand_enum(input, data, &container),
+        Data::Struct(_) => expand_struct(input, &container, &generics),
+        Data::Enum(data) => enums::expand_enum(input, data, &container, &generics),
         Data::Union(_) => Err(syn::Error::new_spanned(
             &input.ident,
             "#[derive(AData)] does not support unions",
@@ -55,7 +51,11 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 }
 
 /// Expands `#[derive(AData)]` for a struct into its impl, accessors, and descriptor.
-fn expand_struct(input: &DeriveInput, container: &ContainerAttrs) -> syn::Result<proc_macro2::TokenStream> {
+fn expand_struct(
+    input: &DeriveInput,
+    container: &ContainerAttrs,
+    generics: &Generics,
+) -> syn::Result<proc_macro2::TokenStream> {
     let fields = fields::named_fields(input, container)?;
 
     let name = &input.ident;
@@ -69,8 +69,8 @@ fn expand_struct(input: &DeriveInput, container: &ContainerAttrs) -> syn::Result
         .map(|field| field.name.clone())
         .collect();
 
-    let adata = adata::adata_impl(name, &ref_name, &mut_name, &fields);
-    let accessors = accessors::accessors(vis, &ref_name, &mut_name, &fields);
+    let adata = adata::adata_impl(name, &ref_name, &mut_name, &fields, generics);
+    let accessors = accessors::accessors(vis, &ref_name, &mut_name, &fields, generics);
     let desc = desc::desc_struct(vis, &desc_name, &name.to_string(), &field_names);
 
     Ok(quote::quote! {

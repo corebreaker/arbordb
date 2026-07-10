@@ -7,13 +7,18 @@
 //! `ArborXxxDesc` is generated; the accessors ARE `U`'s.
 
 use crate::attr::ContainerAttrs;
+use crate::generics::Generics;
 
 use proc_macro2::TokenStream;
 use quote::quote;
 use syn::{DeriveInput, Error};
 
 /// Expands a delegated `AData` impl for a container carrying `from`/`into`/`try_from`.
-pub(crate) fn convert_impl(input: &DeriveInput, container: &ContainerAttrs) -> syn::Result<TokenStream> {
+pub(crate) fn convert_impl(
+    input: &DeriveInput,
+    container: &ContainerAttrs,
+    generics: &Generics,
+) -> syn::Result<TokenStream> {
     let name = &input.ident;
 
     // The on-disk form is the `into` target — required so the value can be stored.
@@ -56,9 +61,13 @@ pub(crate) fn convert_impl(input: &DeriveInput, container: &ContainerAttrs) -> s
         }
     };
 
+    let impl_generics = generics.adata_impl();
+    let ty_generics = generics.adata_ty();
+    let where_clause = generics.adata_where();
+
     Ok(quote! {
         #[automatically_derived]
-        impl ::arbordb::data::AData for #name {
+        impl #impl_generics ::arbordb::data::AData for #name #ty_generics #where_clause {
             type Ref<'t> = <#into_ty as ::arbordb::data::AData>::Ref<'t>;
             type Mut<'t> = <#into_ty as ::arbordb::data::AData>::Mut<'t>;
 

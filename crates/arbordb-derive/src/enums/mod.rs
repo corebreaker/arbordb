@@ -18,6 +18,7 @@ mod store;
 use crate::attr::{ContainerAttrs, VariantAttrs};
 use crate::desc;
 use crate::enums::repr::EnumRepr;
+use crate::generics::Generics;
 
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
@@ -47,6 +48,7 @@ pub(crate) fn expand_enum(
     input: &DeriveInput,
     data: &DataEnum,
     container: &ContainerAttrs,
+    generics: &Generics,
 ) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let vis = &input.vis;
@@ -82,11 +84,16 @@ pub(crate) fn expand_enum(
     let load_body = load_body(&variants, &repr, container, other_variant);
     let variant_names: Vec<String> = variants.iter().map(|info| info.tag.clone()).collect();
 
+    let impl_generics = generics.adata_impl();
+    let ty_generics = generics.adata_ty();
+    let where_clause = generics.adata_where();
+    let accessor_ty = generics.accessor_ty();
+
     let adata = quote! {
         #[automatically_derived]
-        impl ::arbordb::data::AData for #name {
-            type Ref<'t> = #ref_name<'t>;
-            type Mut<'t> = #mut_name<'t>;
+        impl #impl_generics ::arbordb::data::AData for #name #ty_generics #where_clause {
+            type Ref<'t> = #ref_name #accessor_ty;
+            type Mut<'t> = #mut_name #accessor_ty;
 
             fn store<__W: ::arbordb::access::Writer>(
                 &self,
@@ -112,7 +119,7 @@ pub(crate) fn expand_enum(
         }
     };
 
-    let accessors = accessors(input, &ref_name, &mut_name, &repr);
+    let accessors = accessors(input, &ref_name, &mut_name, &repr, generics);
     let desc = desc::desc_enum(vis, &desc_name, &name.to_string(), &variant_names);
 
     Ok(quote! {
@@ -205,26 +212,39 @@ fn load_body(
 
 /// The minimal enum accessors: read and write cursors exposing only `variant()`
 /// (the active tag). The full payload is recomposed with `load::<E>`.
-fn accessors(input: &DeriveInput, ref_name: &Ident, mut_name: &Ident, repr: &EnumRepr) -> TokenStream {
+fn accessors(
+    input: &DeriveInput,
+    ref_name: &Ident,
+    mut_name: &Ident,
+    repr: &EnumRepr,
+    generics: &Generics,
+) -> TokenStream {
     let vis = &input.vis;
     let ref_variant = repr.variant_body(quote! { self.reader });
     let mut_variant = repr.variant_body(quote! { self.writer });
 
+    let accessor_impl = generics.accessor_impl();
+    let accessor_ty = generics.accessor_ty();
+    let accessor_where = generics.accessor_where();
+    let phantom_field = generics.phantom_field();
+    let phantom_init = generics.phantom_init();
+
     quote! {
         #[allow(dead_code)]
-        #vis struct #ref_name<'t> {
+        #vis struct #ref_name #accessor_impl #accessor_where {
             reader: ::std::sync::Arc<dyn ::arbordb::access::Reader + 't>,
             base:   ::arbordb::path::VPath,
+            #phantom_field
         }
 
-        impl<'t> #ref_name<'t> {
+        impl #accessor_impl #ref_name #accessor_ty #accessor_where {
             /// The active variant's tag name.
             #vis fn variant(&self) -> ::arbordb::AdbResult<::std::string::String> {
                 #ref_variant
             }
         }
 
-        impl<'t> ::arbordb::data::ARef<'t> for #ref_name<'t> {
+        impl #accessor_impl ::arbordb::data::ARef<'t> for #ref_name #accessor_ty #accessor_where {
             fn open(
                 reader: ::std::sync::Arc<dyn ::arbordb::access::Reader + 't>,
                 base: ::arbordb::path::VPath,
@@ -232,30 +252,32 @@ fn accessors(input: &DeriveInput, ref_name: &Ident, mut_name: &Ident, repr: &Enu
                 Self {
                     reader,
                     base,
+                    #phantom_init
                 }
             }
         }
 
-        impl<'t> ::arbordb::data::AIdentifiable for #ref_name<'t> {
+        impl #accessor_impl ::arbordb::data::AIdentifiable for #ref_name #accessor_ty #accessor_where {
             fn path(&self) -> &::arbordb::path::VPath {
                 &self.base
             }
         }
 
         #[allow(dead_code)]
-        #vis struct #mut_name<'t> {
+        #vis struct #mut_name #accessor_impl #accessor_where {
             writer: ::std::sync::Arc<dyn ::arbordb::access::Writer + 't>,
             base:   ::arbordb::path::VPath,
+            #phantom_field
         }
 
-        impl<'t> #mut_name<'t> {
+        impl #accessor_impl #mut_name #accessor_ty #accessor_where {
             /// The active variant's tag name.
             #vis fn variant(&self) -> ::arbordb::AdbResult<::std::string::String> {
                 #mut_variant
             }
         }
 
-        impl<'t> ::arbordb::data::AMut<'t> for #mut_name<'t> {
+        impl #accessor_impl ::arbordb::data::AMut<'t> for #mut_name #accessor_ty #accessor_where {
             fn open(
                 writer: ::std::sync::Arc<dyn ::arbordb::access::Writer + 't>,
                 base: ::arbordb::path::VPath,
@@ -263,11 +285,12 @@ fn accessors(input: &DeriveInput, ref_name: &Ident, mut_name: &Ident, repr: &Enu
                 Self {
                     writer,
                     base,
+                    #phantom_init
                 }
             }
         }
 
-        impl<'t> ::arbordb::data::AIdentifiable for #mut_name<'t> {
+        impl #accessor_impl ::arbordb::data::AIdentifiable for #mut_name #accessor_ty #accessor_where {
             fn path(&self) -> &::arbordb::path::VPath {
                 &self.base
             }

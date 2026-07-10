@@ -1,6 +1,7 @@
 //! Container-level `#[arbor(...)]` attributes (on the struct or enum itself).
 
 use crate::attr::rename::RenameRule;
+use crate::generics::Bounds;
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -26,6 +27,9 @@ pub(crate) struct ContainerAttrs {
     untagged:              bool,
     /// `expecting = "..."`: overrides the "no variant matched" load error message.
     expecting:             Option<String>,
+    /// `bound = "..."`: custom `where` predicates replacing the default `T: AData`
+    /// on a generic type.
+    bound:                 Option<Bounds>,
 }
 
 impl ContainerAttrs {
@@ -87,6 +91,12 @@ impl ContainerAttrs {
                     return Ok(());
                 }
 
+                if meta.path.is_ident("bound") {
+                    out.bound = Some(meta.value()?.parse::<LitStr>()?.parse_with(Bounds::parse_terminated)?);
+
+                    return Ok(());
+                }
+
                 Err(meta.error("unknown arbor container attribute"))
             })?;
         }
@@ -136,5 +146,10 @@ impl ContainerAttrs {
             Some(message) => quote! { ::arbordb::AdbError::Corrupt(::std::string::String::from(#message)) },
             None => quote! { ::arbordb::AdbError::Corrupt(#default) },
         }
+    }
+
+    /// Custom `bound` predicates that replace the default `T: AData` on a generic type.
+    pub(crate) fn bound(&self) -> Option<&Bounds> {
+        self.bound.as_ref()
     }
 }

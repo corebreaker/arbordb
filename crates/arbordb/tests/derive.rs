@@ -3,6 +3,7 @@
 #![cfg(feature = "derive")]
 
 use arbordb::{AData, ArborDb};
+use std::marker::PhantomData;
 
 #[derive(AData, Debug, Clone, PartialEq)]
 struct Point {
@@ -958,4 +959,106 @@ fn expecting_customizes_the_no_match_error() {
 
     let error = r.load::<Color>("weird").unwrap_err();
     assert!(error.to_string().contains("a traffic light color"));
+}
+
+// A generic struct: the derive adds a `T: AData` bound and a PhantomData marker.
+#[derive(AData, Debug, Clone, PartialEq)]
+struct Wrapper<T> {
+    label: String,
+    value: T,
+}
+
+#[test]
+fn generic_struct_round_trips() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    let wrapped = Wrapper {
+        label: String::from("answer"),
+        value: 42_i64,
+    };
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Wrapper<i64>>("x", &wrapped).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    assert_eq!(r.load::<Wrapper<i64>>("x").unwrap(), Some(wrapped));
+    assert_eq!(r.get_as::<i64>("x", "value").unwrap(), Some(42));
+
+    // The accessor is itself generic (`ArborWrapper<'t, T>`).
+    let view: ArborWrapper<'static, i64> = r.fetch("x").unwrap().unwrap();
+    assert_eq!(view.label().get().unwrap(), "answer");
+    assert_eq!(view.value().get().unwrap(), 42);
+}
+
+// A generic enum with two type parameters.
+#[derive(AData, Debug, Clone, PartialEq)]
+enum Either<L, R> {
+    Left(L),
+    Right(R),
+}
+
+#[test]
+fn generic_enum_round_trips() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Either<i64, String>>("l", &Either::Left(7)).unwrap();
+        w.store::<Either<i64, String>>("r", &Either::Right(String::from("hi")))
+            .unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    assert_eq!(r.load::<Either<i64, String>>("l").unwrap(), Some(Either::Left(7)));
+    assert_eq!(
+        r.load::<Either<i64, String>>("r").unwrap(),
+        Some(Either::Right(String::from("hi"))),
+    );
+
+    let view: ArborEither<'static, i64, String> = r.fetch("l").unwrap().unwrap();
+    assert_eq!(view.variant().unwrap(), "Left");
+}
+
+// A type parameter used only in a skipped PhantomData field: not stored, and
+// never routed through AData. Does NOT implement AData.
+#[derive(Debug, Clone, PartialEq)]
+struct Marker;
+
+// `bound = ""` replaces the default `T: AData`, so `Phantomish<Marker>` is valid
+// even though `Marker: AData` does not hold.
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(bound = "")]
+struct Phantomish<T> {
+    value: i64,
+    #[arbor(skip)]
+    tag:   PhantomData<T>,
+}
+
+#[test]
+fn bound_override_drops_the_default_adata_bound() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    let value = Phantomish::<Marker> {
+        value: 5,
+        tag:   PhantomData,
+    };
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Phantomish<Marker>>("x", &value).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<Phantomish<Marker>>("x").unwrap(), Some(value));
+    assert_eq!(r.get_as::<i64>("x", "value").unwrap(), Some(5));
 }
