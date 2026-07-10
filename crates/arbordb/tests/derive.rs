@@ -1115,3 +1115,68 @@ fn flatten_merges_the_field_into_the_parent_node() {
     assert_eq!(view.meta().created().get().unwrap(), 100);
     assert_eq!(view.meta().author().get().unwrap(), "Ann");
 }
+
+// `#[arbor(index(...))]` declares secondary indexes; the derive emits `AIndexed`.
+#[derive(AData)]
+#[arbor(index(name = "by_age", columns(age)))]
+#[arbor(index(name = "by_city_age", columns(city, age desc), unique))]
+struct Member {
+    name: String,
+    age:  u32,
+    city: String,
+}
+
+#[test]
+fn derive_declares_indexes() {
+    use arbordb::index::{AIndexed, IndexColumn, IndexDef};
+    use arbordb::path::VPath;
+
+    let defs = Member::index_defs("members/*");
+
+    assert_eq!(
+        defs,
+        vec![
+            IndexDef::new(
+                String::from("by_age"),
+                String::from("members/*"),
+                vec![IndexColumn::asc(VPath::root().child_name("age"))],
+                false,
+            ),
+            IndexDef::new(
+                String::from("by_city_age"),
+                String::from("members/*"),
+                vec![
+                    IndexColumn::asc(VPath::root().child_name("city")),
+                    IndexColumn::desc(VPath::root().child_name("age")),
+                ],
+                true,
+            ),
+        ],
+    );
+}
+
+// A column names a renamed field: the index path uses the STORED name.
+#[derive(AData)]
+#[arbor(rename_all = "camelCase", index(name = "by_full", columns(full_name)))]
+struct Account {
+    full_name: String,
+}
+
+#[test]
+fn index_column_uses_the_stored_field_name() {
+    use arbordb::index::AIndexed;
+
+    let defs = Account::index_defs("accounts/*");
+
+    assert_eq!(defs.len(), 1);
+    assert_eq!(defs[0].columns()[0].path().to_string(), "fullName");
+}
+
+// A struct without any index declaration still implements `AIndexed`.
+#[test]
+fn a_struct_without_indexes_has_an_empty_index_set() {
+    use arbordb::index::AIndexed;
+
+    assert!(Member::index_defs("members/*").iter().all(|def| !def.name().is_empty()));
+    assert_eq!(Point::index_defs("points/*"), vec![]);
+}

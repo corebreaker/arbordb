@@ -2,6 +2,7 @@
 
 use crate::attr::rename::RenameRule;
 use crate::generics::Bounds;
+use crate::index::IndexAttr;
 
 use proc_macro2::TokenStream;
 use quote::quote;
@@ -30,6 +31,8 @@ pub(crate) struct ContainerAttrs {
     /// `bound = "..."`: custom `where` predicates replacing the default `T: AData`
     /// on a generic type.
     bound:                 Option<Bounds>,
+    /// `index(...)` declarations (repeatable), each a secondary index on this type.
+    indexes:               Vec<IndexAttr>,
 }
 
 impl ContainerAttrs {
@@ -97,6 +100,14 @@ impl ContainerAttrs {
                     return Ok(());
                 }
 
+                if meta.path.is_ident("index") {
+                    let body;
+                    syn::parenthesized!(body in meta.input);
+                    out.indexes.push(IndexAttr::from_body(&body)?);
+
+                    return Ok(());
+                }
+
                 Err(meta.error("unknown arbor container attribute"))
             })?;
         }
@@ -151,5 +162,10 @@ impl ContainerAttrs {
     /// Custom `bound` predicates that replace the default `T: AData` on a generic type.
     pub(crate) fn bound(&self) -> Option<&Bounds> {
         self.bound.as_ref()
+    }
+
+    /// The `index(...)` declarations on this type.
+    pub(crate) fn indexes(&self) -> &[IndexAttr] {
+        &self.indexes
     }
 }

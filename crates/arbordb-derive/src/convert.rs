@@ -21,6 +21,14 @@ pub(crate) fn convert_impl(
 ) -> syn::Result<TokenStream> {
     let name = &input.ident;
 
+    // Index columns name a struct's fields; a delegated type exposes none.
+    if let Some(index) = container.indexes().first() {
+        return Err(Error::new_spanned(
+            index.name(),
+            "`#[arbor(index(...))]` is incompatible with `from`/`into`/`try_from`",
+        ));
+    }
+
     // The on-disk form is the `into` target — required so the value can be stored.
     let Some(into_ty) = container.store_as() else {
         let probe = container.load_from().or(container.try_load_from()).expect("delegates");

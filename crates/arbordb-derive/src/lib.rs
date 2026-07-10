@@ -11,6 +11,7 @@ mod desc;
 mod enums;
 mod fields;
 mod generics;
+mod index;
 
 use crate::attr::ContainerAttrs;
 use crate::generics::Generics;
@@ -42,7 +43,17 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     match &input.data {
         Data::Struct(_) => expand_struct(input, &container, &generics),
-        Data::Enum(data) => enums::expand_enum(input, data, &container, &generics),
+        Data::Enum(data) => {
+            // Index columns name a struct's fields; an enum exposes none.
+            if let Some(index) = container.indexes().first() {
+                return Err(syn::Error::new_spanned(
+                    index.name(),
+                    "`#[arbor(index(...))]` is not supported on enums",
+                ));
+            }
+
+            enums::expand_enum(input, data, &container, &generics)
+        }
         Data::Union(_) => Err(syn::Error::new_spanned(
             &input.ident,
             "#[derive(AData)] does not support unions",
@@ -72,10 +83,12 @@ fn expand_struct(
     let adata = adata::adata_impl(name, &ref_name, &mut_name, &fields, generics);
     let accessors = accessors::accessors(vis, &ref_name, &mut_name, &fields, generics);
     let desc = desc::desc_struct(vis, &desc_name, &name.to_string(), &field_names);
+    let indexed = index::indexed_impl(name, &fields, container.indexes(), generics)?;
 
     Ok(quote::quote! {
         #adata
         #accessors
         #desc
+        #indexed
     })
 }
