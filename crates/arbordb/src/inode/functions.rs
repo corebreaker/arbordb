@@ -80,7 +80,7 @@ pub(crate) fn bump_access(inodes: &mut InodeTable, table: &str, akey: AKey, when
 }
 
 /// Reads vnode `akey`'s timestamps, or `None` if it has no inode yet.
-pub(crate) fn read_times<R>(inodes: &R, table: &str, akey: AKey) -> AdbResult<Option<NodeTimestamps>>
+pub(crate) fn read_timestamps<R>(inodes: &R, table: &str, akey: AKey) -> AdbResult<Option<NodeTimestamps>>
 where
     R: ReadableTable<&'static [u8], &'static [u8]>, {
     let Some(guard) = inodes.get(inode_key(table, akey).as_slice())? else {
@@ -165,6 +165,39 @@ pub(crate) fn seal_mac(inodes: &mut InodeTable, table: &str, akey: AKey, mac: [u
     };
 
     inode.set_mac(mac);
+    inodes.insert(key.as_slice(), inode.encode().as_slice())?;
+
+    Ok(())
+}
+
+/// Reads vnode `akey`'s value signature, or `None` if it has none yet.
+#[cfg(feature = "permissions")]
+pub(crate) fn read_sig<R>(inodes: &R, table: &str, akey: AKey) -> AdbResult<Option<[u8; crate::crypto::SIG_LEN]>>
+where
+    R: ReadableTable<&'static [u8], &'static [u8]>, {
+    let Some(guard) = inodes.get(inode_key(table, akey).as_slice())? else {
+        return Ok(None);
+    };
+
+    Ok(Inode::decode(guard.value())?.sig())
+}
+
+/// Stores vnode `akey`'s value signature, preserving every other section.
+#[cfg(feature = "permissions")]
+pub(crate) fn seal_sig(
+    inodes: &mut InodeTable,
+    table: &str,
+    akey: AKey,
+    sig: [u8; crate::crypto::SIG_LEN],
+) -> AdbResult<()> {
+    let key = inode_key(table, akey);
+
+    let mut inode = match inodes.get(key.as_slice())? {
+        Some(guard) => Inode::decode(guard.value())?,
+        None => Inode::default(),
+    };
+
+    inode.set_sig(sig);
     inodes.insert(key.as_slice(), inode.encode().as_slice())?;
 
     Ok(())

@@ -21,13 +21,19 @@ thiserror = "2.0"
 uuid = { version = "1.23", features = ["v7"] }
 arbordb-derive = { workspace = true, optional = true }
 
+# Optional Serde support for public types (the `serde` feature); e.g. `PublicKey`.
+serde = { version = "1", features = ["derive"], optional = true }
+
 # Cryptography for the `permissions` feature (all optional). Passwords are never
-# stored: a per-user Argon2id-derived key wraps the database integrity key, and
-# authentication succeeds only if that unwrap does. BLAKE3 is the per-value MAC.
+# stored: a per-user Argon2id-derived key wraps the database secrets, and
+# authentication succeeds only if that unwrap does. BLAKE3 is the per-value MAC an
+# authenticated reader verifies; Ed25519 signs each value so a keyless guest can
+# verify it too (the public verification key is stored in the clear).
 argon2 = { version = "0.5", optional = true }
 chacha20poly1305 = { version = "0.11", optional = true }
 blake3 = { version = "1", optional = true }
 getrandom = { version = "0.4", optional = true }
+ed25519-dalek = { version = "2", optional = true }
 
 # ArborDb writes its own zero-copy codec, so there is deliberately NO rkyv dependency.
 
@@ -35,6 +41,7 @@ getrandom = { version = "0.4", optional = true }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 num-bigint = { workspace = true }  # the bignum cross-feature test constructs `BigInt`s directly
 redb = { workspace = true }        # the tamper tests edit the raw file the way an attacker with redb alone would
+serde_json = "1"                   # exercises the `serde` impls (e.g. `PublicKey`) under the `serde` feature
 tempfile = "3.27"
 
 # `basic` uses only the default API; the rest need a feature.
@@ -104,6 +111,9 @@ default = []
 derive = ["dep:arbordb-derive"]
 parallel = ["dep:rayon"]
 
+# Serde `Serialize`/`Deserialize` for the crate's public types (currently `PublicKey`).
+serde = ["dep:serde"]
+
 # Per-vnode created/modified/accessed datetime, stored out-of-band in the reserved
 # `$inodes` table. A binary compiled without this feature never opens that table,
 # so it opens a timestamped database and simply ignores the timestamps.
@@ -118,6 +128,7 @@ permissions = [
     "dep:chacha20poly1305",
     "dep:blake3",
     "dep:getrandom",
+    "dep:ed25519-dalek",
 ]
 
 bignum = ["bignum-as-scalar", "bignum-as-data"]

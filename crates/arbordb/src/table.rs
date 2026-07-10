@@ -83,7 +83,7 @@ impl Table {
     /// user is read-only and cannot obtain one.
     pub fn write(&self) -> AdbResult<WriteTxn> {
         #[cfg(feature = "permissions")]
-        if matches!(self.principal.as_ref(), Principal::Guest) {
+        if matches!(self.principal.as_ref(), Principal::Guest { .. }) {
             return Err(AdbError::PermissionDenied(String::from("the guest user is read-only")));
         }
 

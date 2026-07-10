@@ -4,7 +4,13 @@
 #![cfg(feature = "permissions")]
 
 use arbordb::acl::{Mode, Rights};
-use arbordb::{data::Scalar, AdbError, ArborDb, Value};
+use arbordb::perm::PublicKey;
+use arbordb::{
+    data::{AValue, Scalar},
+    AdbError,
+    ArborDb,
+    Value,
+};
 use std::path::PathBuf;
 
 fn leaf(n: i64) -> Value {
@@ -591,4 +597,118 @@ fn a_writer_cannot_launder_a_tampered_value() {
     let t = master.open_table("docs").unwrap();
     let w = t.write().unwrap();
     assert!(matches!(w.cp("note", "copy"), Err(AdbError::Tampered(_))));
+}
+
+#[test]
+fn public_key_bytes_and_file_round_trip() {
+    let (dir, path) = tmp_db();
+
+    let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+    let key = db.pubkey().unwrap();
+
+    // Writing the key to a file then reading it back yields the same key.
+    let saved = dir.path().join("trusted.pub");
+    key.write_key(&saved).unwrap();
+    assert_eq!(PublicKey::read_key(&saved).unwrap(), key);
+
+    // Bytes round-trip through `as_bytes` / `into_bytes` / `from_bytes` (32 bytes).
+    assert_eq!(key.as_bytes().len(), 32);
+    assert_eq!(PublicKey::from_bytes(*key.as_bytes()), key);
+    assert_eq!(PublicKey::from_bytes(key.into_bytes()), key);
+
+    // A database with no permission system has no public key.
+    assert!(matches!(
+        ArborDb::create_in_memory().unwrap().pubkey(),
+        Err(AdbError::NoPermissions)
+    ));
+}
+
+#[test]
+fn public_key_round_trips_as_avalue_and_adata() {
+    let db = ArborDb::create_in_memory().unwrap().change_password("pw").unwrap();
+    let key = db.pubkey().unwrap();
+
+    // AValue: to_scalar / from_scalar.
+    assert_eq!(key.to_scalar(), Scalar::Bytes(key.as_bytes().to_vec()));
+    assert_eq!(PublicKey::from_scalar(&key.to_scalar()).unwrap(), key);
+    assert!(matches!(
+        PublicKey::from_scalar(&Scalar::I64(1)),
+        Err(AdbError::TypeMismatch { .. })
+    ));
+
+    // AData: store then load it as a stored value (master bypasses ACLs).
+    let t = db.open_table("keys").unwrap();
+    {
+        let w = t.write().unwrap();
+        w.store::<PublicKey>("mine", &key).unwrap();
+        w.commit().unwrap();
+    }
+    assert_eq!(t.read().unwrap().load::<PublicKey>("mine").unwrap(), Some(key));
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn public_key_serde_round_trips() {
+    let db = ArborDb::create_in_memory().unwrap().change_password("pw").unwrap();
+    let key = db.pubkey().unwrap();
+
+    let json = serde_json::to_string(&key).unwrap();
+    assert_eq!(serde_json::from_str::<PublicKey>(&json).unwrap(), key);
+}
+
+#[test]
+fn pinning_a_trusted_public_key_drives_guest_verification() {
+    let (_dir, path) = tmp_db();
+
+    // A trusted database: master stores a world-readable value; capture its key.
+    let genuine = {
+        let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+        let t = db.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("docs/readme", &leaf(42)).unwrap();
+        w.commit().unwrap();
+
+        db.pubkey().unwrap()
+    };
+
+    // A guest pinned to the genuine key reads the value — the signatures verify.
+    {
+        let guest = ArborDb::open(&path).unwrap().with_pubkey(genuine).unwrap();
+        let t = guest.open_table("data").unwrap();
+        assert_eq!(t.read().unwrap().load_value("docs/readme").unwrap(), Some(leaf(42)));
+    }
+
+    // A guest pinned to a DIFFERENT (valid) key rejects the value as tampered: the
+    // pinned key, not the stored one, drives verification, so an attacker who swaps
+    // the stored key and re-signs under their own key is caught.
+    {
+        let (_other_dir, other_path) = tmp_db();
+        let other = ArborDb::create(&other_path)
+            .unwrap()
+            .change_password("pw")
+            .unwrap()
+            .pubkey()
+            .unwrap();
+        assert_ne!(other, genuine);
+
+        let guest = ArborDb::open(&path).unwrap().with_pubkey(other).unwrap();
+        let t = guest.open_table("data").unwrap();
+        assert!(matches!(
+            t.read().unwrap().load_value("docs/readme"),
+            Err(AdbError::Tampered(_))
+        ));
+    }
+
+    // Pinning is a guest operation: an authenticated user already verifies through
+    // its own key, and an unprotected database has no signatures to check.
+    assert!(matches!(
+        ArborDb::open_with_authentication(&path, "master", "pw")
+            .unwrap()
+            .with_pubkey(genuine),
+        Err(AdbError::PermissionDenied(_))
+    ));
+    assert!(matches!(
+        ArborDb::create_in_memory().unwrap().with_pubkey(genuine),
+        Err(AdbError::NoPermissions)
+    ));
 }

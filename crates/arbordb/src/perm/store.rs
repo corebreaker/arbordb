@@ -1,9 +1,10 @@
 //! The users, groups, and key-wrapping keyring of a protected database, persisted
 //! as two blobs (`users`, `groups`) in the reserved `$metadata` table.
 //!
-//! A user record optionally carries a *keyring entry* — the database integrity
-//! key `K` wrapped under that user's password. Authenticating unwraps `K`; a user
-//! with no keyring entry (the guest) simply cannot authenticate.
+//! A user record optionally carries a *keyring entry* — the database secret bundle
+//! (`K ‖ sk`: the integrity key and the Ed25519 signing seed) wrapped under that
+//! user's password. Authenticating unwraps it; a user with no keyring entry (the
+//! guest) simply cannot authenticate, so it can neither seal a value nor forge one.
 
 use super::{
     constants::{GUEST_UID, GUEST_USER, MASTER_GID, MASTER_GROUP, MASTER_UID, MASTER_USER, SUPER_GID, SUPER_GROUP},
@@ -12,12 +13,12 @@ use super::{
 };
 
 use crate::{
-    crypto::{self, KEY_LEN, NONCE_LEN, SALT_LEN},
+    crypto::{self, KEY_LEN, NONCE_LEN, PUBKEY_LEN, SALT_LEN, SEED_LEN},
     codec::{put_bytes, put_u32, Reader},
-    constants::{META_CONTROL_MAC_KEY, META_EPOCH_KEY, META_GROUPS_KEY, META_USERS_KEY},
+    constants::{META_CONTROL_MAC_KEY, META_EPOCH_KEY, META_GROUPS_KEY, META_PUBKEY_KEY, META_USERS_KEY},
     engine::{data_def, required_features, require_feature, META_TABLE},
     error::{AdbError, AdbResult},
-    inode::{seal_mac, set_default_acl, INODES_TABLE},
+    inode::{seal_mac, seal_sig, set_default_acl, INODES_TABLE},
     AKey,
 };
 
@@ -26,18 +27,18 @@ use redb::{Database, ReadableDatabase, ReadableTable, Table, TableHandle};
 /// The write handle to the metadata table.
 type MetaTable<'txn> = Table<'txn, &'static str, &'static [u8]>;
 
-/// The integrity key `K` wrapped under one user's password.
+/// The database secret bundle (`K ‖ sk`) wrapped under one user's password.
 struct KeyringEntry {
     /// The per-user salt fed to the password key-derivation function.
     salt:    [u8; SALT_LEN],
-    /// The AEAD nonce used to wrap the integrity key.
+    /// The AEAD nonce used to wrap the secret bundle.
     nonce:   [u8; NONCE_LEN],
-    /// The integrity key `K`, encrypted under the password-derived key.
+    /// The secret bundle (`K ‖ sk`), encrypted under the password-derived key.
     wrapped: Vec<u8>,
 }
 
 /// A stored user: identity, group memberships, frozen flag, and (unless the user
-/// has no password) its wrapped copy of the integrity key.
+/// has no password) its wrapped copy of the database secret bundle.
 struct UserRecord {
     /// The user's name.
     name:    String,
@@ -48,7 +49,7 @@ struct UserRecord {
     frozen:  bool,
     /// The ids of the groups the user belongs to.
     gids:    Vec<u32>,
-    /// The user's wrapped integrity key, or `None` for a passwordless user.
+    /// The user's wrapped secret bundle, or `None` for a passwordless user.
     keyring: Option<KeyringEntry>,
 }
 
@@ -223,6 +224,53 @@ fn utf8(bytes: &[u8]) -> AdbResult<String> {
         .map_err(|_| AdbError::Corrupt("invalid utf-8 in the permission store".into()))
 }
 
+/// The length of the wrapped secret bundle: the integrity key `K` followed by the
+/// Ed25519 signing seed.
+const SECRET_LEN: usize = KEY_LEN + SEED_LEN;
+
+/// Wraps the secret bundle `K ‖ sk` under `password`, returning `(salt, nonce, ciphertext)`.
+fn wrap_secrets(password: &str, key: &[u8], seed: &[u8]) -> AdbResult<([u8; SALT_LEN], [u8; NONCE_LEN], Vec<u8>)> {
+    let mut secret = [0u8; SECRET_LEN];
+    secret[..KEY_LEN].copy_from_slice(key);
+    secret[KEY_LEN..].copy_from_slice(seed);
+
+    crypto::wrap_key(password, &secret)
+}
+
+/// Splits an unwrapped secret bundle back into the integrity key `K` and the seed.
+fn split_secrets(plaintext: &[u8]) -> AdbResult<([u8; KEY_LEN], [u8; SEED_LEN])> {
+    if plaintext.len() != SECRET_LEN {
+        return Err(AdbError::Corrupt("the wrapped secrets have the wrong length".into()));
+    }
+
+    let key = plaintext[..KEY_LEN].try_into().expect("the length was just checked");
+    let seed = plaintext[KEY_LEN..].try_into().expect("the length was just checked");
+
+    Ok((key, seed))
+}
+
+/// The stored public verification key bytes, or empty before the first promotion
+/// writes one. Bound into the control-plane MAC so a swap of it is detected at auth.
+fn read_pubkey_bytes<R: ReadableTable<&'static str, &'static [u8]>>(meta: &R) -> AdbResult<Vec<u8>> {
+    Ok(meta
+        .get(META_PUBKEY_KEY)?
+        .map(|guard| guard.value().to_vec())
+        .unwrap_or_default())
+}
+
+/// The stored public verification key of a protected `db`, read in the clear. A
+/// guest handle carries it to verify each value's signature.
+pub(crate) fn load_pubkey(db: &Database) -> AdbResult<[u8; PUBKEY_LEN]> {
+    let txn = db.begin_read()?;
+    let meta = txn.open_table(META_TABLE)?;
+
+    let bytes = read_pubkey_bytes(&meta)?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| AdbError::Corrupt("the public verification key is missing or malformed".into()))
+}
+
 /// The current control-plane epoch (0 when the database has never sealed one).
 fn read_epoch<R: ReadableTable<&'static str, &'static [u8]>>(meta: &R) -> AdbResult<u64> {
     match meta.get(META_EPOCH_KEY)? {
@@ -250,12 +298,13 @@ fn seal_control(meta: &mut MetaTable<'_>, key: &[u8]) -> AdbResult<()> {
         .get(META_GROUPS_KEY)?
         .map(|guard| guard.value().to_vec())
         .unwrap_or_default();
+    let pubkey = read_pubkey_bytes(&*meta)?;
     let epoch = read_epoch(&*meta)? + 1;
 
     meta.insert(META_EPOCH_KEY, epoch.to_be_bytes().as_slice())?;
     meta.insert(
         META_CONTROL_MAC_KEY,
-        integrity::mac_control(key, epoch, &users, &groups).as_slice(),
+        integrity::mac_control(key, epoch, &users, &groups, &pubkey).as_slice(),
     )?;
 
     Ok(())
@@ -273,8 +322,9 @@ fn verify_control<R: ReadableTable<&'static str, &'static [u8]>>(meta: &R, key: 
         .get(META_GROUPS_KEY)?
         .map(|guard| guard.value().to_vec())
         .unwrap_or_default();
+    let pubkey = read_pubkey_bytes(meta)?;
     let epoch = read_epoch(meta)?;
-    let expected = integrity::mac_control(key, epoch, &users, &groups);
+    let expected = integrity::mac_control(key, epoch, &users, &groups, &pubkey);
 
     match meta.get(META_CONTROL_MAC_KEY)? {
         Some(guard) if integrity::ct_eq(guard.value(), &expected) => Ok(()),
@@ -293,8 +343,9 @@ pub(crate) fn is_protected(db: &Database) -> AdbResult<bool> {
 }
 
 /// Authenticates `user`/`password` against the stored keyring, returning the
-/// session (which holds the unwrapped integrity key). Unknown user, no password,
-/// or wrong password all surface as [`AuthenticationFailed`](AdbError::AuthenticationFailed).
+/// session (which holds the unwrapped integrity key and signing seed). Unknown
+/// user, no password, or wrong password all surface as
+/// [`AuthenticationFailed`](AdbError::AuthenticationFailed).
 pub(crate) fn authenticate(db: &Database, user: &str, password: &str) -> AdbResult<Session> {
     let txn = db.begin_read()?;
     let meta = txn.open_table(META_TABLE)?;
@@ -308,24 +359,32 @@ pub(crate) fn authenticate(db: &Database, user: &str, password: &str) -> AdbResu
 
     let keyring = record.keyring.as_ref().ok_or(AdbError::AuthenticationFailed)?;
 
-    let key = crypto::unwrap_key(password, &keyring.salt, &keyring.nonce, &keyring.wrapped)?;
-    let key: [u8; KEY_LEN] = key
-        .as_slice()
-        .try_into()
-        .map_err(|_| AdbError::Corrupt("the wrapped integrity key has the wrong length".into()))?;
+    let secret = crypto::unwrap_key(password, &keyring.salt, &keyring.nonce, &keyring.wrapped)?;
+    let (key, seed) = split_secrets(&secret)?;
 
-    // With `K` in hand, confirm the user/group store has not been altered under us.
+    // With `K` in hand, confirm the user/group store and the public verification key
+    // have not been altered under us (a swap of the public key is caught here too).
     verify_control(&meta, &key)?;
 
-    Ok(Session::new(record.name.clone(), record.uid, record.gids.clone(), key))
+    Ok(Session::new(
+        record.name.clone(),
+        record.uid,
+        record.gids.clone(),
+        key,
+        seed,
+    ))
 }
 
-/// Promotes a non-protected `db` to a protected one: mints a fresh integrity key,
-/// creates the master and guest users and the master and super groups, records
-/// `permissions` as required, and returns the master session.
+/// Promotes a non-protected `db` to a protected one: mints a fresh integrity key
+/// and Ed25519 signing keypair (storing the public key in the clear), creates the
+/// master and guest users and the master and super groups, records `permissions` as
+/// required, back-fills a tag on every pre-existing vnode, and returns the master
+/// session.
 pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Session> {
     let key = crypto::random_key()?;
-    let (salt, nonce, wrapped) = crypto::wrap_key(password, &key)?;
+    let seed = crypto::random_seed()?;
+    let pubkey = crypto::public_key(&seed);
+    let (salt, nonce, wrapped) = wrap_secrets(password, &key, &seed)?;
 
     // Snapshot the existing user tables so their vnodes can be back-filled with a
     // default ACL and an integrity tag below (data written before protection).
@@ -386,6 +445,10 @@ pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Sess
         users.store(&mut meta)?;
         groups.store(&mut meta)?;
         require_feature(&mut meta, "permissions")?;
+
+        // Store the public verification key in the clear *before* sealing the control
+        // plane, which binds it — a later swap of it then fails verification at auth.
+        meta.insert(META_PUBKEY_KEY, pubkey.as_slice())?;
         seal_control(&mut meta, &key)?;
     }
 
@@ -420,19 +483,31 @@ pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Sess
                     akey,
                     integrity::mac_value(&key, table, akey, &entry, &acl),
                 )?;
+                seal_sig(
+                    &mut inodes,
+                    table,
+                    akey,
+                    integrity::sign_value(&seed, table, akey, &entry, &acl),
+                )?;
             }
         }
     }
 
     txn.commit()?;
 
-    Ok(Session::new(MASTER_USER.to_string(), MASTER_UID, vec![MASTER_GID], key))
+    Ok(Session::new(
+        MASTER_USER.to_string(),
+        MASTER_UID,
+        vec![MASTER_GID],
+        key,
+        seed,
+    ))
 }
 
 /// Re-wraps the current session's integrity key under a new password, replacing
 /// that user's keyring entry.
 pub(crate) fn change_user_password(db: &Database, session: &Session, new_password: &str) -> AdbResult<()> {
-    let (salt, nonce, wrapped) = crypto::wrap_key(new_password, session.key())?;
+    let (salt, nonce, wrapped) = wrap_secrets(new_password, session.key(), session.sign_seed())?;
 
     let txn = db.begin_write()?;
     {
@@ -469,10 +544,18 @@ fn is_protected_group(gid: u32) -> bool {
     gid == MASTER_GID || gid == SUPER_GID
 }
 
-/// Adds a user `name` with `password`, wrapping the caller's integrity `key` under
-/// it. When `create_group`, also creates a same-named group and puts the user in it.
-pub(crate) fn add_user(db: &Database, key: &[u8], name: &str, password: &str, create_group: bool) -> AdbResult<()> {
-    let (salt, nonce, wrapped) = crypto::wrap_key(password, key)?;
+/// Adds a user `name` with `password`, wrapping the caller's secret bundle (the
+/// integrity key `key` and signing `seed`) under it. When `create_group`, also
+/// creates a same-named group and puts the user in it.
+pub(crate) fn add_user(
+    db: &Database,
+    key: &[u8],
+    seed: &[u8],
+    name: &str,
+    password: &str,
+    create_group: bool,
+) -> AdbResult<()> {
+    let (salt, nonce, wrapped) = wrap_secrets(password, key, seed)?;
 
     let txn = db.begin_write()?;
     {

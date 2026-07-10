@@ -26,7 +26,8 @@
 //!   [`ReadTxn::find`](txn::ReadTxn::find).
 //! - [Rooted views](txn::RootedRead) that make every path relative to a fixed root.
 //! - Optional per-vnode `created` / `modified` / `accessed` timestamps (`entry-timestamps`), and user/password
-//!   authentication with per-vnode ACLs and keyed-MAC tamper detection (`permissions`).
+//!   authentication with per-vnode ACLs and MAC + signature tamper detection, verified even for a guest
+//!   (`permissions`).
 //! - An optional big-number scalar/data feature matrix (`bignum`).
 //!
 //! # Quick start

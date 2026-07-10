@@ -20,7 +20,7 @@ use crate::{
 /// (`None` when the vnode has no ACL yet).
 pub(crate) fn authorize(principal: &Principal, akey: AKey, acl: Option<&Acl>, right: Right) -> AdbResult<()> {
     // The guest is read-only, whatever the ACL or the vnode says.
-    if matches!(principal, Principal::Guest) && right == Right::Write {
+    if matches!(principal, Principal::Guest { .. }) && right == Right::Write {
         return Err(denied(right));
     }
 
@@ -54,7 +54,9 @@ pub(crate) fn authorize(principal: &Principal, akey: AKey, acl: Option<&Acl>, ri
 fn class_check(principal: &Principal, acl: &Acl, right: Right) -> AdbResult<()> {
     let (uid, gids): (u32, &[u32]) = match principal {
         Principal::User(session) => (session.uid(), session.gids()),
-        Principal::Guest => (GUEST_UID, &[]),
+        Principal::Guest {
+            ..
+        } => (GUEST_UID, &[]),
         // Unrestricted and the master user are handled by the caller.
         Principal::Unrestricted => return Ok(()),
     };
@@ -85,7 +87,9 @@ pub(crate) fn authorize_chown(principal: &Principal, acl: &Acl) -> AdbResult<()>
         Principal::Unrestricted => true,
         Principal::User(session) if session.is_master() || session.in_master_group() => true,
         Principal::User(session) => session.uid() == acl.owner(),
-        Principal::Guest => false,
+        Principal::Guest {
+            ..
+        } => false,
     };
 
     if allowed {
@@ -105,7 +109,9 @@ pub(crate) fn authorize_chgrp(principal: &Principal, acl: &Acl, target: Option<u
         Principal::Unrestricted => return Ok(()),
         Principal::User(session) if session.is_master() || session.in_master_group() => return Ok(()),
         Principal::User(session) => (session.uid(), session.gids()),
-        Principal::Guest => return Err(denied_chgrp()),
+        Principal::Guest {
+            ..
+        } => return Err(denied_chgrp()),
     };
 
     let may_write = acl.allows(class_of(uid, gids, acl), Right::Write);

@@ -37,11 +37,18 @@ pub(crate) const META_GROUPS_KEY: &str = "groups";
 pub(crate) const META_EPOCH_KEY: &str = "epoch";
 
 /// The metadata key holding the control-plane MAC (protected DBs): a keyed BLAKE3
-/// tag binding the epoch to the user and group blobs, so tampering with either —
-/// for example via a program that opens the redb file directly — is detected at
-/// authentication.
+/// tag binding the epoch to the user and group blobs and the public verification
+/// key, so tampering with any of them — for example via a program that opens the
+/// redb file directly — is detected at authentication.
 #[cfg(feature = "permissions")]
 pub(crate) const META_CONTROL_MAC_KEY: &str = "control_mac";
+
+/// The metadata key holding the Ed25519 public verification key (protected DBs),
+/// stored in the clear. A keyless guest reads it to verify each value's signature;
+/// an authenticated user detects a swap of it because it is bound into the
+/// control-plane MAC.
+#[cfg(feature = "permissions")]
+pub(crate) const META_PUBKEY_KEY: &str = "pubkey";
 
 /// The on-disk format version this build reads and writes.
 pub(crate) const FORMAT_VERSION: u64 = 1;

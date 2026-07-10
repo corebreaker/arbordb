@@ -27,8 +27,9 @@ use std::{collections::HashMap, sync::Mutex};
 
 #[cfg(feature = "permissions")]
 use crate::{
-    inode::{read_acl, read_mac, Right, INODES_TABLE},
-    perm::{authorize, ct_eq, mac_value, Principal},
+    acl::NodeAcl,
+    inode::{read_acl, read_mac, read_sig, read_timestamps, NodeTimestamps, Right, INODES_TABLE},
+    perm::{self, Principal},
 };
 
 /// A read transaction over one table — a consistent, concurrent snapshot.
@@ -153,7 +154,7 @@ impl ReadTxn {
             None => None,
         };
 
-        authorize(&self.principal, akey, acl.as_ref(), right)
+        perm::access::authorize(&self.principal, akey, acl.as_ref(), right)
     }
 
     /// Verifies vnode `akey`'s integrity tag over `blob` and its ACL, using an
@@ -167,35 +168,63 @@ impl ReadTxn {
         akey: AKey,
         blob: &[u8],
     ) -> AdbResult<()> {
-        let Principal::User(session) = self.principal.as_ref() else {
-            return Ok(());
+        // Both tags bind the ACL, so read it once for whichever check the principal
+        // runs. (An unrestricted handle never reaches here — it resolves unenforced.)
+        let acl = match inodes {
+            Some(table) => read_acl(table, &self.table, akey)?
+                .map(|acl| acl.encode())
+                .unwrap_or_default(),
+            None => Vec::new(),
         };
 
-        let (stored, acl) = match inodes {
-            Some(table) => (
-                read_mac(table, &self.table, akey)?,
-                read_acl(table, &self.table, akey)?
-                    .map(|acl| acl.encode())
-                    .unwrap_or_default(),
-            ),
-            None => (None, Vec::new()),
-        };
+        match self.principal.as_ref() {
+            // An authenticated reader verifies the fast keyed MAC.
+            Principal::User(session) => {
+                let stored = inodes
+                    .map(|table| read_mac(table, &self.table, akey))
+                    .transpose()?
+                    .flatten();
+                let expected = perm::integrity::mac_value(session.key(), &self.table, akey, blob, &acl);
 
-        let expected = mac_value(session.key(), &self.table, akey, blob, &acl);
-        match stored {
-            Some(mac) if ct_eq(&mac, &expected) => Ok(()),
-            _ => Err(AdbError::Tampered(format!(
-                "integrity check failed for a vnode in table '{}'",
-                self.table
-            ))),
+                match stored {
+                    Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
+                    _ => Err(self.tampered()),
+                }
+            }
+
+            // A keyless guest verifies the Ed25519 signature with the public key: it
+            // can check integrity without being able to forge (seal) a value.
+            Principal::Guest {
+                pubkey,
+            } => {
+                let stored = inodes
+                    .map(|table| read_sig(table, &self.table, akey))
+                    .transpose()?
+                    .flatten();
+
+                match stored {
+                    Some(sig) if perm::integrity::verify_value(pubkey, &self.table, akey, blob, &acl, &sig) => Ok(()),
+                    _ => Err(self.tampered()),
+                }
+            }
+
+            // An unrestricted handle (a non-protected database) has nothing to verify.
+            Principal::Unrestricted => Ok(()),
         }
     }
 
-    /// Opens `$inodes` and verifies vnode `akey`'s integrity tag over `blob`. A
-    /// no-op for an unrestricted handle or the keyless guest.
+    /// The tamper error naming this snapshot's table.
+    #[cfg(feature = "permissions")]
+    fn tampered(&self) -> AdbError {
+        AdbError::Tampered(format!("integrity check failed for a vnode in table '{}'", self.table))
+    }
+
+    /// Opens `$inodes` and verifies vnode `akey`'s integrity tag over `blob` — the
+    /// keyed MAC for an authenticated user, the signature for a guest. A no-op for an
+    /// unrestricted handle (a non-protected database has no tags).
     #[cfg(feature = "permissions")]
     fn verify_integrity(&self, akey: AKey, blob: &[u8]) -> AdbResult<()> {
-        if !matches!(self.principal.as_ref(), Principal::User(_)) {
+        if matches!(self.principal.as_ref(), Principal::Unrestricted) {
             return Ok(());
         }
 
@@ -218,7 +247,8 @@ impl ReadTxn {
                 Some(t) => read_acl(t, &self.table, akey)?,
                 None => None,
             };
-            authorize(&self.principal, akey, acl.as_ref(), Right::Walk)?;
+
+            perm::access::authorize(&self.principal, akey, acl.as_ref(), Right::Walk)?;
 
             let Some(blob) = self.entry_blob(table, akey)? else {
                 return Ok(None);
@@ -463,7 +493,7 @@ impl ReadTxn {
     /// The `accessed` field reflects committed access times; a read in the current
     /// snapshot is buffered and persisted later (see the crate docs), so it may lag.
     #[cfg(feature = "entry-timestamps")]
-    pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<crate::inode::NodeTimestamps>> {
+    pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
         let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(None);
@@ -473,20 +503,20 @@ impl ReadTxn {
             return Ok(None);
         };
 
-        let inodes = match self.txn.open_table(crate::inode::INODES_TABLE) {
+        let inodes = match self.txn.open_table(INODES_TABLE) {
             Ok(inodes) => inodes,
             Err(TableError::TableDoesNotExist(_)) => return Ok(None),
             Err(err) => return Err(err.into()),
         };
 
-        crate::inode::read_times(&inodes, &self.table, akey)
+        read_timestamps(&inodes, &self.table, akey)
     }
 
     /// The access-control list of the file or directory at `path`, with owner and
     /// group resolved to names — or `None` if the node is absent or has no ACL (a
     /// non-protected database, the special root, or a node predating protection).
     #[cfg(feature = "permissions")]
-    pub fn get_acl(&self, path: impl IntoArborPath) -> AdbResult<Option<crate::acl::NodeAcl>> {
+    pub fn get_acl(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeAcl>> {
         let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(None);
@@ -504,13 +534,13 @@ impl ReadTxn {
         };
 
         let meta = self.txn.open_table(META_TABLE)?;
-        let owner = crate::perm::name_of_user(&meta, acl.owner())?.unwrap_or_else(|| acl.owner().to_string());
+        let owner = perm::store::name_of_user(&meta, acl.owner())?.unwrap_or_else(|| acl.owner().to_string());
         let group = match acl.group() {
-            Some(gid) => crate::perm::name_of_group(&meta, gid)?,
+            Some(gid) => perm::store::name_of_group(&meta, gid)?,
             None => None,
         };
 
-        Ok(Some(crate::acl::NodeAcl {
+        Ok(Some(NodeAcl {
             owner,
             group,
             mode: acl.to_mode(),

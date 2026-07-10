@@ -19,3 +19,9 @@ pub(super) const SECTION_ACL: u8 = 1;
 /// the vnode's entry blob and its ACL, verified on authenticated reads.
 #[cfg(feature = "permissions")]
 pub(super) const SECTION_MAC: u8 = 2;
+
+/// The signature section (`permissions` feature): a 64-byte Ed25519 signature over
+/// the same bytes the MAC covers (the entry blob and its ACL), verified by a keyless
+/// guest — which has the public key but not the private signing key.
+#[cfg(feature = "permissions")]
+pub(super) const SECTION_SIG: u8 = 3;

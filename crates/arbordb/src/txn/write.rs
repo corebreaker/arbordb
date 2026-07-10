@@ -37,7 +37,7 @@ use crate::{
 
 #[cfg(feature = "permissions")]
 use crate::{
-    inode::{mode_to_bits, read_acl, read_mac, seal_mac, set_acl, set_default_acl, Acl, Right},
+    inode::{mode_to_bits, read_acl, read_mac, seal_mac, seal_sig, set_acl, set_default_acl, Acl, Right},
     perm::{self, Principal},
 };
 
@@ -219,10 +219,10 @@ mod table {
                 .map(|acl| acl.encode())
                 .unwrap_or_default();
             let stored = read_mac(&*self.inodes, self.table, akey)?;
-            let expected = perm::mac_value(session.key(), self.table, akey, entry, &acl);
+            let expected = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
 
             match stored {
-                Some(mac) if perm::ct_eq(&mac, &expected) => Ok(()),
+                Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
                 _ => Err(AdbError::Tampered(format!(
                     "integrity check failed for a vnode in table '{}'",
                     self.table
@@ -236,7 +236,7 @@ mod table {
         fn check(&self, akey: AKey, right: Right) -> AdbResult<()> {
             let acl = read_acl(&*self.inodes, self.table, akey)?;
 
-            perm::authorize(self.principal, akey, acl.as_ref(), right)
+            perm::access::authorize(self.principal, akey, acl.as_ref(), right)
         }
 
         /// Resolves `path` to a vnode key, checking `walk` on every directory
@@ -290,9 +290,11 @@ mod table {
             set_acl(self.inodes, self.table, akey, acl)
         }
 
-        /// Seals `akey`'s integrity tag over its entry bytes and current ACL. A
-        /// no-op for an unrestricted handle — a non-protected database has no
-        /// integrity key, so nothing is MAC'd.
+        /// Seals `akey`'s integrity tags over its entry bytes and current ACL: the
+        /// keyed MAC an authenticated reader verifies *and* the signature a guest
+        /// verifies. A no-op for an unrestricted handle — a non-protected database has
+        /// no keys, so nothing is sealed. Only an authenticated user reaches here (a
+        /// guest cannot write).
         #[cfg(feature = "permissions")]
         fn seal_integrity(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
             if let Principal::User(session) = self.principal {
@@ -300,15 +302,18 @@ mod table {
                     .map(|acl| acl.encode())
                     .unwrap_or_default();
 
-                let mac = perm::mac_value(session.key(), self.table, akey, entry, &acl);
+                let mac = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
                 seal_mac(self.inodes, self.table, akey, mac)?;
+
+                let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, entry, &acl);
+                seal_sig(self.inodes, self.table, akey, sig)?;
             }
 
             Ok(())
         }
 
-        /// Re-seals `akey`'s integrity tag after an ACL change: the entry bytes are
-        /// unchanged, but the tag also binds the ACL, so it must be recomputed.
+        /// Re-seals `akey`'s integrity tags after an ACL change: the entry bytes are
+        /// unchanged, but both tags also bind the ACL, so each must be recomputed.
         #[cfg(feature = "permissions")]
         fn reseal_integrity(&mut self, akey: AKey) -> AdbResult<()> {
             if let Principal::User(session) = self.principal {
@@ -320,8 +325,11 @@ mod table {
                     .map(|acl| acl.encode())
                     .unwrap_or_default();
 
-                let mac = perm::mac_value(session.key(), self.table, akey, &entry, &acl);
+                let mac = perm::integrity::mac_value(session.key(), self.table, akey, &entry, &acl);
                 seal_mac(self.inodes, self.table, akey, mac)?;
+
+                let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, &entry, &acl);
+                seal_sig(self.inodes, self.table, akey, sig)?;
             }
 
             Ok(())
@@ -691,7 +699,7 @@ mod table {
             .acl(akey)?
             .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
 
-        perm::authorize_chown(ctx.principal, &acl)?;
+        perm::access::authorize_chown(ctx.principal, &acl)?;
         acl.set_owner(new_uid);
 
         ctx.write_acl(akey, acl)?;
@@ -718,7 +726,7 @@ mod table {
             .acl(akey)?
             .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
 
-        perm::authorize_chgrp(ctx.principal, &acl, new_gid)?;
+        perm::access::authorize_chgrp(ctx.principal, &acl, new_gid)?;
         acl.set_group(new_gid);
 
         ctx.write_acl(akey, acl)?;
@@ -745,7 +753,7 @@ mod table {
             .acl(akey)?
             .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
 
-        perm::authorize(ctx.principal, akey, Some(&acl), Right::Write)?;
+        perm::access::authorize(ctx.principal, akey, Some(&acl), Right::Write)?;
         acl.set_mode(mode);
 
         ctx.write_acl(akey, acl)?;
@@ -893,10 +901,10 @@ impl WriteTxn {
             .map(|acl| acl.encode())
             .unwrap_or_default();
         let stored = read_mac(&inodes, &self.table, akey)?;
-        let expected = perm::mac_value(session.key(), &self.table, akey, entry, &acl);
+        let expected = perm::integrity::mac_value(session.key(), &self.table, akey, entry, &acl);
 
         match stored {
-            Some(mac) if perm::ct_eq(&mac, &expected) => Ok(()),
+            Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
             _ => Err(AdbError::Tampered(format!(
                 "integrity check failed for a vnode in table '{}'",
                 self.table
@@ -957,7 +965,7 @@ impl WriteTxn {
 
         let new_uid = {
             let meta = self.txn.open_table(META_TABLE)?;
-            perm::uid_of(&meta, owner)?
+            perm::store::uid_of(&meta, owner)?
         }
         .ok_or_else(|| AdbError::CannotAccess(format!("no user named '{owner}'")))?;
 
@@ -979,7 +987,7 @@ impl WriteTxn {
             Some(name) => Some(
                 {
                     let meta = self.txn.open_table(META_TABLE)?;
-                    perm::gid_of(&meta, name)?
+                    perm::store::gid_of(&meta, name)?
                 }
                 .ok_or_else(|| AdbError::CannotAccess(format!("no group named '{name}'")))?,
             ),

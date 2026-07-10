@@ -12,6 +12,7 @@ use crate::{
 use crate::perm::{
     constants::{GUEST_USER, MASTER_UID, GUEST_UID},
     Principal,
+    PublicKey,
     self,
 };
 
@@ -60,10 +61,24 @@ impl ArborDb {
     pub fn is_protected(&self) -> AdbResult<bool> {
         #[cfg(feature = "permissions")]
         if cfg!(feature = "permissions") {
-            return perm::is_protected(self.inner.db());
+            return perm::store::is_protected(self.inner.db());
         }
 
         Ok(false)
+    }
+
+    /// Whether this handle is read-only: it holds no write key, so every write is
+    /// refused. True for a guest on a protected database; false for an authenticated
+    /// user and on an unprotected database (and always false without the `permissions`
+    /// feature). A `false` result does not promise a *given* write will succeed — a
+    /// non-guest write is still subject to per-vnode ACLs.
+    pub fn is_readonly(&self) -> bool {
+        #[cfg(feature = "permissions")]
+        if cfg!(feature = "permissions") {
+            return matches!(self.principal.as_ref(), Principal::Guest { .. });
+        }
+
+        false
     }
 
     /// Bootstraps the metadata table then wraps the engine handle. A protected
@@ -72,8 +87,12 @@ impl ArborDb {
         engine::bootstrap_metadata(&db)?;
 
         #[cfg(feature = "permissions")]
-        let principal = if perm::is_protected(&db)? {
-            Arc::new(Principal::Guest)
+        let principal = if perm::store::is_protected(&db)? {
+            // A guest carries the public verification key so its reads still verify
+            // each value's signature (it has no private key to seal one).
+            Arc::new(Principal::Guest {
+                pubkey: perm::store::load_pubkey(&db)?,
+            })
         } else {
             Arc::new(Principal::Unrestricted)
         };
@@ -190,7 +209,7 @@ impl ArborDb {
             return Err(AdbError::NoPermissions);
         }
 
-        let session = perm::authenticate(self.inner.db(), user, password)?;
+        let session = perm::store::authenticate(self.inner.db(), user, password)?;
 
         Ok(Self {
             inner:     self.inner,
@@ -206,13 +225,15 @@ impl ArborDb {
     /// **current** user's password. The guest user has no password and is rejected.
     pub fn change_password(self, new_password: &str) -> AdbResult<Self> {
         match self.principal.as_ref() {
-            Principal::Guest => {
+            Principal::Guest {
+                ..
+            } => {
                 return Err(AdbError::PermissionDenied(String::from(
                     "the guest user has no password to change",
                 )));
             }
             Principal::Unrestricted => {
-                let session = perm::promote_to_master(self.inner.db(), new_password)?;
+                let session = perm::store::promote_to_master(self.inner.db(), new_password)?;
 
                 return Ok(Self {
                     inner:     Arc::clone(&self.inner),
@@ -220,7 +241,7 @@ impl ArborDb {
                 });
             }
             Principal::User(session) => {
-                perm::change_user_password(self.inner.db(), session, new_password)?;
+                perm::store::change_user_password(self.inner.db(), session, new_password)?;
             }
         }
 
@@ -233,9 +254,96 @@ impl ArborDb {
     pub fn current_user(&self) -> Option<&str> {
         match self.principal.as_ref() {
             Principal::Unrestricted => None,
-            Principal::Guest => Some(GUEST_USER),
+            Principal::Guest {
+                ..
+            } => Some(GUEST_USER),
             Principal::User(session) => Some(session.name()),
         }
+    }
+
+    /// The database's public verification key.
+    ///
+    /// A keyless guest verifies each value's signature with this key. It is public
+    /// by nature, so it is safe to copy and share. Retrieve it from a *trusted*
+    /// database — for example right after promoting one — save it out-of-band with
+    /// [`PublicKey::write_key`], and later pin it with [`with_pubkey`](Self::with_pubkey),
+    /// so a guest verifies against the trusted copy rather than the one in the file
+    /// and thus detects a swap of the stored key.
+    ///
+    /// A default guest read is *not* trustworthy without this — see
+    /// [`with_pubkey`](Self::with_pubkey). Errors with
+    /// [`NoPermissions`](AdbError::NoPermissions) on a database with no permission
+    /// system.
+    ///
+    /// ```
+    /// # use arbordb::{ArborDb, perm::PublicKey};
+    /// # fn main() -> arbordb::AdbResult<()> {
+    /// let db = ArborDb::create_in_memory()?.change_password("master-pw")?;
+    /// let key = db.pubkey()?;
+    /// assert_eq!(key.as_bytes().len(), 32);
+    /// assert_eq!(PublicKey::from_bytes(key.into_bytes()), key);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn pubkey(&self) -> AdbResult<PublicKey> {
+        if !self.is_protected()? {
+            return Err(AdbError::NoPermissions);
+        }
+
+        Ok(PublicKey::from_bytes(perm::store::load_pubkey(self.inner.db())?))
+    }
+
+    /// Returns a handle that verifies value signatures against `pubkey` — a trusted
+    /// key obtained out-of-band — instead of the one stored in the database.
+    ///
+    /// This closes the one gap a keyless guest cannot otherwise close: an attacker
+    /// who swaps the stored public key *and* re-signs a tampered value would fool a
+    /// guest trusting the stored key, but not one pinned to the genuine key (the
+    /// forged signatures no longer verify, so the read reports
+    /// [`Tampered`](AdbError::Tampered)). Pinning is therefore **recommended before
+    /// reading as a guest**; without it a guest read is not trustworthy, though the
+    /// database remains fully write-protected either way (a guest cannot write).
+    ///
+    /// It applies to a guest handle: open a protected database without credentials,
+    /// then pin. An authenticated user already verifies through its own integrity
+    /// key (and detects a key swap at authentication), so it is not offered a pinned
+    /// key — [`PermissionDenied`](AdbError::PermissionDenied); a database with no
+    /// permission system errors with [`NoPermissions`](AdbError::NoPermissions).
+    ///
+    /// ```no_run
+    /// # use arbordb::{ArborDb, perm::PublicKey};
+    /// # fn main() -> arbordb::AdbResult<()> {
+    /// // While the database is trusted, save its public key out-of-band.
+    /// ArborDb::open_with_authentication("data.adb", "master", "pw")?
+    ///     .pubkey()?
+    ///     .write_key("trusted.pub")?;
+    ///
+    /// // Later, pin the trusted key so a guest detects a swap of the stored one.
+    /// let trusted = PublicKey::read_key("trusted.pub")?;
+    /// let guest = ArborDb::open("data.adb")?.with_pubkey(trusted)?;
+    /// # let _ = guest;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_pubkey(self, pubkey: PublicKey) -> AdbResult<Self> {
+        match self.principal.as_ref() {
+            Principal::Guest {
+                ..
+            } => {}
+            Principal::User(_) => {
+                return Err(AdbError::PermissionDenied(String::from(
+                    "an authenticated handle already verifies via its own key; pin only on a guest handle",
+                )));
+            }
+            Principal::Unrestricted => return Err(AdbError::NoPermissions),
+        }
+
+        Ok(Self {
+            inner:     self.inner,
+            principal: Arc::new(Principal::Guest {
+                pubkey: *pubkey.as_bytes(),
+            }),
+        })
     }
 
     /// The integrity key of an administering session (the master user or a
@@ -243,6 +351,20 @@ impl ArborDb {
     fn admin_key(&self) -> AdbResult<&[u8]> {
         match self.principal.as_ref() {
             Principal::User(session) if session.is_master() || session.in_master_group() => Ok(session.key()),
+            _ => Err(AdbError::PermissionDenied(String::from(
+                "administration requires the master user or a master-group member",
+            ))),
+        }
+    }
+
+    /// The integrity key *and* signing seed of an administering session, for the
+    /// operations that write a new keyring entry — they wrap the caller's whole
+    /// secret bundle (`K ‖ sk`) under the new user's password.
+    fn admin_creds(&self) -> AdbResult<(&[u8], &[u8])> {
+        match self.principal.as_ref() {
+            Principal::User(session) if session.is_master() || session.in_master_group() => {
+                Ok((session.key(), session.sign_seed()))
+            }
             _ => Err(AdbError::PermissionDenied(String::from(
                 "administration requires the master user or a master-group member",
             ))),
@@ -267,16 +389,16 @@ impl ArborDb {
     /// Creates user `name` with `password`. When `create_group`, also creates a
     /// same-named group and adds the user to it. Administrators only.
     pub fn add_user(&self, name: &str, password: &str, create_group: bool) -> AdbResult<()> {
-        let key = self.admin_key()?;
+        let (key, seed) = self.admin_creds()?;
 
-        perm::add_user(self.inner.db(), key, name, password, create_group)
+        perm::store::add_user(self.inner.db(), key, seed, name, password, create_group)
     }
 
     /// Creates an empty group `name`. Administrators only.
     pub fn add_group(&self, name: &str) -> AdbResult<()> {
         let key = self.admin_key()?;
 
-        perm::add_group(self.inner.db(), key, name)
+        perm::store::add_group(self.inner.db(), key, name)
     }
 
     /// Renames a user. The built-in master and guest users cannot be renamed.
@@ -284,7 +406,7 @@ impl ArborDb {
     pub fn rename_user(&self, old: &str, new: &str) -> AdbResult<()> {
         let key = self.admin_key()?;
 
-        perm::rename_user(self.inner.db(), key, old, new)
+        perm::store::rename_user(self.inner.db(), key, old, new)
     }
 
     /// Renames a group. The built-in master and super groups cannot be renamed.
@@ -292,7 +414,7 @@ impl ArborDb {
     pub fn rename_group(&self, old: &str, new: &str) -> AdbResult<()> {
         let key = self.admin_key()?;
 
-        perm::rename_group(self.inner.db(), key, old, new)
+        perm::store::rename_group(self.inner.db(), key, old, new)
     }
 
     /// Adds `user` to `group`. The frozen guest user cannot be assigned to any group.
@@ -300,42 +422,42 @@ impl ArborDb {
     pub fn assign_user_to_group(&self, user: &str, group: &str) -> AdbResult<()> {
         let key = self.admin_key()?;
 
-        perm::assign(self.inner.db(), key, user, group)
+        perm::store::assign(self.inner.db(), key, user, group)
     }
 
     /// Removes `user` from `group`. Administrators only.
     pub fn remove_user_from_group(&self, user: &str, group: &str) -> AdbResult<()> {
         let key = self.admin_key()?;
 
-        perm::unassign(self.inner.db(), key, user, group)
+        perm::store::unassign(self.inner.db(), key, user, group)
     }
 
     /// The names of every user, sorted. Administrators and super-group members.
     pub fn list_users(&self) -> AdbResult<Vec<String>> {
         self.require_lister()?;
 
-        perm::list_users(self.inner.db())
+        perm::store::list_users(self.inner.db())
     }
 
     /// The names of every group, sorted. Administrators and super-group members.
     pub fn list_groups(&self) -> AdbResult<Vec<String>> {
         self.require_lister()?;
 
-        perm::list_groups(self.inner.db())
+        perm::store::list_groups(self.inner.db())
     }
 
     /// The groups `user` belongs to, sorted. Administrators and super-group members.
     pub fn user_groups(&self, user: &str) -> AdbResult<Vec<String>> {
         self.require_lister()?;
 
-        perm::user_groups(self.inner.db(), user)
+        perm::store::user_groups(self.inner.db(), user)
     }
 
     /// The members of `group`, sorted. Administrators and super-group members.
     pub fn group_members(&self, group: &str) -> AdbResult<Vec<String>> {
         self.require_lister()?;
 
-        perm::group_members(self.inner.db(), group)
+        perm::store::group_members(self.inner.db(), group)
     }
 
     /// Removes a group: unassigns it from every user and strips it from every vnode
@@ -343,7 +465,7 @@ impl ArborDb {
     pub fn remove_group(&self, name: &str) -> AdbResult<()> {
         let key = self.admin_key()?;
 
-        perm::remove_group(self.inner.db(), key, name)
+        perm::store::remove_group(self.inner.db(), key, name)
     }
 
     /// Removes a user together with **every value it owns**, so nothing is left
@@ -355,7 +477,7 @@ impl ArborDb {
         let uid = {
             let txn = self.inner.db().begin_read()?;
             let meta = txn.open_table(engine::META_TABLE)?;
-            perm::uid_of(&meta, name)?
+            perm::store::uid_of(&meta, name)?
         }
         .ok_or_else(|| AdbError::CannotAccess(format!("no user named '{name}'")))?;
 
@@ -381,7 +503,7 @@ impl ArborDb {
         }
         {
             let mut meta = txn.open_table(engine::META_TABLE)?;
-            perm::forget_user(&mut meta, key, uid)?;
+            perm::store::forget_user(&mut meta, key, uid)?;
         }
 
         let guard = self

@@ -11,37 +11,15 @@
 //! on a non-protected handle, which promotes it and authenticates the caller as
 //! the master user. Creation itself never produces a protected database.
 
-mod access;
-mod integrity;
 mod principal;
-mod store;
+mod pubkey;
+
+pub(crate) mod access;
+pub(crate) mod integrity;
+pub(crate) mod store;
 
 pub mod constants;
 
-pub(crate) use self::{
-    access::{authorize, authorize_chgrp, authorize_chown},
-    integrity::{ct_eq, mac_value},
-    principal::Principal,
-    store::{
-        add_group,
-        add_user,
-        assign,
-        authenticate,
-        change_user_password,
-        forget_user,
-        gid_of,
-        group_members,
-        is_protected,
-        list_groups,
-        list_users,
-        name_of_group,
-        name_of_user,
-        promote_to_master,
-        remove_group,
-        rename_group,
-        rename_user,
-        uid_of,
-        unassign,
-        user_groups,
-    },
-};
+pub(crate) use principal::Principal;
+
+pub use pubkey::PublicKey;

@@ -24,14 +24,14 @@ mod underlying_timestamps;
 
 pub(crate) use self::{
     constants::INODES_TABLE,
-    functions::{bump_access, forget, touch, read_times},
+    functions::{bump_access, forget, touch, read_timestamps},
     table::InodeTable,
 };
 
 #[cfg(feature = "permissions")]
 pub(crate) use self::{
     acl::{mode_to_bits, Acl, Class, Right},
-    functions::{read_acl, read_mac, seal_mac, set_acl, set_default_acl, strip_group},
+    functions::{read_acl, read_mac, read_sig, seal_mac, seal_sig, set_acl, set_default_acl, strip_group},
 };
 
 pub use datetime::NodeTimestamps;
