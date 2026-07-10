@@ -21,8 +21,35 @@ pub(crate) fn adata_impl(name: &Ident, ref_name: &Ident, mut_name: &Ident, field
         let ty = field.ty;
         let stored = &field.name;
 
+        // Fast path: no aliases — load straight from the stored name.
+        if field.aliases.is_empty() {
+            return quote! {
+                #ident: <#ty as ::arbordb::data::AData>::load(reader, &at.child_name(#stored))?,
+            };
+        }
+
+        // Alias path: pick the primary name, else the first alias that exists,
+        // else fall back to the primary name (yielding the normal not-found path).
+        let aliases = &field.aliases;
+
         quote! {
-            #ident: <#ty as ::arbordb::data::AData>::load(reader, &at.child_name(#stored))?,
+            #ident: {
+                let mut __chosen: ::core::option::Option<&str> = ::core::option::Option::None;
+                for __candidate in [#stored, #(#aliases),*] {
+                    if ::arbordb::access::Reader::exists_at(reader, &at.child_name(__candidate))? {
+                        __chosen = ::core::option::Option::Some(__candidate);
+
+                        break;
+                    }
+                }
+
+                let __at = match __chosen {
+                    ::core::option::Option::Some(__candidate) => at.child_name(__candidate),
+                    ::core::option::Option::None => at.child_name(#stored),
+                };
+
+                <#ty as ::arbordb::data::AData>::load(reader, &__at)?
+            },
         }
     });
 

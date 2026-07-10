@@ -2,15 +2,32 @@
 //!
 //! Externally tagged (the default; the adjacent / internal / untagged
 //! representations arrive with the `#[arbor(...)]` attributes): the value node is
-//! an object with ONE field named after the active variant, holding the payload —
-//! a unit variant's payload is a `Null` leaf, a newtype's is the inner value, a
-//! tuple's is a list, a struct-variant's is an object. `store` clears the node
-//! first, so exactly one tag survives a variant change.
+//! an object with ONE field named after the active variant's tag, holding the
+//! payload — a unit variant's payload is a `Null` leaf, a newtype's is the inner
+//! value, a tuple's is a list, a struct-variant's is an object. `store` clears the
+//! node first, so exactly one tag survives a variant change.
+//!
+//! The stored tag is the variant's `rename`, else the container's `rename_all`
+//! applied to the variant name, else the name verbatim. `alias` tags are accepted
+//! on load only; the payload is always read from the tag actually present in the
+//! stored node (so a blob written under an old alias still loads).
 
+use crate::attr::{ContainerAttrs, VariantAttrs};
 use crate::desc;
+
 use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 use syn::{DataEnum, DeriveInput, Fields, Ident, Variant};
+
+/// One variant with its `#[arbor(...)]` naming resolved.
+struct VariantInfo<'a> {
+    /// The variant AST node (identifier + fields).
+    variant: &'a Variant,
+    /// The stored tag (primary name written on store).
+    tag:     String,
+    /// Extra tags accepted on load, in declaration order.
+    aliases: Vec<String>,
+}
 
 /// Expands `#[derive(AData)]` for an enum into its impl, accessors, and descriptor.
 pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<TokenStream> {
@@ -20,9 +37,29 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<T
     let mut_name = format_ident!("Arbor{}Mut", name);
     let desc_name = format_ident!("Arbor{}Desc", name);
 
-    let store_arms = data.variants.iter().map(|variant| store_arm(name, variant));
-    let load_arms = data.variants.iter().map(load_arm);
-    let variant_names: Vec<String> = data.variants.iter().map(|variant| variant.ident.to_string()).collect();
+    let container = ContainerAttrs::parse(&input.attrs)?;
+
+    let variants = data
+        .variants
+        .iter()
+        .map(|variant| {
+            let attrs = VariantAttrs::parse(&variant.attrs)?;
+
+            let tag = attrs
+                .rename
+                .unwrap_or_else(|| container.rename_all.apply_to_variant(&variant.ident.to_string()));
+
+            Ok(VariantInfo {
+                variant,
+                tag,
+                aliases: attrs.aliases,
+            })
+        })
+        .collect::<syn::Result<Vec<_>>>()?;
+
+    let store_arms = variants.iter().map(|info| store_arm(name, info));
+    let load_arms = variants.iter().map(load_arm);
+    let variant_names: Vec<String> = variants.iter().map(|info| info.tag.clone()).collect();
 
     let adata = quote! {
         #[automatically_derived]
@@ -74,12 +111,13 @@ pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<T
     })
 }
 
-/// The `match self` store arm for one variant (external tagging).
-fn store_arm(name: &Ident, variant: &Variant) -> TokenStream {
-    let ident = &variant.ident;
-    let tag = ident.to_string();
+/// The `match self` store arm for one variant (external tagging), written under
+/// the primary tag.
+fn store_arm(name: &Ident, info: &VariantInfo) -> TokenStream {
+    let ident = &info.variant.ident;
+    let tag = &info.tag;
 
-    match &variant.fields {
+    match &info.variant.fields {
         Fields::Unit => quote! {
             #name::#ident => {
                 ::arbordb::access::Writer::put_scalar(writer, &at.child_name(#tag), ::arbordb::data::Scalar::Null)?;
@@ -129,21 +167,24 @@ fn store_arm(name: &Ident, variant: &Variant) -> TokenStream {
     }
 }
 
-/// The `match tag` load arm for one variant (external tagging).
-fn load_arm(variant: &Variant) -> TokenStream {
-    let ident = &variant.ident;
-    let tag = ident.to_string();
+/// The `match tag` load arm for one variant (external tagging). The arm matches
+/// the primary tag or any alias; the payload is read from the runtime tag, so a
+/// blob written under an alias still loads.
+fn load_arm(info: &VariantInfo) -> TokenStream {
+    let ident = &info.variant.ident;
+    let tag = &info.tag;
+    let aliases = &info.aliases;
 
-    match &variant.fields {
+    match &info.variant.fields {
         Fields::Unit => quote! {
-            #tag => ::core::result::Result::Ok(Self::#ident),
+            #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#ident),
         },
         Fields::Unnamed(fields) if fields.unnamed.len() == 1 => {
             let ty = &fields.unnamed[0].ty;
 
             quote! {
-                #tag => ::core::result::Result::Ok(Self::#ident(
-                    <#ty as ::arbordb::data::AData>::load(reader, &at.child_name(#tag))?,
+                #tag #(| #aliases)* => ::core::result::Result::Ok(Self::#ident(
+                    <#ty as ::arbordb::data::AData>::load(reader, &at.child_name(&tag))?,
                 )),
             }
         }
@@ -158,8 +199,8 @@ fn load_arm(variant: &Variant) -> TokenStream {
             });
 
             quote! {
-                #tag => {
-                    let payload = at.child_name(#tag);
+                #tag #(| #aliases)* => {
+                    let payload = at.child_name(&tag);
 
                     ::core::result::Result::Ok(Self::#ident(#(#loads),*))
                 }
@@ -177,8 +218,8 @@ fn load_arm(variant: &Variant) -> TokenStream {
             });
 
             quote! {
-                #tag => {
-                    let payload = at.child_name(#tag);
+                #tag #(| #aliases)* => {
+                    let payload = at.child_name(&tag);
 
                     ::core::result::Result::Ok(Self::#ident { #(#loads),* })
                 }

@@ -5,6 +5,7 @@
 
 mod accessors;
 mod adata;
+mod attr;
 mod desc;
 mod enums;
 mod fields;
