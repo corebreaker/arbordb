@@ -23,6 +23,10 @@ mod constants;
 mod datetime;
 mod db;
 mod engine;
+// The index layer is built bottom-up; its entry points are wired into the write
+// and query paths in later sub-phases, so silence dead-code until then.
+#[allow(dead_code)]
+mod index;
 mod key;
 mod node;
 mod table;
