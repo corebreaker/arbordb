@@ -16,8 +16,14 @@ use crate::{
         split,
         EntryBytes,
         EntryKind,
+        INDEX_TABLE,
+        META_TABLE,
     },
     error::{AdbError, AdbResult},
+    index::{
+        maintenance,
+        registry::{self, IndexEntry},
+    },
     path::{APath, VPath},
     value::Value,
     AKey,
@@ -64,36 +70,11 @@ impl WriteTxn {
 
     /// Stores `value` as a file at an already-parsed access path.
     pub(crate) fn store_value_at(&self, path: &APath, value: &Value) -> AdbResult<()> {
-        let Some((parent_path, name)) = path.split_last() else {
+        if path.is_root() {
             return Err(AdbError::CannotAccess(String::from("cannot store a file at the root")));
-        };
+        }
 
-        let mut table = self.txn.open_table(data_def(&self.table))?;
-        let parent = ensure_dir(&mut table, &parent_path)?;
-
-        let existing = child_of(&table, parent, name)?;
-        let akey = match existing {
-            Some(node) => {
-                if entry_kind(&table, node)? == Some(EntryKind::File) {
-                    node
-                } else {
-                    cascade_delete(&mut table, node)?;
-                    let fresh = AKey::generate();
-                    link_child(&mut table, parent, name, fresh)?;
-                    fresh
-                }
-            }
-            None => {
-                let fresh = AKey::generate();
-                link_child(&mut table, parent, name, fresh)?;
-                fresh
-            }
-        };
-
-        let entry = file_entry(&encode(value));
-        table.insert(u128::from(akey), entry.as_slice())?;
-
-        Ok(())
+        self.reindex_around(std::slice::from_ref(path), |table| store_value_into(table, path, value))
     }
 
     /// Opens a mutable accessor over the file at `path`, or `None` if absent. Each
@@ -145,23 +126,11 @@ impl WriteTxn {
     /// subtree). Returns whether anything was removed.
     pub fn rm(&self, path: impl AsRef<str>) -> AdbResult<bool> {
         let path = APath::parse(path.as_ref())?;
-        let Some((parent_path, name)) = path.split_last() else {
+        if path.is_root() {
             return Err(AdbError::CannotAccess(String::from("cannot remove the root")));
-        };
+        }
 
-        let mut table = self.txn.open_table(data_def(&self.table))?;
-        let Some(parent) = resolve(&table, &parent_path)? else {
-            return Ok(false);
-        };
-
-        let Some(akey) = child_of(&table, parent, name)? else {
-            return Ok(false);
-        };
-
-        cascade_delete(&mut table, akey)?;
-        unlink_child(&mut table, parent, name)?;
-
-        Ok(true)
+        self.reindex_around(std::slice::from_ref(&path), |table| rm_into(table, &path))
     }
 
     /// Moves the node at `src` to `dst`, keeping its identity (a relink, not a
@@ -178,31 +147,17 @@ impl WriteTxn {
             )));
         }
 
-        let Some((src_parent_path, src_name)) = src.split_last() else {
+        if src.is_root() {
             return Err(AdbError::CannotAccess(String::from("cannot move the root")));
-        };
-        let Some((dst_parent_path, dst_name)) = dst.split_last() else {
+        }
+        if dst.is_root() {
             return Err(AdbError::CannotAccess(String::from("cannot move onto the root")));
-        };
-
-        let mut table = self.txn.open_table(data_def(&self.table))?;
-
-        let Some(src_parent) = resolve(&table, &src_parent_path)? else {
-            return Err(AdbError::ValueNotFound(src));
-        };
-        let Some(akey) = child_of(&table, src_parent, src_name)? else {
-            return Err(AdbError::ValueNotFound(src));
-        };
-
-        let dst_parent = ensure_dir(&mut table, &dst_parent_path)?;
-        if let Some(existing) = child_of(&table, dst_parent, dst_name)? {
-            cascade_delete(&mut table, existing)?;
         }
 
-        link_child(&mut table, dst_parent, dst_name, akey)?;
-        unlink_child(&mut table, src_parent, src_name)?;
+        // The entity leaves `src` and appears at `dst`, so both scopes are re-indexed.
+        let scopes = [src.clone(), dst.clone()];
 
-        Ok(())
+        self.reindex_around(&scopes, |table| mv_into(table, &src, &dst))
     }
 
     /// Copies the subtree at `src` to `dst` under fresh identities (a deep copy).
@@ -218,25 +173,46 @@ impl WriteTxn {
             )));
         }
 
-        let Some((dst_parent_path, dst_name)) = dst.split_last() else {
+        if dst.is_root() {
             return Err(AdbError::CannotAccess(String::from("cannot copy onto the root")));
-        };
-
-        let mut table = self.txn.open_table(data_def(&self.table))?;
-
-        let Some(src_akey) = resolve(&table, &src)? else {
-            return Err(AdbError::ValueNotFound(src));
-        };
-
-        let dst_parent = ensure_dir(&mut table, &dst_parent_path)?;
-        if let Some(existing) = child_of(&table, dst_parent, dst_name)? {
-            cascade_delete(&mut table, existing)?;
         }
 
-        let copy = deep_copy(&mut table, src_akey)?;
-        link_child(&mut table, dst_parent, dst_name, copy)?;
+        // A copy creates fresh entities at `dst`; `src` is unchanged, so only `dst`
+        // needs re-indexing.
+        self.reindex_around(std::slice::from_ref(&dst), |table| cp_into(table, &src, &dst))
+    }
 
-        Ok(())
+    /// Loads the table's registered indexes (empty when it has none).
+    fn indexes(&self) -> AdbResult<Vec<IndexEntry>> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        registry::for_table(&meta, &self.table)
+    }
+
+    /// Brackets a mutation with index maintenance: remove the affected entities'
+    /// current index entries, apply the mutation, then insert the entries the new
+    /// state implies. An unindexed table takes the zero-overhead path.
+    fn reindex_around<T>(&self, scopes: &[APath], apply: impl FnOnce(&mut DataTable) -> AdbResult<T>) -> AdbResult<T> {
+        let indexes = self.indexes()?;
+        let mut data = self.txn.open_table(data_def(&self.table))?;
+
+        if indexes.is_empty() {
+            return apply(&mut data);
+        }
+
+        let mut index = self.txn.open_table(INDEX_TABLE)?;
+
+        for scope in scopes {
+            maintenance::delete(&data, &mut index, &indexes, scope)?;
+        }
+
+        let result = apply(&mut data)?;
+
+        for scope in scopes {
+            maintenance::insert(&data, &mut index, &indexes, scope)?;
+        }
+
+        Ok(result)
     }
 
     /// Commits the transaction, making its changes durable and advancing the
@@ -259,6 +235,96 @@ impl WriteTxn {
 
         Ok(())
     }
+}
+
+/// Stores `value` as a file at `path` (a non-root path), creating parents and
+/// replacing whatever was there.
+fn store_value_into(table: &mut DataTable, path: &APath, value: &Value) -> AdbResult<()> {
+    let (parent_path, name) = path.split_last().expect("a non-root path has a parent and a name");
+    let parent = ensure_dir(table, &parent_path)?;
+
+    let akey = match child_of(&*table, parent, name)? {
+        Some(node) => {
+            if entry_kind(&*table, node)? == Some(EntryKind::File) {
+                node
+            } else {
+                cascade_delete(table, node)?;
+                let fresh = AKey::generate();
+                link_child(table, parent, name, fresh)?;
+                fresh
+            }
+        }
+        None => {
+            let fresh = AKey::generate();
+            link_child(table, parent, name, fresh)?;
+            fresh
+        }
+    };
+
+    let entry = file_entry(&encode(value));
+    table.insert(u128::from(akey), entry.as_slice())?;
+
+    Ok(())
+}
+
+/// Removes the node at `path` (a non-root path) and its subtree. Returns whether
+/// anything was removed.
+fn rm_into(table: &mut DataTable, path: &APath) -> AdbResult<bool> {
+    let (parent_path, name) = path.split_last().expect("a non-root path has a parent and a name");
+
+    let Some(parent) = resolve(&*table, &parent_path)? else {
+        return Ok(false);
+    };
+    let Some(akey) = child_of(&*table, parent, name)? else {
+        return Ok(false);
+    };
+
+    cascade_delete(table, akey)?;
+    unlink_child(table, parent, name)?;
+
+    Ok(true)
+}
+
+/// Relinks the node at `src` to `dst`, keeping its identity.
+fn mv_into(table: &mut DataTable, src: &APath, dst: &APath) -> AdbResult<()> {
+    let (src_parent_path, src_name) = src.split_last().expect("a non-root path has a parent and a name");
+    let (dst_parent_path, dst_name) = dst.split_last().expect("a non-root path has a parent and a name");
+
+    let Some(src_parent) = resolve(&*table, &src_parent_path)? else {
+        return Err(AdbError::ValueNotFound(src.clone()));
+    };
+    let Some(akey) = child_of(&*table, src_parent, src_name)? else {
+        return Err(AdbError::ValueNotFound(src.clone()));
+    };
+
+    let dst_parent = ensure_dir(table, &dst_parent_path)?;
+    if let Some(existing) = child_of(&*table, dst_parent, dst_name)? {
+        cascade_delete(table, existing)?;
+    }
+
+    link_child(table, dst_parent, dst_name, akey)?;
+    unlink_child(table, src_parent, src_name)?;
+
+    Ok(())
+}
+
+/// Deep-copies the subtree at `src` to `dst` under fresh identities.
+fn cp_into(table: &mut DataTable, src: &APath, dst: &APath) -> AdbResult<()> {
+    let (dst_parent_path, dst_name) = dst.split_last().expect("a non-root path has a parent and a name");
+
+    let Some(src_akey) = resolve(&*table, src)? else {
+        return Err(AdbError::ValueNotFound(src.clone()));
+    };
+
+    let dst_parent = ensure_dir(table, &dst_parent_path)?;
+    if let Some(existing) = child_of(&*table, dst_parent, dst_name)? {
+        cascade_delete(table, existing)?;
+    }
+
+    let copy = deep_copy(table, src_akey)?;
+    link_child(table, dst_parent, dst_name, copy)?;
+
+    Ok(())
 }
 
 /// Reads a directory's children into an owned map (empty if the node is absent).
@@ -398,4 +464,63 @@ fn deep_copy(table: &mut DataTable, akey: AKey) -> AdbResult<AKey> {
     }
 
     Ok(fresh)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::Scalar;
+    use crate::index::{registry, IndexColumn, IndexDef};
+    use crate::ArborDb;
+
+    fn user(age: i64) -> Value {
+        Value::Node(BTreeMap::from([(String::from("age"), Value::Leaf(Scalar::I64(age)))]))
+    }
+
+    /// The number of physical entries in the shared index table.
+    fn index_entries(w: &WriteTxn) -> usize {
+        let index = w.txn.open_table(INDEX_TABLE).unwrap();
+
+        index.iter().unwrap().count()
+    }
+
+    #[test]
+    fn store_and_rm_maintain_a_registered_index() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+        let w = table.write().unwrap();
+
+        // Register a `users/*` index on the `age` column (raw, via the txn — the
+        // public `create_index` lands in a later sub-phase).
+        {
+            let mut meta = w.txn.open_table(META_TABLE).unwrap();
+            let def = IndexDef::new(
+                String::from("by_age"),
+                String::from("users/*"),
+                vec![IndexColumn::asc(VPath::root().child_name("age"))],
+                false,
+            );
+
+            registry::create(&mut meta, "t", &def).unwrap();
+        }
+
+        // Each store under the pattern adds one entry.
+        w.store_value("users/alice", &user(30)).unwrap();
+        w.store_value("users/bob", &user(40)).unwrap();
+        assert_eq!(index_entries(&w), 2);
+
+        // Editing a column rewrites the entity's entry — still one per entity.
+        w.store_value("users/alice", &user(31)).unwrap();
+        assert_eq!(index_entries(&w), 2);
+
+        // A store outside the pattern is not indexed.
+        w.store_value("orgs/acme", &user(99)).unwrap();
+        assert_eq!(index_entries(&w), 2);
+
+        // Removing an entity drops its entry.
+        w.rm("users/bob").unwrap();
+        assert_eq!(index_entries(&w), 1);
+
+        w.commit().unwrap();
+    }
 }

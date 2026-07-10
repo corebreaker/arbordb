@@ -8,8 +8,11 @@
 mod definitions;
 mod id;
 mod indexed;
+mod key;
 mod ordered;
+mod pattern;
 
+pub(crate) mod maintenance;
 pub(crate) mod registry;
 
 pub(crate) use self::id::IndexId;

@@ -2,7 +2,7 @@
 
 use crate::{
     cache::PathCache,
-    constants::METADATA_TABLE_NAME,
+    constants::{INDEX_TABLE_NAME, METADATA_TABLE_NAME},
     engine,
     error::{AdbError, AdbResult},
     table::Table,
@@ -111,7 +111,7 @@ impl ArborDb {
             return Err(AdbError::InvalidTableName(String::from("a table name cannot be empty")));
         }
 
-        if name == METADATA_TABLE_NAME {
+        if name == METADATA_TABLE_NAME || name == INDEX_TABLE_NAME {
             return Err(AdbError::InvalidTableName(format!("'{name}' is reserved")));
         }
 

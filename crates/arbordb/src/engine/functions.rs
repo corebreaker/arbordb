@@ -5,7 +5,7 @@
 use super::entry::{split, EntryKind};
 use crate::{
     codec::ArchivedDir,
-    constants::{FORMAT_VERSION, META_FORMAT_VERSION_KEY, METADATA_TABLE_NAME},
+    constants::{FORMAT_VERSION, INDEX_TABLE_NAME, META_FORMAT_VERSION_KEY, METADATA_TABLE_NAME},
     error::{AdbError, AdbResult},
     path::APath,
     AKey,
@@ -25,6 +25,10 @@ pub(crate) const META_TABLE: TableDefinition<&str, EntryBytes> = TableDefinition
 pub(crate) fn data_def(name: &str) -> TableDefinition<'_, u128, EntryBytes> {
     TableDefinition::new(name)
 }
+
+/// The shared secondary-index table: an order-preserving byte key
+/// (`index-id · encoded-columns · entity`) → an entity key (unique) or nothing.
+pub(crate) const INDEX_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new(INDEX_TABLE_NAME);
 
 /// Opens (creating if needed) the metadata table and checks the format version,
 /// writing it on a fresh database.

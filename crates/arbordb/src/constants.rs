@@ -3,6 +3,10 @@
 /// The reserved metadata table name (rejected as a user table name).
 pub(crate) const METADATA_TABLE_NAME: &str = "$metadata";
 
+/// The reserved secondary-index table name (rejected as a user table name). One
+/// table holds every index's entries, keyed by the globally-unique index id.
+pub(crate) const INDEX_TABLE_NAME: &str = "$index";
+
 /// The metadata key holding the on-disk format version.
 pub(crate) const META_FORMAT_VERSION_KEY: &str = "format_version";
 
