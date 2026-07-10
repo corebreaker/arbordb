@@ -19,8 +19,8 @@ rayon = { version = "1.10", optional = true }
 redb = "4.1"
 thiserror = "2.0"
 uuid = { version = "1.23", features = ["v7"] }
+arbordb-derive = { workspace = true, optional = true }
 
-# The `arbordb-derive` proc-macro crate and the `derive` feature land in phase 2.
 # ArborDb writes its own zero-copy codec, so there is deliberately NO rkyv dependency.
 
 [dev-dependencies]
@@ -29,6 +29,7 @@ tempfile = "3.27"
 
 [features]
 default = []
+derive = ["dep:arbordb-derive"]
 parallel = ["dep:rayon"]
 bignum = ["bignum-as-scalar", "bignum-as-data"]
 bignum-as-scalar = ["bigint-as-scalar", "bigfloat-as-scalar", "rational-as-scalar"]

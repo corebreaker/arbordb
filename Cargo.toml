@@ -9,6 +9,9 @@ license = "MIT"
 repository = "https://github.com/corebreaker/arbordb"
 readme = "README.md"
 
+[workspace.dependencies]
+arbordb-derive = { path = "crates/arbordb-derive", version = "0.0" }
+
 [workspace.metadata.scripts]
 fmt = "cargo +nightly fmt --all"
 gc = "cargo sweep -r -t 10 ."

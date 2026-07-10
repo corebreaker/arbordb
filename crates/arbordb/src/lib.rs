@@ -44,3 +44,9 @@ pub use self::{
     table::Table,
     value::Value,
 };
+
+/// Derives [`AData`] for a struct, generating its `ArborXxx` / `ArborXxxMut`
+/// accessors and an `ArborXxxDesc` companion. Shares the `AData` name with the
+/// trait (distinct namespaces), so `use arbordb::AData;` brings both into scope.
+#[cfg(feature = "derive")]
+pub use arbordb_derive::AData;
