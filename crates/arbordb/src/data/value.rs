@@ -1,0 +1,165 @@
+//! The [`AValue`] trait, mapping Rust types to and from a [`Scalar`].
+
+use super::Scalar;
+use crate::error::{AdbError, AdbResult};
+
+use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta, Utc};
+use uuid::Uuid;
+
+/// A Rust type that maps to and from a single persisted [`Scalar`] (leaf) value.
+pub trait AValue: Sized {
+    /// Converts this value into its scalar representation.
+    fn to_scalar(&self) -> Scalar;
+
+    /// Reconstructs this value from a stored scalar.
+    fn from_scalar(scalar: &Scalar) -> AdbResult<Self>;
+}
+
+impl AValue for Scalar {
+    fn to_scalar(&self) -> Scalar {
+        self.clone()
+    }
+
+    fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
+        Ok(scalar.clone())
+    }
+}
+
+macro_rules! scalar_value {
+    ($t:ty, $variant:ident, $name:literal) => {
+        impl AValue for $t {
+            fn to_scalar(&self) -> Scalar {
+                Scalar::$variant(self.clone())
+            }
+
+            fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
+                match scalar {
+                    Scalar::$variant(v) => Ok(v.clone()),
+                    other => Err(AdbError::TypeMismatch {
+                        expected: $name,
+                        found:    other.type_str(),
+                    }),
+                }
+            }
+        }
+    };
+}
+
+scalar_value!(bool, Bool, "bool");
+scalar_value!(i8, I8, "i8");
+scalar_value!(i16, I16, "i16");
+scalar_value!(i32, I32, "i32");
+scalar_value!(i64, I64, "i64");
+scalar_value!(i128, I128, "i128");
+scalar_value!(u8, U8, "u8");
+scalar_value!(u16, U16, "u16");
+scalar_value!(u32, U32, "u32");
+scalar_value!(u64, U64, "u64");
+scalar_value!(u128, U128, "u128");
+scalar_value!(f32, F32, "f32");
+scalar_value!(f64, F64, "f64");
+scalar_value!(String, Str, "str");
+scalar_value!(Vec<u8>, Bytes, "bytes");
+scalar_value!(Uuid, Uuid, "uuid");
+scalar_value!(NaiveDate, Date, "date");
+scalar_value!(NaiveTime, Time, "time");
+scalar_value!(DateTime<Utc>, DateTime, "datetime");
+scalar_value!(TimeDelta, Duration, "duration");
+
+#[cfg(feature = "bigint-as-scalar")]
+scalar_value!(num_bigint::BigInt, BigInt, "bigint");
+
+#[cfg(feature = "bigfloat-as-scalar")]
+scalar_value!(num_bigfloat::BigFloat, BigFloat, "bigfloat");
+
+#[cfg(feature = "rational-as-scalar")]
+scalar_value!(num_rational::BigRational, Rational, "rational");
+
+// Platform-dependent integer widths are normalised to a fixed width so the
+// on-disk format is portable.
+impl AValue for usize {
+    fn to_scalar(&self) -> Scalar {
+        Scalar::U64(*self as u64)
+    }
+
+    fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
+        match scalar {
+            Scalar::U64(v) => Ok(*v as usize),
+            other => Err(AdbError::TypeMismatch {
+                expected: "usize",
+                found:    other.type_str(),
+            }),
+        }
+    }
+}
+
+impl AValue for isize {
+    fn to_scalar(&self) -> Scalar {
+        Scalar::I64(*self as i64)
+    }
+
+    fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
+        match scalar {
+            Scalar::I64(v) => Ok(*v as isize),
+            other => Err(AdbError::TypeMismatch {
+                expected: "isize",
+                found:    other.type_str(),
+            }),
+        }
+    }
+}
+
+impl<T: AValue> AValue for Option<T> {
+    fn to_scalar(&self) -> Scalar {
+        match self {
+            Some(v) => v.to_scalar(),
+            None => Scalar::Null,
+        }
+    }
+
+    fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
+        match scalar {
+            Scalar::Null => Ok(None),
+            other => Ok(Some(T::from_scalar(other)?)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_is_its_own_avalue() {
+        let scalar = Scalar::I32(5);
+
+        assert_eq!(scalar.to_scalar(), scalar);
+        assert_eq!(Scalar::from_scalar(&scalar).unwrap(), scalar);
+    }
+
+    #[test]
+    fn platform_widths_normalise_to_fixed_widths() {
+        assert_eq!(7usize.to_scalar(), Scalar::U64(7));
+        assert_eq!(usize::from_scalar(&Scalar::U64(7)).unwrap(), 7);
+        assert!(matches!(
+            usize::from_scalar(&Scalar::I32(1)),
+            Err(AdbError::TypeMismatch { .. })
+        ));
+
+        assert_eq!((-7isize).to_scalar(), Scalar::I64(-7));
+        assert_eq!(isize::from_scalar(&Scalar::I64(-7)).unwrap(), -7);
+        assert!(matches!(
+            isize::from_scalar(&Scalar::U8(1)),
+            Err(AdbError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn option_maps_none_to_null_and_back() {
+        assert_eq!(Some(3i32).to_scalar(), Scalar::I32(3));
+        assert_eq!(Option::<i32>::None.to_scalar(), Scalar::Null);
+
+        assert_eq!(Option::<i32>::from_scalar(&Scalar::Null).unwrap(), None);
+        assert_eq!(Option::<i32>::from_scalar(&Scalar::I32(3)).unwrap(), Some(3));
+    }
+}

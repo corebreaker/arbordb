@@ -8,3 +8,34 @@ readme.workspace = true
 description = "A typed, transactional, indexed document store layered over an embedded key-value engine."
 
 [dependencies]
+chrono = "0.4"
+lru = "0.18"
+smallvec = "1"
+smol_str = "0.3"
+num-bigint = { version = "0.4", optional = true }
+num-bigfloat = { version = "1.7", optional = true }
+num-rational = { version = "0.4", optional = true }
+rayon = { version = "1.10", optional = true }
+redb = "4.1"
+thiserror = "2.0"
+uuid = { version = "1.23", features = ["v7"] }
+
+# The `arbordb-derive` proc-macro crate and the `derive` feature land in phase 2.
+# ArborDb writes its own zero-copy codec, so there is deliberately NO rkyv dependency.
+
+[dev-dependencies]
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+tempfile = "3.27"
+
+[features]
+default = []
+parallel = ["dep:rayon"]
+bignum = ["bignum-as-scalar", "bignum-as-data"]
+bignum-as-scalar = ["bigint-as-scalar", "bigfloat-as-scalar", "rational-as-scalar"]
+bigint-as-scalar = ["dep:num-bigint"]
+bigfloat-as-scalar = ["dep:num-bigfloat"]
+rational-as-scalar = ["dep:num-rational", "dep:num-bigint"]
+bignum-as-data = ["bigint-as-data", "bigfloat-as-data", "rational-as-data"]
+bigint-as-data = ["dep:num-bigint"]
+bigfloat-as-data = ["dep:num-bigfloat"]
+rational-as-data = ["dep:num-rational", "dep:num-bigint"]

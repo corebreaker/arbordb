@@ -12,3 +12,5 @@ readme = "README.md"
 [workspace.metadata.scripts]
 fmt = "cargo +nightly fmt --all"
 gc = "cargo sweep -r -t 10 ."
+bench = "cargo bench -p arbordb --features derive"
+bench-reports = "cargo bench -p arbordb --features derive --features criterion/html_reports,criterion/plotters,criterion/rayon"
