@@ -104,6 +104,18 @@ impl APath {
             })
         }
     }
+
+    /// Splits into the parent path and the last name, or `None` for the root.
+    pub(crate) fn split_last(&self) -> Option<(APath, &str)> {
+        self.names.split_last().map(|(last, head)| {
+            (
+                APath {
+                    names: head.iter().cloned().collect(),
+                },
+                last.as_str(),
+            )
+        })
+    }
 }
 
 impl FromStr for APath {

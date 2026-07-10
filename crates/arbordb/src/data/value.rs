@@ -1,7 +1,10 @@
 //! The [`AValue`] trait, mapping Rust types to and from a [`Scalar`].
 
 use super::Scalar;
-use crate::error::{AdbError, AdbResult};
+use crate::{
+    error::{AdbError, AdbResult},
+    AKey,
+};
 
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeDelta, Utc};
 use uuid::Uuid;
@@ -109,6 +112,25 @@ impl AValue for isize {
     }
 }
 
+impl AValue for AKey {
+    fn to_scalar(&self) -> Scalar {
+        Scalar::Uuid((*self).into())
+    }
+
+    fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
+        match scalar {
+            Scalar::Uuid(uuid) => Ok(AKey::from_bytes(*uuid.as_bytes())),
+            Scalar::Null => Ok(AKey::ROOT),
+            Scalar::Bytes(v) => AKey::try_from_bytes(v),
+            Scalar::U128(v) => Ok(AKey::from(*v)),
+            other => Err(AdbError::TypeMismatch {
+                expected: "akey",
+                found:    other.type_str(),
+            }),
+        }
+    }
+}
+
 impl<T: AValue> AValue for Option<T> {
     fn to_scalar(&self) -> Scalar {
         match self {
@@ -150,6 +172,24 @@ mod tests {
         assert_eq!(isize::from_scalar(&Scalar::I64(-7)).unwrap(), -7);
         assert!(matches!(
             isize::from_scalar(&Scalar::U8(1)),
+            Err(AdbError::TypeMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn akey_reads_from_several_scalar_flavours() {
+        let key = AKey::from(0x1234u128);
+
+        assert_eq!(key.to_scalar(), Scalar::Uuid(key.into()));
+        assert_eq!(AKey::from_scalar(&Scalar::Uuid(key.into())).unwrap(), key);
+        assert_eq!(AKey::from_scalar(&Scalar::Null).unwrap(), AKey::ROOT);
+        assert_eq!(
+            AKey::from_scalar(&Scalar::Bytes(key.into_bytes().to_vec())).unwrap(),
+            key
+        );
+        assert_eq!(AKey::from_scalar(&Scalar::U128(0x1234)).unwrap(), key);
+        assert!(matches!(
+            AKey::from_scalar(&Scalar::Bool(true)),
             Err(AdbError::TypeMismatch { .. })
         ));
     }

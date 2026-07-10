@@ -76,16 +76,18 @@ Each paragraph is **one physical line**; blank lines separate paragraphs. No col
 
 ## Architecture — locked decisions
 
-**Storage model — one zero-copy blob per value.** A table maps a key to a serialized `Value`. There is no shredding, no per-scalar node, no inter-node tree walk. redb stays fully opaque.
+**Storage model — a virtual filesystem of Dir/File nodes.** A table is a tree of **directories** and **files**, each a redb entry keyed by an opaque `AKey`. A *file* is one `Value` serialized as the zero-copy codec blob; a *directory* is a blob holding a name-sorted `Name→AKey` map of its children (read zero-copy). The root is `AKey::ROOT`. A file's value is never shredded — it is one blob. redb stays fully opaque.
 
 **Keys & paths — three distinct notions:**
-- `APath` — the access path *and* the key: a filesystem-like path of names only (no list index). It is encoded order-preservingly straight into the redb key, so `store(apath, v)` / `load(apath)` are direct point ops and listing a "directory" is a prefix scan. There is **no separate path→key index table** — the key is a pure function of the path.
-- `AKey` — the type of that redb key (the encoded form of an `APath`). It identifies one whole stored value, never a `Scalar` or a node inside a value. The public API is `APath`-based; opaque value-ids inside data use `Uuid`, not `AKey`.
-- `VPath` — an intra-value path (`Name` + `Index [i]` segments) that navigates WITHIN a `Value` to a `Scalar`. It is the successor to StratoDb's `SPath`.
+- `AKey` — opaque 16-byte identity of a file or directory node, **stable across renames and moves** (a `mv` relinks a name; the key is unchanged). Never a `Scalar` or a node inside a file's value.
+- `APath` — a filesystem-like access path (names only, no list index). It resolves by walking the directory tree from `AKey::ROOT` (load parent dir blob → binary-search the name → child `AKey` → repeat), amortized by the caches.
+- `VPath` — an intra-value path (`Name` + `Index [i]` segments) that navigates WITHIN a file's `Value` to a `Scalar`. It is the successor to StratoDb's `SPath`.
+
+**Filesystem API + caching.** Public ops `ls` / `mv` (relink, O(1), identity preserved) / `cp` (deep copy under fresh AKeys) / `mkdir` / `rm` (cascade), plus value ops `store` / `load` / `get` / `kind`. A per-table LRU `PathCache` (`APath → (generation, AKey)`) and a blob LRU (`(generation, AKey) → Arc<blob>`) amortize resolution and hot reads, kept coherent by a DB-wide generation counter + a `version_lock` (StratoDb-style). Writers never use the caches.
 
 **The codec (ArborDb's own "rkyv").** `Value` (`Node(BTreeMap)` / `List(Vec)` / `Leaf(Scalar)`) ⟷ a byte blob laid out with offset tables: a leaf is `Scalar::encode`; a list is a count + a u32 offset table (O(1) element jump); an object is a count + a name-sorted `(name, offset)` table (O(log n) field lookup). An `ArchivedValue<'a>` borrows the redb page bytes and reads scalars in place — no decode into an owned tree, no alignment requirement (all reads are explicit `from_be_bytes` over unaligned slices).
 
-**Flows.** *Read:* APath → AKey → borrowed blob → `ArchivedValue` → an `ArborXxx` accessor whose `get()` methods walk the bytes zero-copy → `Scalar`/typed field. *Write:* `store(apath, &T)` drives `AData::store` into an in-memory `Value` builder, encodes it to one blob, one redb `put`. A partial write rewrites the blob (the zero-copy win is on reads).
+**Flows.** *Read:* APath → (walk dirs, cache-amortized) `AKey` → borrowed file blob → `ArchivedValue` → an `ArborXxx` accessor whose `get()` methods walk the bytes zero-copy → `Scalar`/typed field. *Write:* `store(apath, &T)` drives `AData::store` into an in-memory `Value` builder, encodes it to one blob, writes the file node and links it into its parent directory. A partial write rewrites the file blob (the zero-copy win is on reads).
 
 **Typed model reused from StratoDb (rename `S→A`, `Strato→Arbor`).** `Scalar` (+ the bignum feature matrix), `Value`, `AValue` (was `SValue`), `AData` (was `SData`), the entire `arbordb-derive` macro with all `#[arbor(...)]` attributes, the containers (`Leaf`/`Seq`/`Map`/`Opt`/`Bytes`), the accessors (`ArborXxx`/`ArborXxxMut`/`ArborXxxDesc`), `ARef`/`AMut`/`AIdentifiable`/`AIndexed`, `NodeKind`. The `Reader`/`Writer` traits are reused, but their internal node locator changes from `Skey` to an **offset into the blob** (`NodeRef`) — since an `AKey` does not address a scalar. The accessor still exposes the value's `AKey` and its `VPath` base for identity.
 
@@ -111,7 +113,8 @@ Deferred to the end: JSON/YAML export, benchmark-comparison tool.
 
 - **redb stays opaque.** Never let a `redb::` type appear in the public API.
 - **`cargo +nightly fmt` only.** The `.rustfmt.toml` uses nightly-only keys that stable fmt silently ignores.
-- **`AKey` addresses a value, not a scalar.** Navigation inside a value is always by `VPath` over the `ArchivedValue`, never by key.
-- **No flat path→key index.** The redb key IS the encoded `APath`, never a separate `APath→AKey` mapping. StratoDb dropped exactly such an index because list-index shifts made it O(N·M); ArborDb's APaths carry no index and lists are intra-value, so the problem cannot recur.
+- **`AKey` addresses a node (file or directory), not a scalar.** Navigation inside a file's value is always by `VPath` over the `ArchivedValue`, never by key.
+- **Directory child maps are indexed by name, never by position.** A create/delete/rename rewrites only the one parent dir blob — never a cascade. StratoDb's dropped flat `SPath→Skey` index blew up on list-index shifts; ArborDb has no positional index at the FS level (lists live only inside files, addressed by `VPath`), so that pitfall cannot recur.
+- **Caches are generation-keyed; writers never use them.** A read snapshot's `(begin_read, generation)` is captured atomically against a commit's `(commit, generation bump)` via the `version_lock`, so a snapshot never borrows another version's resolution.
 - **The zero-copy win is on reads.** `ArchivedValue` borrows the redb page; a whole-value write re-encodes one blob.
 - **Edition 2024 let-chains** are used freely; do not downgrade to nested `match`/`if let`.

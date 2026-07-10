@@ -44,7 +44,7 @@ pub enum AdbError {
         found:    &'static str,
     },
 
-    /// A byte slice or string could not be converted into a valid key.
+    /// A byte slice or string could not be converted into a valid [`AKey`](crate::AKey).
     #[error("invalid key: {0}")]
     BadKey(String),
 
@@ -108,4 +108,14 @@ pub enum AdbError {
     /// A `try_from` conversion (`#[arbor(try_from = ...)]`) rejected a loaded value.
     #[error("conversion failed: {0}")]
     Conversion(String),
+}
+
+impl AdbError {
+    /// Wraps a storage-engine error, keeping its source chain but hiding the
+    /// concrete type from the public API.
+    pub(crate) fn engine<E>(error: E) -> Self
+    where
+        E: Error + Send + Sync + 'static, {
+        AdbError::Engine(Box::new(error))
+    }
 }
