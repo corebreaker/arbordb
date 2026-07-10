@@ -17,8 +17,9 @@ use redb::{Database, ReadableTable, TableDefinition};
 /// borrowing the page, which is exactly the zero-copy read path.
 pub(crate) type EntryBytes = &'static [u8];
 
-/// The reserved metadata table: the format version (and, later, the index registry).
-pub(crate) const META_TABLE: TableDefinition<&str, u64> = TableDefinition::new(METADATA_TABLE_NAME);
+/// The reserved metadata table: small keyed blobs — the format version and the
+/// secondary-index registry. Byte-valued so it can hold either.
+pub(crate) const META_TABLE: TableDefinition<&str, EntryBytes> = TableDefinition::new(METADATA_TABLE_NAME);
 
 /// The per-table data table: `AKey` (as `u128`) → entry blob (a directory or a file).
 pub(crate) fn data_def(name: &str) -> TableDefinition<'_, u128, EntryBytes> {
@@ -31,7 +32,18 @@ pub(crate) fn bootstrap_metadata(db: &Database) -> AdbResult<()> {
     let txn = db.begin_write()?;
     {
         let mut meta = txn.open_table(META_TABLE)?;
-        let current = meta.get(META_FORMAT_VERSION_KEY)?.map(|guard| guard.value());
+
+        let current = match meta.get(META_FORMAT_VERSION_KEY)? {
+            Some(guard) => {
+                let bytes: [u8; 8] = guard
+                    .value()
+                    .try_into()
+                    .map_err(|_| AdbError::Corrupt("invalid on-disk format version".into()))?;
+
+                Some(u64::from_be_bytes(bytes))
+            }
+            None => None,
+        };
 
         match current {
             Some(version) if version != FORMAT_VERSION => {
@@ -41,7 +53,7 @@ pub(crate) fn bootstrap_metadata(db: &Database) -> AdbResult<()> {
             }
             Some(_) => {}
             None => {
-                meta.insert(META_FORMAT_VERSION_KEY, FORMAT_VERSION)?;
+                meta.insert(META_FORMAT_VERSION_KEY, FORMAT_VERSION.to_be_bytes().as_slice())?;
             }
         }
     }

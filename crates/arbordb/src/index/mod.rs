@@ -6,8 +6,13 @@
 //! maintenance, back-fill, and the query builder follow in later sub-phases.
 
 mod definitions;
+mod id;
 mod indexed;
 mod ordered;
+
+pub(crate) mod registry;
+
+pub(crate) use self::id::IndexId;
 
 pub use self::{
     definitions::{Direction, IndexColumn, IndexDef},
