@@ -297,7 +297,7 @@ enum Event {
     Deleted,
 }
 
-// Writes an enum node tagged "removed" — an old name for `Event::Deleted`.
+// Writes an enum vnode tagged "removed" — an old name for `Event::Deleted`.
 #[derive(AData)]
 enum OldEvent {
     #[arbor(rename = "removed")]
@@ -334,7 +334,7 @@ fn enum_rename_all_variant_rename_and_alias() {
 
     assert_eq!(ArborEventDesc::VARIANTS, &["user_logged_in", "click", "deleted"]);
 
-    // A node tagged "removed" (an alias for Deleted) still loads.
+    // A vnode tagged "removed" (an alias for Deleted) still loads.
     assert_eq!(r.load::<Event>("legacy").unwrap(), Some(Event::Deleted));
 }
 
@@ -454,7 +454,7 @@ fn skip_load_stores_the_field_but_reads_the_default() {
 
     let r = table.read().unwrap();
 
-    // The node IS written (99), but load ignores it and takes the default (0).
+    // The vnode IS written (99), but load ignores it and takes the default (0).
     assert_eq!(r.get_as::<u32>("x", "cached").unwrap(), Some(99));
     assert_eq!(
         r.load::<Timestamped>("x").unwrap(),
@@ -464,7 +464,7 @@ fn skip_load_stores_the_field_but_reads_the_default() {
     );
 }
 
-// A "v1" writer without the `retries` node.
+// A "v1" writer without the `retries` vnode.
 #[derive(AData)]
 struct SettingsV1 {
     name: String,
@@ -504,7 +504,7 @@ fn default_fills_an_absent_field() {
 
     let r = table.read().unwrap();
 
-    // The v1 blob has no `retries` node -> the default (0) fills it.
+    // The v1 blob has no `retries` vnode -> the default (0) fills it.
     assert_eq!(
         r.load::<SettingsV2>("old").unwrap(),
         Some(SettingsV2 {
@@ -560,7 +560,7 @@ fn skip_store_if_conditionally_omits_a_field() {
 
     let r = table.read().unwrap();
 
-    // Predicate true -> the node is omitted; load falls back to the default.
+    // Predicate true -> the vnode is omitted; load falls back to the default.
     assert!(r.get("zero", "count").unwrap().is_none());
     assert_eq!(
         r.load::<Sparse>("zero").unwrap(),
@@ -569,7 +569,7 @@ fn skip_store_if_conditionally_omits_a_field() {
         }),
     );
 
-    // Predicate false -> the node is written and read back.
+    // Predicate false -> the vnode is written and read back.
     assert!(r.get("some", "count").unwrap().is_some());
     assert_eq!(
         r.load::<Sparse>("some").unwrap(),
@@ -682,7 +682,7 @@ fn store_with_and_load_with_replace_each_side() {
     );
 }
 
-// A delegated type: stored AS its inner u32 (no node of its own), rebuilt with From.
+// A delegated type: stored AS its inner u32 (no vnode of its own), rebuilt with From.
 #[derive(AData, Debug, Clone, PartialEq)]
 #[arbor(from = "u32", into = "u32")]
 struct Millis(u32);
@@ -712,7 +712,7 @@ fn from_into_delegates_the_whole_value() {
 
     let r = table.read().unwrap();
 
-    // The on-disk form is a bare u32 — the delegated type has no node of its own.
+    // The on-disk form is a bare u32 — the delegated type has no vnode of its own.
     assert_eq!(r.load::<u32>("x").unwrap(), Some(1500));
 
     // ...and it rebuilds through From on load.
@@ -805,7 +805,7 @@ fn internal_tagging_flattens_the_payload() {
     assert_eq!(r.load::<Msg>("ids").unwrap(), Some(Msg::Ids(7, 8)));
 
     // The tag sits in the `type` field, and the struct payload is flattened
-    // (`x`/`y` directly under the node, not nested).
+    // (`x`/`y` directly under the vnode, not nested).
     let view: ArborMsg<'static> = r.fetch("move").unwrap().unwrap();
     assert_eq!(view.variant().unwrap(), "Move");
     assert_eq!(r.get_as::<i64>("move", "x").unwrap(), Some(1));
@@ -1063,7 +1063,7 @@ fn bound_override_drops_the_default_adata_bound() {
     assert_eq!(r.get_as::<i64>("x", "value").unwrap(), Some(5));
 }
 
-// A flattened inner struct: its fields merge into the parent's node.
+// A flattened inner struct: its fields merge into the parent's vnode.
 #[derive(AData, Debug, Clone, PartialEq)]
 struct Meta {
     created: i64,
@@ -1101,15 +1101,15 @@ fn flatten_merges_the_field_into_the_parent_node() {
     // Round-trips.
     assert_eq!(r.load::<Doc>("x").unwrap(), Some(doc));
 
-    // The inner fields sit directly on the parent node — there is no `meta` node.
+    // The inner fields sit directly on the parent vnode — there is no `meta` vnode.
     assert_eq!(r.get_as::<i64>("x", "created").unwrap(), Some(100));
     assert!(r.get("x", "author").unwrap().is_some());
     assert!(r.get("x", "meta").unwrap().is_none());
 
-    // Desc lists only the named field; the flattened one has no node of its own.
+    // Desc lists only the named field; the flattened one has no vnode of its own.
     assert_eq!(ArborDocDesc::FIELDS, &["title"]);
 
-    // The accessor for a flattened field opens on the parent node.
+    // The accessor for a flattened field opens on the parent vnode.
     let view: ArborDoc<'static> = r.fetch("x").unwrap().unwrap();
     assert_eq!(view.title().get().unwrap(), "T");
     assert_eq!(view.meta().created().get().unwrap(), 100);

@@ -1,0 +1,594 @@
+//! Integration tests for the `permissions` feature: authentication, protection
+//! promotion, and password changes. (ACL enforcement is exercised separately.)
+
+#![cfg(feature = "permissions")]
+
+use arbordb::acl::{Mode, Rights};
+use arbordb::{data::Scalar, AdbError, ArborDb, Value};
+use std::path::PathBuf;
+
+fn leaf(n: i64) -> Value {
+    Value::Leaf(Scalar::I64(n))
+}
+
+/// A throwaway on-disk database path (in-memory databases cannot be reopened, so
+/// the authentication matrix needs a real file).
+fn tmp_db() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("db.redb");
+
+    (dir, path)
+}
+
+#[test]
+fn change_password_promotes_an_unprotected_database_to_master() {
+    let (_dir, path) = tmp_db();
+
+    // A fresh database has no permission system.
+    let db = ArborDb::create(&path).unwrap();
+    assert_eq!(db.current_user(), None);
+
+    // Promotion makes the caller the master user.
+    let db = db.change_password("s3cret").unwrap();
+    assert_eq!(db.current_user(), Some("master"));
+    drop(db);
+
+    // Reopening without credentials lands on the guest user.
+    let guest = ArborDb::open(&path).unwrap();
+    assert_eq!(guest.current_user(), Some("guest"));
+}
+
+#[test]
+fn open_with_authentication_accepts_master_and_rejects_bad_credentials() {
+    let (_dir, path) = tmp_db();
+    ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+
+    // redb locks the file exclusively, so release this handle before reopening.
+    {
+        let master = ArborDb::open_with_authentication(&path, "master", "pw").unwrap();
+        assert_eq!(master.current_user(), Some("master"));
+    }
+
+    // A wrong password and an unknown user are indistinguishable failures.
+    assert!(matches!(
+        ArborDb::open_with_authentication(&path, "master", "nope"),
+        Err(AdbError::AuthenticationFailed)
+    ));
+    assert!(matches!(
+        ArborDb::open_with_authentication(&path, "ghost", "pw"),
+        Err(AdbError::AuthenticationFailed)
+    ));
+}
+
+#[test]
+fn with_authentication_on_an_unprotected_database_reports_no_permissions() {
+    let (_dir, path) = tmp_db();
+    let db = ArborDb::create(&path).unwrap();
+
+    assert!(matches!(
+        db.with_authentication("master", "pw"),
+        Err(AdbError::NoPermissions)
+    ));
+}
+
+#[test]
+fn guest_cannot_change_a_password() {
+    let (_dir, path) = tmp_db();
+    ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+
+    let guest = ArborDb::open(&path).unwrap();
+    assert!(matches!(guest.change_password("x"), Err(AdbError::PermissionDenied(_))));
+}
+
+#[test]
+fn a_user_changes_their_own_password() {
+    let (_dir, path) = tmp_db();
+    ArborDb::create(&path).unwrap().change_password("old").unwrap();
+
+    // Authenticate as master, then rotate the password.
+    ArborDb::open_with_authentication(&path, "master", "old")
+        .unwrap()
+        .change_password("new")
+        .unwrap();
+
+    // The old password no longer works; the new one does.
+    assert!(matches!(
+        ArborDb::open_with_authentication(&path, "master", "old"),
+        Err(AdbError::AuthenticationFailed)
+    ));
+    assert_eq!(
+        ArborDb::open_with_authentication(&path, "master", "new")
+            .unwrap()
+            .current_user(),
+        Some("master")
+    );
+}
+
+#[test]
+fn guest_cannot_write_but_master_can() {
+    let (_dir, path) = tmp_db();
+
+    // Promote to master and write a file (master bypasses ACLs).
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+        let t = db.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("greeting", &leaf(1)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Guest (the anonymous open) is read-only: it cannot even open a write txn.
+    {
+        let guest = ArborDb::open(&path).unwrap();
+        let t = guest.open_table("data").unwrap();
+        assert!(matches!(t.write(), Err(AdbError::PermissionDenied(_))));
+    }
+
+    // The re-authenticated master may overwrite.
+    {
+        let master = ArborDb::open_with_authentication(&path, "master", "pw").unwrap();
+        let t = master.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("greeting", &leaf(3)).unwrap();
+        w.commit().unwrap();
+    }
+}
+
+#[test]
+fn guest_can_read_a_default_readable_file() {
+    let (_dir, path) = tmp_db();
+
+    // Master creates a nested file; default ACLs grant other read + walk.
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+        let t = db.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("docs/readme", &leaf(42)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Guest traverses the directories (walk) and reads the file (read).
+    {
+        let guest = ArborDb::open(&path).unwrap();
+        let t = guest.open_table("data").unwrap();
+        assert_eq!(t.read().unwrap().load_value("docs/readme").unwrap(), Some(leaf(42)));
+    }
+}
+
+#[test]
+fn an_unprotected_database_writes_without_restriction() {
+    // A database with no permission system authorizes every operation.
+    let db = ArborDb::create_in_memory().unwrap();
+    let t = db.open_table("data").unwrap();
+
+    let w = t.write().unwrap();
+    w.store_value("x", &leaf(1)).unwrap();
+    w.commit().unwrap();
+
+    assert_eq!(t.read().unwrap().load_value("x").unwrap(), Some(leaf(1)));
+}
+
+#[test]
+fn owner_may_write_but_another_user_only_reads() {
+    let (_dir, path) = tmp_db();
+
+    // Master promotes and creates two ordinary users.
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("master-pw").unwrap();
+        db.add_user("alice", "alice-pw", false).unwrap();
+        db.add_user("bob", "bob-pw", false).unwrap();
+    }
+
+    // Alice creates a file — she owns it (default mode: owner rwx, other read+walk).
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "alice-pw").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("shared", &leaf(1)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Bob falls in the `other` class: he may read Alice's file but not overwrite it.
+    {
+        let bob = ArborDb::open_with_authentication(&path, "bob", "bob-pw").unwrap();
+        let t = bob.open_table("data").unwrap();
+        assert_eq!(t.read().unwrap().load_value("shared").unwrap(), Some(leaf(1)));
+
+        let w = t.write().unwrap();
+        assert!(matches!(
+            w.store_value("shared", &leaf(2)),
+            Err(AdbError::PermissionDenied(_))
+        ));
+    }
+
+    // Alice, the owner, may overwrite it.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "alice-pw").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("shared", &leaf(3)).unwrap();
+        w.commit().unwrap();
+    }
+}
+
+#[test]
+fn chown_transfers_ownership() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+        db.add_user("bob", "b", false).unwrap();
+    }
+
+    // Alice creates a file she owns, then hands it to Bob (she is the owner).
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("f", &leaf(1)).unwrap();
+        w.chown("f", "bob").unwrap();
+        w.commit().unwrap();
+    }
+
+    // Bob is now the owner and may write it.
+    {
+        let bob = ArborDb::open_with_authentication(&path, "bob", "b").unwrap();
+        let t = bob.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("f", &leaf(2)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Alice is now merely `other` and may no longer write it.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        assert!(matches!(
+            w.store_value("f", &leaf(3)),
+            Err(AdbError::PermissionDenied(_))
+        ));
+    }
+}
+
+#[test]
+fn chgrp_requires_membership_of_the_target_group() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+        db.add_group("staff").unwrap();
+    }
+
+    // Alice owns the file but is not in "staff", so she cannot set that group.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("f", &leaf(1)).unwrap();
+        assert!(matches!(
+            w.chgrp("f", Some("staff")),
+            Err(AdbError::PermissionDenied(_))
+        ));
+        w.commit().unwrap();
+    }
+
+    // The master may set any group.
+    {
+        let master = ArborDb::open_with_authentication(&path, "master", "m").unwrap();
+        let t = master.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.chgrp("f", Some("staff")).unwrap();
+        w.commit().unwrap();
+    }
+}
+
+#[test]
+fn chmod_restricts_access_and_get_acl_reflects_it() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        let t = db.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("secret", &leaf(7)).unwrap();
+
+        // Restrict to the owner only (no group, no other).
+        w.chmod(
+            "secret",
+            Mode {
+                owner: Rights {
+                    read:  true,
+                    write: true,
+                    walk:  true,
+                },
+                group: Rights::default(),
+                other: Rights::default(),
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+
+        // get_acl reports the owner name and the tightened mode.
+        let acl = t.read().unwrap().get_acl("secret").unwrap().unwrap();
+        assert_eq!(acl.owner, "master");
+        assert_eq!(acl.group, None);
+        assert!(acl.mode.owner.read && acl.mode.owner.write);
+        assert!(!acl.mode.other.read);
+    }
+
+    // The guest (an `other`) may no longer read it.
+    {
+        let guest = ArborDb::open(&path).unwrap();
+        let t = guest.open_table("data").unwrap();
+        assert!(matches!(
+            t.read().unwrap().load_value("secret"),
+            Err(AdbError::PermissionDenied(_))
+        ));
+    }
+}
+
+#[test]
+fn removing_a_user_deletes_the_values_it_owns() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+    }
+
+    // Alice creates a top-level file and a nested one; she owns both (and the dir).
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("a1", &leaf(1)).unwrap();
+        w.store_value("dir/a2", &leaf(2)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Master removes Alice: her values are reaped and she is gone from the store.
+    {
+        let master = ArborDb::open_with_authentication(&path, "master", "m").unwrap();
+        master.remove_user("alice").unwrap();
+
+        assert_eq!(master.list_users().unwrap(), vec!["guest", "master"]);
+
+        let t = master.open_table("data").unwrap();
+        let r = t.read().unwrap();
+        assert!(r.load_value("a1").unwrap().is_none());
+        assert!(r.load_value("dir/a2").unwrap().is_none());
+    }
+
+    // The built-in users cannot be removed.
+    {
+        let master = ArborDb::open_with_authentication(&path, "master", "m").unwrap();
+        assert!(matches!(
+            master.remove_user("master"),
+            Err(AdbError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            master.remove_user("guest"),
+            Err(AdbError::PermissionDenied(_))
+        ));
+    }
+}
+
+#[test]
+fn removing_a_group_unassigns_it_and_clears_it_from_acls() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+        db.add_group("staff").unwrap();
+        db.assign_user_to_group("alice", "staff").unwrap();
+
+        // A file grouped to "staff".
+        let t = db.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("f", &leaf(1)).unwrap();
+        w.chgrp("f", Some("staff")).unwrap();
+        w.commit().unwrap();
+
+        assert_eq!(
+            t.read().unwrap().get_acl("f").unwrap().unwrap().group,
+            Some(String::from("staff"))
+        );
+    }
+
+    // Removing the group unassigns every user and clears it from every ACL.
+    {
+        let master = ArborDb::open_with_authentication(&path, "master", "m").unwrap();
+        master.remove_group("staff").unwrap();
+
+        assert!(master.user_groups("alice").unwrap().is_empty());
+        assert!(!master.list_groups().unwrap().contains(&String::from("staff")));
+
+        let t = master.open_table("data").unwrap();
+        assert_eq!(t.read().unwrap().get_acl("f").unwrap().unwrap().group, None);
+    }
+
+    // The built-in groups cannot be removed.
+    {
+        let master = ArborDb::open_with_authentication(&path, "master", "m").unwrap();
+        assert!(matches!(
+            master.remove_group("master"),
+            Err(AdbError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            master.remove_group("super"),
+            Err(AdbError::PermissionDenied(_))
+        ));
+    }
+}
+
+#[test]
+fn admin_manages_users_and_groups() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+
+        // Create a user together with a same-named group.
+        db.add_user("alice", "a", true).unwrap();
+
+        // The master may list everything.
+        assert_eq!(db.list_users().unwrap(), vec!["alice", "guest", "master"]);
+        assert!(db.list_groups().unwrap().contains(&String::from("alice")));
+        assert_eq!(db.user_groups("alice").unwrap(), vec!["alice"]);
+        assert_eq!(db.group_members("alice").unwrap(), vec!["alice"]);
+
+        // The frozen guest cannot be put in any group, even by the master.
+        assert!(matches!(
+            db.assign_user_to_group("guest", "alice"),
+            Err(AdbError::Frozen(_))
+        ));
+
+        // Built-in users and groups cannot be renamed.
+        assert!(matches!(
+            db.rename_user("master", "boss"),
+            Err(AdbError::PermissionDenied(_))
+        ));
+        assert!(matches!(
+            db.rename_group("super", "sudo"),
+            Err(AdbError::PermissionDenied(_))
+        ));
+    }
+
+    // An ordinary user may neither administer nor list.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        assert!(matches!(
+            alice.add_user("carol", "c", false),
+            Err(AdbError::PermissionDenied(_))
+        ));
+        assert!(matches!(alice.list_users(), Err(AdbError::PermissionDenied(_))));
+    }
+}
+
+#[test]
+fn tampering_with_the_permission_store_is_detected() {
+    use redb::{Database, ReadableTable, TableDefinition};
+
+    let (_dir, path) = tmp_db();
+    ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+
+    // Simulate an attacker who opens the redb file directly — no ArborDb, no key —
+    // and rewrites the group blob in the reserved `$metadata` table.
+    {
+        let meta: TableDefinition<&str, &[u8]> = TableDefinition::new("$metadata");
+        let raw = Database::open(&path).unwrap();
+        let wtx = raw.begin_write().unwrap();
+        {
+            let mut table = wtx.open_table(meta).unwrap();
+            let mut groups = table.get("groups").unwrap().unwrap().value().to_vec();
+            *groups.last_mut().unwrap() ^= 0x01;
+            table.insert("groups", groups.as_slice()).unwrap();
+        }
+        wtx.commit().unwrap();
+    }
+
+    // Authentication unlocks K, then fails the control-plane integrity check.
+    assert!(matches!(
+        ArborDb::open_with_authentication(&path, "master", "pw"),
+        Err(AdbError::Tampered(_))
+    ));
+}
+
+#[test]
+fn tampering_with_a_value_is_detected() {
+    use redb::{Database, ReadableTable, TableDefinition};
+
+    let (_dir, path) = tmp_db();
+
+    // Master stores a top-level file, then releases the handle.
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+        let t = db.open_table("docs").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("note", &leaf(42)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // An attacker flips a byte inside the file's stored blob. Its leading tag byte
+    // marks it a file, so the root directory entry is left intact.
+    {
+        let docs: TableDefinition<u128, &[u8]> = TableDefinition::new("docs");
+        let raw = Database::open(&path).unwrap();
+        let wtx = raw.begin_write().unwrap();
+        {
+            let mut table = wtx.open_table(docs).unwrap();
+
+            let mut victim: Option<(u128, Vec<u8>)> = None;
+            for row in table.iter().unwrap() {
+                let (key, value) = row.unwrap();
+                let bytes = value.value().to_vec();
+                if bytes.first() == Some(&1u8) {
+                    victim = Some((key.value(), bytes));
+                }
+            }
+
+            let (key, mut bytes) = victim.expect("a file entry to tamper with");
+            *bytes.last_mut().unwrap() ^= 0x01;
+            table.insert(key, bytes.as_slice()).unwrap();
+        }
+        wtx.commit().unwrap();
+    }
+
+    // Authentication still succeeds — the control plane is intact — but reading the
+    // tampered value fails its integrity check.
+    let master = ArborDb::open_with_authentication(&path, "master", "pw").unwrap();
+    let t = master.open_table("docs").unwrap();
+    let r = t.read().unwrap();
+    assert!(matches!(r.load_value("note"), Err(AdbError::Tampered(_))));
+}
+
+#[test]
+fn a_writer_cannot_launder_a_tampered_value() {
+    use redb::{Database, ReadableTable, TableDefinition};
+
+    let (_dir, path) = tmp_db();
+
+    // Master stores a top-level file, then releases the handle.
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+        let t = db.open_table("docs").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("note", &leaf(7)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // An attacker flips a byte in the file's stored blob via redb alone.
+    {
+        let docs: TableDefinition<u128, &[u8]> = TableDefinition::new("docs");
+        let raw = Database::open(&path).unwrap();
+        let wtx = raw.begin_write().unwrap();
+        {
+            let mut table = wtx.open_table(docs).unwrap();
+
+            let mut victim: Option<(u128, Vec<u8>)> = None;
+            for row in table.iter().unwrap() {
+                let (key, value) = row.unwrap();
+                let bytes = value.value().to_vec();
+                if bytes.first() == Some(&1u8) {
+                    victim = Some((key.value(), bytes));
+                }
+            }
+
+            let (key, mut bytes) = victim.expect("a file entry to tamper with");
+            *bytes.last_mut().unwrap() ^= 0x01;
+            table.insert(key, bytes.as_slice()).unwrap();
+        }
+        wtx.commit().unwrap();
+    }
+
+    // Copying reads the source blob to duplicate it, so the writer detects the
+    // tampering (and cannot re-seal a fresh, valid MAC over the altered bytes).
+    let master = ArborDb::open_with_authentication(&path, "master", "pw").unwrap();
+    let t = master.open_table("docs").unwrap();
+    let w = t.write().unwrap();
+    assert!(matches!(w.cp("note", "copy"), Err(AdbError::Tampered(_))));
+}

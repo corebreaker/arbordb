@@ -187,3 +187,91 @@ mod bignum {
         assert_eq!(got, want);
     }
 }
+
+/// Secondary indexes crossed with `permissions`: an index query must not leak
+/// entities the authenticated reader is not allowed to see. Needs `derive` +
+/// `permissions` (so `--all-features`).
+#[cfg(feature = "permissions")]
+mod permissions {
+    use super::*;
+    use arbordb::acl::{Mode, Rights};
+
+    #[derive(AData, Debug, PartialEq)]
+    #[arbor(index(name = "by_rank", columns(rank)))]
+    struct Doc {
+        title: String,
+        rank:  i64,
+    }
+
+    #[test]
+    fn an_index_query_hides_entities_the_reader_cannot_see() {
+        // Promote to master (who bypasses ACLs), then add an ordinary user.
+        let master = ArborDb::create_in_memory().unwrap().change_password("pw").unwrap();
+        master.add_user("alice", "a", false).unwrap();
+
+        let docs = master.open_table("docs").unwrap();
+        docs.create_indexes::<Doc>("docs/*").unwrap();
+
+        {
+            let w = docs.write().unwrap();
+            w.store::<Doc>(
+                "docs/public",
+                &Doc {
+                    title: String::from("Public"),
+                    rank:  1,
+                },
+            )
+            .unwrap();
+            w.store::<Doc>(
+                "docs/secret",
+                &Doc {
+                    title: String::from("Secret"),
+                    rank:  2,
+                },
+            )
+            .unwrap();
+
+            // Lock `secret` down to its owner (master); other gets nothing.
+            w.chmod(
+                "docs/secret",
+                Mode {
+                    owner: Rights {
+                        read:  true,
+                        write: true,
+                        walk:  true,
+                    },
+                    group: Rights::default(),
+                    other: Rights::default(),
+                },
+            )
+            .unwrap();
+            w.commit().unwrap();
+        }
+
+        // The master sees both, in index order.
+        {
+            let r = docs.read().unwrap();
+            let ranks: Vec<i64> = r
+                .find::<Doc>("by_rank", &[])
+                .unwrap()
+                .into_iter()
+                .map(|doc| doc.rank)
+                .collect();
+            assert_eq!(ranks, [1, 2]);
+        }
+
+        // `alice` is "other": she may read `public` but not `secret`. The index query
+        // silently omits the entity she cannot read rather than leaking it.
+        {
+            let alice = master.clone().with_authentication("alice", "a").unwrap();
+            let r = alice.open_table("docs").unwrap().read().unwrap();
+            let titles: Vec<String> = r
+                .find::<Doc>("by_rank", &[])
+                .unwrap()
+                .into_iter()
+                .map(|doc| doc.title)
+                .collect();
+            assert_eq!(titles, [String::from("Public")]);
+        }
+    }
+}
