@@ -1,0 +1,98 @@
+version: 2.1
+
+# The full ArborDb gate, split across jobs so a failure names the offending check.
+# `format` needs nightly (the .rustfmt.toml uses nightly-only keys), so it runs on
+# the corebreaker devtools image; `lint` and `test` run on cimg/rust (ships clippy
+# and rustfmt); `coverage` reuses the devtools image for its coverage.sh/coveralls
+# tooling.
+
+jobs:
+  format:
+    docker:
+      - image: corebreaker/rust-devtools-circleci:rust-1.96.0-v0.4.6
+        auth:
+          username: corebreaker
+          password: $DOCKERHUB_ACCESS_TOKEN
+    steps:
+      - checkout
+      - run:
+          name: Show toolchain versions
+          command: "rustc --version && cargo --version && cargo +nightly --version"
+      - run:
+          name: Check formatting (nightly only)
+          command: "cargo +nightly fmt --all --check"
+
+  lint:
+    docker:
+      - image: cimg/rust:1.96.0
+        auth:
+          username: corebreaker
+          password: $DOCKERHUB_ACCESS_TOKEN
+    environment:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - checkout
+      - run:
+          name: Clippy (default features)
+          command: "cargo clippy --all-targets -- -D warnings"
+      - run:
+          name: Clippy (all features)
+          command: "cargo clippy --all-targets --all-features -- -D warnings"
+      - run:
+          name: Clippy (derive)
+          command: "cargo clippy --all-targets --features derive -- -D warnings"
+      - run:
+          name: Clippy (bignum-as-data path)
+          command: "cargo clippy --all-targets --features bignum-as-data -- -D warnings"
+      - run:
+          name: Build docs
+          command: "cargo doc --all-features --no-deps"
+
+  test:
+    docker:
+      - image: cimg/rust:1.96.0
+        auth:
+          username: corebreaker
+          password: $DOCKERHUB_ACCESS_TOKEN
+    environment:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    steps:
+      - checkout
+      - run:
+          name: Run tests
+          command: "cargo test --all-features --all-targets"
+      - run:
+          name: Run doctests
+          command: "cargo test --all-features --doc"
+      - run:
+          name: Spot-check the bignum-as-data path
+          command: "cargo test -p arbordb --features bignum-as-data"
+
+  coverage:
+    docker:
+      - image: corebreaker/rust-devtools-circleci:rust-1.96.0-v0.4.6
+        auth:
+          username: corebreaker
+          password: $DOCKERHUB_ACCESS_TOKEN
+    steps:
+      - checkout
+      - run:
+          name: Make coverage
+          command: "coverage.sh -p crates/ -a -w"
+      - run:
+          name: Upload Coverage Result To Coveralls
+          command: "coveralls circleci -r arbordb -t $COVERALLS_REPO_TOKEN target/coverage/coveralls.json"
+      - store_artifacts:
+          path: target/coverage
+
+workflows:
+  coverage:
+    jobs:
+      - coverage
+
+  all-tests:
+    jobs:
+      - format
+      - lint
+      - test
