@@ -6,9 +6,12 @@
 mod accessors;
 mod adata;
 mod attr;
+mod convert;
 mod desc;
 mod enums;
 mod fields;
+
+use crate::attr::ContainerAttrs;
 
 use proc_macro::TokenStream;
 use quote::format_ident;
@@ -24,7 +27,8 @@ pub fn derive_adata(input: TokenStream) -> TokenStream {
     expand(&input).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// Dispatches on the input's shape (struct vs enum; unions and generics rejected).
+/// Dispatches on the input's shape (delegated conversion, struct, or enum; unions
+/// and generics rejected).
 fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -33,9 +37,16 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         ));
     }
 
+    let container = ContainerAttrs::parse(&input.attrs)?;
+
+    // `from`/`into`/`try_from` store the value AS a target type, bypassing shredding.
+    if container.delegates() {
+        return convert::convert_impl(input, &container);
+    }
+
     match &input.data {
-        Data::Struct(_) => expand_struct(input),
-        Data::Enum(data) => enums::expand_enum(input, data),
+        Data::Struct(_) => expand_struct(input, &container),
+        Data::Enum(data) => enums::expand_enum(input, data, &container),
         Data::Union(_) => Err(syn::Error::new_spanned(
             &input.ident,
             "#[derive(AData)] does not support unions",
@@ -44,8 +55,8 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 }
 
 /// Expands `#[derive(AData)]` for a struct into its impl, accessors, and descriptor.
-fn expand_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
-    let fields = fields::named_fields(input)?;
+fn expand_struct(input: &DeriveInput, container: &ContainerAttrs) -> syn::Result<proc_macro2::TokenStream> {
+    let fields = fields::named_fields(input, container)?;
 
     let name = &input.ident;
     let vis = &input.vis;

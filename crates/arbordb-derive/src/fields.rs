@@ -20,7 +20,7 @@ pub(crate) struct Field<'a> {
 
 /// Extracts the named fields of a struct, rejecting the shapes not yet supported
 /// and resolving each field's stored name from its `#[arbor(...)]` attributes.
-pub(crate) fn named_fields(input: &DeriveInput) -> syn::Result<Vec<Field<'_>>> {
+pub(crate) fn named_fields<'a>(input: &'a DeriveInput, container: &ContainerAttrs) -> syn::Result<Vec<Field<'a>>> {
     let Data::Struct(data) = &input.data else {
         return Err(syn::Error::new(
             Span::call_site(),
@@ -34,8 +34,6 @@ pub(crate) fn named_fields(input: &DeriveInput) -> syn::Result<Vec<Field<'_>>> {
             "#[derive(AData)] supports only structs with named fields",
         ));
     };
-
-    let container = ContainerAttrs::parse(&input.attrs)?;
 
     named
         .named

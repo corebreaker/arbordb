@@ -680,3 +680,85 @@ fn store_with_and_load_with_replace_each_side() {
         })
     );
 }
+
+// A delegated type: stored AS its inner u32 (no node of its own), rebuilt with From.
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(from = "u32", into = "u32")]
+struct Millis(u32);
+
+impl From<u32> for Millis {
+    fn from(n: u32) -> Self {
+        Millis(n)
+    }
+}
+
+impl From<Millis> for u32 {
+    fn from(m: Millis) -> Self {
+        m.0
+    }
+}
+
+#[test]
+fn from_into_delegates_the_whole_value() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Millis>("x", &Millis(1500)).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // The on-disk form is a bare u32 — the delegated type has no node of its own.
+    assert_eq!(r.load::<u32>("x").unwrap(), Some(1500));
+
+    // ...and it rebuilds through From on load.
+    assert_eq!(r.load::<Millis>("x").unwrap(), Some(Millis(1500)));
+}
+
+// A delegated type with a validating (fallible) conversion.
+#[derive(AData, Debug, Clone, PartialEq)]
+#[arbor(try_from = "i64", into = "i64")]
+struct Percent(i64);
+
+impl TryFrom<i64> for Percent {
+    type Error = String;
+
+    fn try_from(n: i64) -> Result<Self, String> {
+        if (0..=100).contains(&n) {
+            Ok(Percent(n))
+        } else {
+            Err(format!("percent out of range: {n}"))
+        }
+    }
+}
+
+impl From<Percent> for i64 {
+    fn from(p: Percent) -> Self {
+        p.0
+    }
+}
+
+#[test]
+fn try_from_delegation_reports_conversion_failures() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Percent>("ok", &Percent(42)).unwrap();
+        // A raw out-of-range i64 stored where a Percent is expected.
+        w.store::<i64>("bad", &200).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // A valid stored value converts...
+    assert_eq!(r.load::<Percent>("ok").unwrap(), Some(Percent(42)));
+
+    // ...and an invalid one surfaces the TryFrom error as an AdbError.
+    assert!(r.load::<Percent>("bad").is_err());
+}

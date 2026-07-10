@@ -30,14 +30,16 @@ struct VariantInfo<'a> {
 }
 
 /// Expands `#[derive(AData)]` for an enum into its impl, accessors, and descriptor.
-pub(crate) fn expand_enum(input: &DeriveInput, data: &DataEnum) -> syn::Result<TokenStream> {
+pub(crate) fn expand_enum(
+    input: &DeriveInput,
+    data: &DataEnum,
+    container: &ContainerAttrs,
+) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let vis = &input.vis;
     let ref_name = format_ident!("Arbor{}", name);
     let mut_name = format_ident!("Arbor{}Mut", name);
     let desc_name = format_ident!("Arbor{}Desc", name);
-
-    let container = ContainerAttrs::parse(&input.attrs)?;
 
     let variants = data
         .variants
