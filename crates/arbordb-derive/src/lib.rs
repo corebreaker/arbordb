@@ -6,14 +6,16 @@
 mod accessors;
 mod adata;
 mod desc;
+mod enums;
 mod fields;
 
 use proc_macro::TokenStream;
 use quote::format_ident;
-use syn::{parse_macro_input, DeriveInput};
+use syn::{parse_macro_input, Data, DeriveInput};
 
-/// Derives [`AData`](../arbordb/data/trait.AData.html) for a struct, generating
-/// its `ArborXxx` / `ArborXxxMut` accessors and an `ArborXxxDesc` companion.
+/// Derives [`AData`](../arbordb/data/trait.AData.html) for a struct or enum,
+/// generating its `ArborXxx` / `ArborXxxMut` accessors and an `ArborXxxDesc`
+/// companion.
 #[proc_macro_derive(AData, attributes(arbor))]
 pub fn derive_adata(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -21,7 +23,7 @@ pub fn derive_adata(input: TokenStream) -> TokenStream {
     expand(&input).unwrap_or_else(syn::Error::into_compile_error).into()
 }
 
-/// Expands `#[derive(AData)]` for a struct into its impl, accessors, and descriptor.
+/// Dispatches on the input's shape (struct vs enum; unions and generics rejected).
 fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
@@ -30,6 +32,18 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         ));
     }
 
+    match &input.data {
+        Data::Struct(_) => expand_struct(input),
+        Data::Enum(data) => enums::expand_enum(input, data),
+        Data::Union(_) => Err(syn::Error::new_spanned(
+            &input.ident,
+            "#[derive(AData)] does not support unions",
+        )),
+    }
+}
+
+/// Expands `#[derive(AData)]` for a struct into its impl, accessors, and descriptor.
+fn expand_struct(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let fields = fields::named_fields(input)?;
 
     let name = &input.ident;
@@ -41,7 +55,7 @@ fn expand(input: &DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
 
     let adata = adata::adata_impl(name, &ref_name, &mut_name, &fields);
     let accessors = accessors::accessors(vis, &ref_name, &mut_name, &fields);
-    let desc = desc::desc(vis, &desc_name, &name.to_string(), &field_names);
+    let desc = desc::desc_struct(vis, &desc_name, &name.to_string(), &field_names);
 
     Ok(quote::quote! {
         #adata

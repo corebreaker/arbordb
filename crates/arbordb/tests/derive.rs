@@ -95,3 +95,71 @@ fn descriptor_lists_the_fields() {
     assert_eq!(ArborPersonDesc::FIELDS, &["name", "age", "home"]);
     assert_eq!(ArborPointDesc::FIELDS, &["x", "y"]);
 }
+
+#[derive(AData, Debug, Clone, PartialEq)]
+enum Shape {
+    Empty,
+    Circle(f64),
+    Rect(i64, i64),
+    Named { w: i64, h: i64 },
+}
+
+#[test]
+fn derived_enum_round_trips_all_variant_shapes() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    let cases = [
+        ("empty", Shape::Empty),
+        ("circle", Shape::Circle(1.5)),
+        ("rect", Shape::Rect(3, 4)),
+        (
+            "named",
+            Shape::Named {
+                w: 10, h: 20
+            },
+        ),
+    ];
+
+    {
+        let w = table.write().unwrap();
+        for (path, shape) in &cases {
+            w.store::<Shape>(*path, shape).unwrap();
+        }
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+    for (path, shape) in &cases {
+        assert_eq!(r.load::<Shape>(*path).unwrap(), Some(shape.clone()));
+    }
+
+    let rect: ArborShape<'static> = r.fetch("rect").unwrap().unwrap();
+    assert_eq!(rect.variant().unwrap(), "Rect");
+
+    assert_eq!(ArborShapeDesc::TYPE_NAME, "Shape");
+    assert_eq!(ArborShapeDesc::VARIANTS, &["Empty", "Circle", "Rect", "Named"]);
+}
+
+#[test]
+fn derived_enum_variant_replacement_is_clean() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Shape>("s", &Shape::Rect(1, 2)).unwrap();
+        w.commit().unwrap();
+    }
+    {
+        let w = table.write().unwrap();
+        w.store::<Shape>("s", &Shape::Circle(9.0)).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load::<Shape>("s").unwrap(), Some(Shape::Circle(9.0)));
+
+    let shape: ArborShape<'static> = r.fetch("s").unwrap().unwrap();
+    assert_eq!(shape.variant().unwrap(), "Circle");
+}
