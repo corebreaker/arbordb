@@ -59,6 +59,10 @@ pub struct ReadTxn {
     cache:      Arc<PathCache>,
     /// The generation captured at snapshot start, tagging cache lookups.
     generation: u64,
+    /// The data table, opened once at snapshot start and reused by every read —
+    /// so a scan of N entities opens it once, not N times. `None` until the table's
+    /// first write materializes it.
+    data_table: Option<ReadOnlyTable<u128, EntryBytes>>,
 
     /// Shared state, held for depositing this snapshot's buffered access times.
     #[cfg(feature = "entry-timestamps")]
@@ -82,19 +86,29 @@ impl ReadTxn {
         generation: u64,
         #[cfg(feature = "entry-timestamps")] inner: Arc<DbInner>,
         #[cfg(feature = "permissions")] principal: Arc<Principal>,
-    ) -> Self {
-        Self {
+    ) -> AdbResult<Self> {
+        // Open the data table once, here, so every read in this snapshot reuses the
+        // one handle rather than re-opening it per operation (a scan of N entities
+        // opened it N times before). `None` until the table's first write.
+        let data_table = match txn.open_table(data_def(&table)) {
+            Ok(table) => Some(table),
+            Err(TableError::TableDoesNotExist(_)) => None,
+            Err(err) => return Err(err.into()),
+        };
+
+        Ok(Self {
             txn,
             table,
             cache,
             generation,
+            data_table,
             #[cfg(feature = "entry-timestamps")]
             inner,
             #[cfg(feature = "entry-timestamps")]
             access_log: Mutex::new(HashMap::new()),
             #[cfg(feature = "permissions")]
             principal,
-        }
+        })
     }
 
     /// Buffers a content read of `akey` in this snapshot's access log (persisted
@@ -107,13 +121,10 @@ impl ReadTxn {
         }
     }
 
-    /// Opens the data table, or `None` if it has never been written.
-    fn open(&self) -> AdbResult<Option<ReadOnlyTable<u128, EntryBytes>>> {
-        match self.txn.open_table(data_def(&self.table)) {
-            Ok(table) => Ok(Some(table)),
-            Err(TableError::TableDoesNotExist(_)) => Ok(None),
-            Err(err) => Err(err.into()),
-        }
+    /// The data table handle, opened once at snapshot start (see [`new`](Self::new)).
+    /// `None` if the table has never been written.
+    fn open(&self) -> Option<&ReadOnlyTable<u128, EntryBytes>> {
+        self.data_table.as_ref()
     }
 
     /// The entry blob for `akey`, served from the blob cache or read once from the
@@ -446,18 +457,18 @@ impl ReadTxn {
 
 impl Grab for ReadTxn {
     fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
-        let Some(table) = self.open()? else {
+        let Some(table) = self.open() else {
             // The root always resolves, even before the data table is materialized;
             // any named component needs the table.
             return Ok(path.is_root().then_some(AKey::ROOT));
         };
 
-        self.resolve_cached(&table, path)
+        self.resolve_cached(table, path)
     }
 
     fn entry_blob(&self, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>> {
-        match self.open()? {
-            Some(table) => self.blob_at(&table, akey),
+        match self.open() {
+            Some(table) => self.blob_at(table, akey),
             None => Ok(None),
         }
     }
@@ -479,8 +490,8 @@ impl Grab for ReadTxn {
     }
 
     fn affected_under(&self, pattern: &Pattern, root: &APath) -> AdbResult<Vec<AKey>> {
-        match self.open()? {
-            Some(data) => pattern.affected_entities(&data, root),
+        match self.open() {
+            Some(data) => pattern.affected_entities(data, root),
             None => Ok(Vec::new()),
         }
     }

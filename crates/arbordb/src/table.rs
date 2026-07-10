@@ -67,7 +67,7 @@ impl Table {
         let generation = self.inner.generation();
         drop(guard);
 
-        Ok(ReadTxn::new(
+        ReadTxn::new(
             txn,
             self.name.clone(),
             Arc::clone(&self.cache),
@@ -76,7 +76,7 @@ impl Table {
             Arc::clone(&self.inner),
             #[cfg(feature = "permissions")]
             Arc::clone(&self.principal),
-        ))
+        )
     }
 
     /// Begins a write transaction (serialized against other writers). The guest
