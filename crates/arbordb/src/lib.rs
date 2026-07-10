@@ -13,9 +13,47 @@
 //! leaf, uses a [`VPath`](path::VPath) (names plus list indices). The underlying
 //! storage engine is an implementation detail, never exposed in the public API.
 //!
-//! This crate is under construction; the storage engine, the filesystem API
-//! (`ls`/`mv`/`cp`/…), transactions, typed accessors, the `#[derive(AData)]`
-//! macro and secondary indexes land in later phases.
+//! # What's here
+//!
+//! - A filesystem API on a [`Table`]'s transactions: `ls` / `mv` (relink, O(1), identity-preserving) / `cp` (deep copy)
+//!   / `mkdir` / `rm`, plus `store` / `load` / `get` / `kind`.
+//! - Concurrent [reads](txn::ReadTxn) and a single serialized [writer](txn::WriteTxn); snapshot-consistent reads,
+//!   durable-on-commit writes.
+//! - The dynamic [`Value`] document type, and the typed [`AData`] trait with `#[derive(AData)]` (behind the `derive`
+//!   feature) and its Serde-style `#[arbor(...)]` attributes.
+//! - Named, composite, optionally-unique [secondary indexes](index) with an order-preserving key encoding, declared
+//!   with `#[arbor(index(...))]` or built with [`Table::create_index`], and queried with
+//!   [`ReadTxn::find`](txn::ReadTxn::find).
+//! - [Rooted views](txn::RootedRead) that make every path relative to a fixed root.
+//! - An optional big-number scalar/data feature matrix (`bignum`).
+//!
+//! # Quick start
+//!
+//! ```
+//! use std::collections::BTreeMap;
+//! use arbordb::{data::Scalar, ArborDb, Value};
+//!
+//! # fn main() -> arbordb::AdbResult<()> {
+//! let db = ArborDb::create_in_memory()?;
+//! let users = db.open_table("users")?;
+//!
+//! // Writes are transactional: stage, then commit.
+//! let w = users.write()?;
+//! w.store_value(
+//!     "alice",
+//!     &Value::Node(BTreeMap::from([(
+//!         String::from("age"),
+//!         Value::Leaf(Scalar::I64(30)),
+//!     )])),
+//! )?;
+//! w.commit()?;
+//!
+//! // Reads see committed data; a field is reached by its intra-value path.
+//! let r = users.read()?;
+//! assert_eq!(r.get_as::<i64>("alice", "age")?, Some(30));
+//! # Ok(())
+//! # }
+//! ```
 
 mod cache;
 mod codec;
