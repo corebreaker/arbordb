@@ -472,7 +472,14 @@ impl WriteTxn {
         scopes: &[APath],
         apply: impl FnOnce(&mut Context<'_, '_>) -> AdbResult<T>,
     ) -> AdbResult<T> {
-        let indexes = self.indexes()?;
+        // An index-free database (the common case) skips the registry read entirely —
+        // no `$metadata` open, no registry decode — on every mutation.
+        let indexes = if self.inner.has_any_index() {
+            self.indexes()?
+        } else {
+            Vec::new()
+        };
+
         let mut data = self.txn.open_table(data_def(&self.table))?;
 
         #[cfg(feature = "entry-timestamps")]
@@ -797,6 +804,11 @@ mod tests {
             registry::create(&mut meta, "t", &def).unwrap();
         }
 
+        // Creating the index the raw way skips `Table::create_index`, which is what
+        // primes the write path's fast-path flag; set it by hand so the stores below
+        // take the index-maintaining path, as they would through the public API.
+        w.inner.mark_has_index();
+
         // Each store under the pattern adds one entry.
         w.store_value("users/alice", &user(30)).unwrap();
         w.store_value("users/bob", &user(40)).unwrap();
@@ -869,6 +881,10 @@ mod tests {
 
                 registry::create(&mut meta, "t", &def).unwrap();
             }
+
+            // See `store_and_rm_maintain_a_registered_index`: the raw registry write
+            // skips the flag `Table::create_index` normally sets, so prime it by hand.
+            w.inner.mark_has_index();
 
             w.store_value("users/alice", &user(30)).unwrap();
             assert_eq!(index_entries(&w), 1);

@@ -41,6 +41,12 @@ pub(crate) fn has<T: ReadableTable<&'static str, &'static [u8]>>(meta: &T, table
     RegistryRepository::has(meta, table, name)
 }
 
+/// Whether any index is registered at all, across every table — reading only the
+/// registry's entry count.
+pub(crate) fn any<T: ReadableTable<&'static str, &'static [u8]>>(meta: &T) -> AdbResult<bool> {
+    RegistryRepository::any(meta)
+}
+
 /// Removes the index named `name` from `table`, returning the removed entry (or
 /// `None` if absent) so its physical entries can be purged.
 pub(crate) fn delete(meta: &mut MetaTable<'_>, table: &str, name: &str) -> AdbResult<Option<IndexEntry>> {

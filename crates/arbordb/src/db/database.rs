@@ -20,7 +20,12 @@ use redb::{backends::InMemoryBackend, Database, ReadableDatabase, TableHandle};
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc,
+        Mutex,
+        RwLock,
+    },
 };
 
 /// An ArborDb database: one file (or an in-memory store) holding any number of
@@ -86,6 +91,15 @@ impl ArborDb {
     fn wrap(db: Database) -> AdbResult<Self> {
         engine::bootstrap_metadata(&db)?;
 
+        // Prime the write-path "has any index" flag from the registry, so an
+        // index-free database never touches the registry on a mutation.
+        let has_indexes = {
+            let txn = db.begin_read()?;
+            let meta = txn.open_table(engine::META_TABLE)?;
+
+            crate::index::registry::any(&meta)?
+        };
+
         #[cfg(feature = "permissions")]
         let principal = if perm::store::is_protected(&db)? {
             // A guest carries the public verification key so its reads still verify
@@ -103,6 +117,7 @@ impl ArborDb {
                 AtomicU64::new(0),
                 RwLock::new(()),
                 Mutex::new(HashMap::new()),
+                AtomicBool::new(has_indexes),
             )),
             #[cfg(feature = "permissions")]
             principal,

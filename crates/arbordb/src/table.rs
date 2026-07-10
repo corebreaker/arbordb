@@ -122,6 +122,7 @@ impl Table {
 
         self.backfill(&txn, new_entry)?;
         txn.commit()?;
+        self.inner.mark_has_index();
 
         Ok(())
     }
@@ -162,6 +163,7 @@ impl Table {
 
         self.backfill(&txn, new_entry)?;
         txn.commit()?;
+        self.inner.mark_has_index();
 
         Ok(())
     }
