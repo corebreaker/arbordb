@@ -1,0 +1,10 @@
+[package]
+name = "arbordb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "A typed, transactional, indexed document store layered over an embedded key-value engine."
+
+[dependencies]
