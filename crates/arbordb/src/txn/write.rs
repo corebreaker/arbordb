@@ -2,6 +2,7 @@
 
 use crate::{
     codec::{encode, encode_dir, ArchivedDir},
+    db::DbInner,
     engine::{
         child_of,
         data_def,
@@ -21,7 +22,7 @@ use crate::{
 };
 
 use redb::{ReadableTable, WriteTransaction};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 /// The per-transaction data table (borrows the write transaction).
 type DataTable<'txn> = redb::Table<'txn, u128, EntryBytes>;
@@ -30,13 +31,15 @@ type DataTable<'txn> = redb::Table<'txn, u128, EntryBytes>;
 pub struct WriteTxn {
     txn:   WriteTransaction,
     table: String,
+    inner: Arc<DbInner>,
 }
 
 impl WriteTxn {
-    pub(crate) fn new(txn: WriteTransaction, table: String) -> Self {
+    pub(crate) fn new(txn: WriteTransaction, table: String, inner: Arc<DbInner>) -> Self {
         Self {
             txn,
             table,
+            inner,
         }
     }
 
@@ -110,9 +113,98 @@ impl WriteTxn {
         Ok(true)
     }
 
-    /// Commits the transaction, making its changes durable.
+    /// Moves the node at `src` to `dst`, keeping its identity (a relink, not a
+    /// copy — so `mv` is O(1) and any accessor holding the node's `AKey` stays
+    /// valid). Creates `dst`'s parent directories and replaces an existing `dst`.
+    /// Errors if `dst` is `src` itself or a descendant of it.
+    pub fn mv(&self, src: impl AsRef<str>, dst: impl AsRef<str>) -> AdbResult<()> {
+        let src = APath::parse(src.as_ref())?;
+        let dst = APath::parse(dst.as_ref())?;
+
+        if dst.names().starts_with(src.names()) {
+            return Err(AdbError::CannotAccess(String::from(
+                "cannot move a node onto itself or into a descendant",
+            )));
+        }
+
+        let Some((src_parent_path, src_name)) = src.split_last() else {
+            return Err(AdbError::CannotAccess(String::from("cannot move the root")));
+        };
+        let Some((dst_parent_path, dst_name)) = dst.split_last() else {
+            return Err(AdbError::CannotAccess(String::from("cannot move onto the root")));
+        };
+
+        let mut table = self.txn.open_table(data_def(&self.table))?;
+
+        let Some(src_parent) = resolve(&table, &src_parent_path)? else {
+            return Err(AdbError::ValueNotFound(src));
+        };
+        let Some(akey) = child_of(&table, src_parent, src_name)? else {
+            return Err(AdbError::ValueNotFound(src));
+        };
+
+        let dst_parent = ensure_dir(&mut table, &dst_parent_path)?;
+        if let Some(existing) = child_of(&table, dst_parent, dst_name)? {
+            cascade_delete(&mut table, existing)?;
+        }
+
+        link_child(&mut table, dst_parent, dst_name, akey)?;
+        unlink_child(&mut table, src_parent, src_name)?;
+
+        Ok(())
+    }
+
+    /// Copies the subtree at `src` to `dst` under fresh identities (a deep copy).
+    /// Creates `dst`'s parent directories and replaces an existing `dst`. Errors
+    /// if `dst` is `src` itself or a descendant of it.
+    pub fn cp(&self, src: impl AsRef<str>, dst: impl AsRef<str>) -> AdbResult<()> {
+        let src = APath::parse(src.as_ref())?;
+        let dst = APath::parse(dst.as_ref())?;
+
+        if dst.names().starts_with(src.names()) {
+            return Err(AdbError::CannotAccess(String::from(
+                "cannot copy a node onto itself or into a descendant",
+            )));
+        }
+
+        let Some((dst_parent_path, dst_name)) = dst.split_last() else {
+            return Err(AdbError::CannotAccess(String::from("cannot copy onto the root")));
+        };
+
+        let mut table = self.txn.open_table(data_def(&self.table))?;
+
+        let Some(src_akey) = resolve(&table, &src)? else {
+            return Err(AdbError::ValueNotFound(src));
+        };
+
+        let dst_parent = ensure_dir(&mut table, &dst_parent_path)?;
+        if let Some(existing) = child_of(&table, dst_parent, dst_name)? {
+            cascade_delete(&mut table, existing)?;
+        }
+
+        let copy = deep_copy(&mut table, src_akey)?;
+        link_child(&mut table, dst_parent, dst_name, copy)?;
+
+        Ok(())
+    }
+
+    /// Commits the transaction, making its changes durable and advancing the
+    /// database generation (so cached resolutions from earlier snapshots retire).
     pub fn commit(self) -> AdbResult<()> {
-        self.txn.commit()?;
+        let WriteTxn {
+            txn,
+            inner,
+            ..
+        } = self;
+
+        let guard = inner
+            .version_lock()
+            .write()
+            .map_err(|_| AdbError::CannotAccess(String::from("the version lock was poisoned")))?;
+
+        txn.commit()?;
+        inner.bump_generation();
+        drop(guard);
 
         Ok(())
     }
@@ -225,4 +317,34 @@ fn cascade_delete(table: &mut DataTable, akey: AKey) -> AdbResult<()> {
     table.remove(u128::from(akey))?;
 
     Ok(())
+}
+
+/// Deep-copies node `akey` (a file's blob verbatim, a directory recursively) under
+/// a freshly generated key, returning that key.
+fn deep_copy(table: &mut DataTable, akey: AKey) -> AdbResult<AKey> {
+    let entry = read_entry(&*table, akey)?.ok_or_else(|| AdbError::Corrupt("copying a missing node".into()))?;
+    let (kind, payload) = split(&entry)?;
+    let fresh = AKey::generate();
+
+    match kind {
+        EntryKind::File => {
+            table.insert(u128::from(fresh), entry.as_slice())?;
+        }
+        EntryKind::Dir => {
+            let children: Vec<(String, AKey)> = ArchivedDir::new(payload)?
+                .entries()?
+                .into_iter()
+                .map(|(name, child)| (name.to_string(), child))
+                .collect();
+
+            let mut copied = BTreeMap::new();
+            for (name, child) in children {
+                copied.insert(name, deep_copy(table, child)?);
+            }
+
+            put_dir(table, fresh, &copied)?;
+        }
+    }
+
+    Ok(fresh)
 }

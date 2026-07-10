@@ -17,6 +17,7 @@
 //! (`ls`/`mv`/`cp`/…), transactions, typed accessors, the `#[derive(AData)]`
 //! macro and secondary indexes land in later phases.
 
+mod cache;
 mod codec;
 mod constants;
 mod datetime;

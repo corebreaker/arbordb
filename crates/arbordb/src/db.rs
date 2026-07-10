@@ -1,6 +1,7 @@
-//! The database handle and the shared state behind it.
+//! The database handle and the database-wide shared state behind it.
 
 use crate::{
+    cache::PathCache,
     constants::METADATA_TABLE_NAME,
     engine,
     error::{AdbError, AdbResult},
@@ -8,18 +9,60 @@ use crate::{
 };
 
 use redb::{backends::InMemoryBackend, Database};
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::Path,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+        Mutex,
+        RwLock,
+    },
+};
 
 /// Database-wide shared state, held behind an [`Arc`] so an [`ArborDb`] is cheap
 /// to clone and share across threads.
 pub(crate) struct DbInner {
-    db: Database,
+    db:           Database,
+    generation:   AtomicU64,
+    version_lock: RwLock<()>,
+    caches:       Mutex<HashMap<String, Arc<PathCache>>>,
 }
 
 impl DbInner {
     /// The underlying engine handle.
     pub(crate) fn db(&self) -> &Database {
         &self.db
+    }
+
+    /// The current generation (bumped on every committed write).
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
+    /// Advances the generation after a commit, invalidating older cache entries.
+    pub(crate) fn bump_generation(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// The lock serializing a read's `(snapshot, generation)` capture against a
+    /// commit's `(commit, generation bump)`.
+    pub(crate) fn version_lock(&self) -> &RwLock<()> {
+        &self.version_lock
+    }
+
+    /// The shared cache for table `name`, created on first use.
+    pub(crate) fn cache(&self, name: &str) -> AdbResult<Arc<PathCache>> {
+        let mut caches = self
+            .caches
+            .lock()
+            .map_err(|_| AdbError::CannotAccess(String::from("the cache registry lock was poisoned")))?;
+
+        let cache = caches
+            .entry(name.to_string())
+            .or_insert_with(|| Arc::new(PathCache::new()));
+
+        Ok(Arc::clone(cache))
     }
 }
 
@@ -53,6 +96,9 @@ impl ArborDb {
         Ok(Self {
             inner: Arc::new(DbInner {
                 db,
+                generation: AtomicU64::new(0),
+                version_lock: RwLock::new(()),
+                caches: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -69,6 +115,8 @@ impl ArborDb {
             return Err(AdbError::InvalidTableName(format!("'{name}' is reserved")));
         }
 
-        Ok(Table::new(Arc::clone(&self.inner), name.to_string()))
+        let cache = self.inner.cache(name)?;
+
+        Ok(Table::new(Arc::clone(&self.inner), name.to_string(), cache))
     }
 }

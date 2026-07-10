@@ -170,3 +170,83 @@ fn rejects_reserved_and_empty_table_names() {
     assert!(db.open_table("$metadata").is_err());
     assert!(db.open_table("ok").is_ok());
 }
+
+#[test]
+fn moves_a_node_and_rejects_bad_targets() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("a/x", &user("X", 7)).unwrap();
+    w.store("d/f", &user("F", 1)).unwrap();
+    w.commit().unwrap();
+
+    let w = table.write().unwrap();
+    w.mv("a/x", "b/y").unwrap();
+    // A move into a descendant is refused, and changes nothing.
+    assert!(w.mv("d", "d/child").is_err());
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load("b/y").unwrap(), Some(user("X", 7)));
+    assert_eq!(r.load("a/x").unwrap(), None);
+    assert!(r.exists("d/f").unwrap());
+}
+
+#[test]
+fn copies_a_subtree_independently() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    let w = table.write().unwrap();
+    w.store("org/team/alice", &user("Alice", 30)).unwrap();
+    w.store("org/team/bob", &user("Bob", 40)).unwrap();
+    w.commit().unwrap();
+
+    let w = table.write().unwrap();
+    w.cp("org", "backup").unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load("backup/team/alice").unwrap(), Some(user("Alice", 30)));
+    assert_eq!(r.load("org/team/alice").unwrap(), Some(user("Alice", 30)));
+
+    // The copy is independent: overwriting the original leaves the copy untouched.
+    let w = table.write().unwrap();
+    w.store("org/team/alice", &user("Alice", 99)).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.get_as::<u32>("org/team/alice", "age").unwrap(), Some(99));
+    assert_eq!(r.get_as::<u32>("backup/team/alice", "age").unwrap(), Some(30));
+}
+
+#[test]
+fn reads_stay_coherent_across_commits() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store("x", &user("X", 1)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Populate the caches at the first generation.
+    {
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<u32>("x", "age").unwrap(), Some(1));
+    }
+
+    {
+        let w = table.write().unwrap();
+        w.store("x", &user("X", 2)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // A newer snapshot must see the new value, never a stale cached one.
+    {
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<u32>("x", "age").unwrap(), Some(2));
+    }
+}
