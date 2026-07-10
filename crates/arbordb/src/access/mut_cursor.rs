@@ -2,9 +2,10 @@
 //!
 //! Backs `WriteTxn::fetch_mut`. It is a thin, stateless handle — a borrow of the
 //! transaction plus the file's access path — so an `Arc` of it is `Send + Sync`.
-//! Each operation loads the file's current value, applies the change, and (for a
-//! write) re-encodes and rewrites the whole blob: the accepted O(blob) cost of a
-//! partial write (ArborDb's win is on reads). Sequential edits accumulate because
+//! A scalar overwrite that keeps the leaf's byte width is patched into the blob in
+//! place — no decode, no re-encode; a structural change (adding or removing a node,
+//! or a width-changing scalar) still re-encodes and rewrites the whole blob. Reads
+//! and structural edits load the current value; sequential edits accumulate because
 //! each reads the latest committed-in-txn state.
 
 use super::{Reader, Writer};
@@ -75,10 +76,7 @@ impl Reader for MutCursor<'_> {
 
 impl Writer for MutCursor<'_> {
     fn put_scalar(&self, at: &VPath, scalar: Scalar) -> AdbResult<()> {
-        let mut value = self.value()?;
-        value.set_value(at, Value::Leaf(scalar));
-
-        self.write(&value)
+        self.txn.put_scalar_at(&self.apath, at, scalar)
     }
 
     fn ensure_container(&self, at: &VPath, list: bool) -> AdbResult<()> {

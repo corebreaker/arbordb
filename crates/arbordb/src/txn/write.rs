@@ -3,8 +3,8 @@
 use super::rooted::RootedWrite;
 use crate::{
     access::{MemWriter, MutCursor, Writer},
-    codec::{decode, encode, encode_dir, ArchivedDir},
-    data::{AData, AMut},
+    codec::{decode, encode, encode_dir, ArchivedDir, ArchivedValue},
+    data::{AData, AMut, Scalar},
     db::DbInner,
     engine::{
         child_of,
@@ -73,6 +73,78 @@ mod table {
         table.insert(u128::from(akey), entry.as_slice())?;
 
         Ok(())
+    }
+
+    /// Sets the scalar at `at` inside the file at `path`. When the new scalar keeps the
+    /// current leaf's byte width the blob is patched in place — no decode, no
+    /// re-encode; otherwise the value is decoded, updated, and re-encoded. Creates the
+    /// file (and its parents) when it does not exist yet.
+    pub(super) fn put_scalar_into(table: &mut DataTable, path: &APath, at: &VPath, scalar: &Scalar) -> AdbResult<()> {
+        let akey = resolve(&*table, path)?;
+        let entry = match akey {
+            Some(akey) => read_entry(&*table, akey)?,
+            None => None,
+        };
+
+        let mut value = match (akey, entry) {
+            (Some(akey), Some(mut entry)) => {
+                // Fast path: a leaf that keeps its width is patched in place — every
+                // other offset in the blob stays valid, so nothing is re-encoded.
+                if patch_scalar(&mut entry, at, scalar)? {
+                    table.insert(u128::from(akey), entry.as_slice())?;
+
+                    return Ok(());
+                }
+
+                // Slow path: decode the (untouched) blob to re-encode it below.
+                let (kind, payload) = entry_split(&entry)?;
+                match kind {
+                    EntryKind::File => decode(payload)?,
+                    EntryKind::Dir => {
+                        return Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file")));
+                    }
+                }
+            }
+            _ => Value::default(),
+        };
+
+        value.set_value(at, Value::Leaf(scalar.clone()));
+
+        store_value_into(table, path, &value)
+    }
+
+    /// Patches `entry` in place when its file's leaf at `at` keeps its encoded width
+    /// under `scalar`, overwriting just that leaf's bytes and returning `true`. Returns
+    /// `false`, leaving `entry` untouched, when the fast path does not apply (a
+    /// directory, an absent or non-leaf path, or a width change) — the caller then
+    /// re-encodes.
+    pub(super) fn patch_scalar(entry: &mut [u8], at: &VPath, scalar: &Scalar) -> AdbResult<bool> {
+        let mut encoded = Vec::new();
+        scalar.encode(&mut encoded);
+
+        // Locate the leaf's bytes, then drop the borrow before overwriting them.
+        let start = {
+            let (kind, payload) = entry_split(entry)?;
+            if kind != EntryKind::File {
+                return Ok(false);
+            }
+
+            let Some((scalar_off, current_len)) = ArchivedValue::new(payload)?.leaf_scalar_span(at)? else {
+                return Ok(false);
+            };
+
+            if encoded.len() != current_len {
+                return Ok(false);
+            }
+
+            // `scalar_off` is relative to the payload; the entry prefixes it with a
+            // one-byte kind tag, so shift past that header.
+            (entry.len() - payload.len()) + scalar_off
+        };
+
+        entry[start..start + encoded.len()].copy_from_slice(&encoded);
+
+        Ok(true)
     }
 
     /// Removes the node at `path` (a non-root path) and its subtree. Returns whether
@@ -319,14 +391,37 @@ impl WriteTxn {
         })
     }
 
-    /// Opens a mutable accessor over the file at `path`, or `None` if absent. Each
-    /// mutation through the accessor re-encodes and rewrites the file's blob (the
-    /// accepted O(blob) cost of a partial write). The accessor borrows the
-    /// transaction, so drop it before `commit`.
+    /// Sets the scalar at `at` inside the file at `path`. When the new scalar encodes
+    /// to the same width as the one already there, the blob is patched in place — no
+    /// decode, no re-encode — otherwise the value is decoded, updated, and re-encoded.
+    /// Registered indexes are maintained across either path.
+    pub(crate) fn put_scalar_at(&self, path: &APath, at: &VPath, scalar: Scalar) -> AdbResult<()> {
+        self.reindex_around(std::slice::from_ref(path), |data| {
+            table::put_scalar_into(data, path, at, &scalar)
+        })
+    }
+
+    /// Opens a mutable accessor over the file at `path`, or `None` if absent. A scalar
+    /// overwrite through the accessor that keeps the leaf's byte width patches the blob
+    /// in place (no decode, no re-encode); a structural change still rewrites it. The
+    /// accessor borrows the transaction, so drop it before `commit`.
     pub fn fetch_mut<'t, A: AMut<'t>>(&'t self, path: impl AsRef<str>) -> AdbResult<Option<A>> {
         let apath = APath::parse(path.as_ref())?;
-        if self.load_value_at(&apath)?.is_none() {
-            return Ok(None);
+
+        // Presence check without decoding the value — resolve the node and read its
+        // kind alone.
+        {
+            let table = self.txn.open_table(data_def(&self.table))?;
+            match resolve(&table, &apath)? {
+                Some(akey) => match fetch_entry_kind(&table, akey)? {
+                    Some(EntryKind::File) => {}
+                    Some(EntryKind::Dir) => {
+                        return Err(AdbError::CannotAccess(format!("'{apath}' is a directory, not a file")));
+                    }
+                    None => return Ok(None),
+                },
+                None => return Ok(None),
+            }
         }
 
         let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath));
@@ -540,5 +635,76 @@ mod tests {
         assert_eq!(index_entries(&w), 1);
 
         w.commit().unwrap();
+    }
+
+    #[test]
+    fn patch_scalar_replaces_a_same_width_leaf_in_place() {
+        let mut entry = file_entry(&encode(&user(30)));
+        let len_before = entry.len();
+        let age = VPath::root().child_name("age");
+
+        // I64 → I64 keeps the width, so the blob is patched without changing length.
+        assert!(table::patch_scalar(&mut entry, &age, &Scalar::I64(31)).unwrap());
+        assert_eq!(entry.len(), len_before);
+
+        let (kind, payload) = entry_split(&entry).unwrap();
+        assert_eq!(kind, EntryKind::File);
+        assert_eq!(decode(payload).unwrap(), user(31));
+    }
+
+    #[test]
+    fn patch_scalar_declines_a_width_change_or_non_leaf() {
+        let mut entry = file_entry(&encode(&user(30)));
+
+        // A width change (I64 → Str), a non-leaf path (the object root), and an absent
+        // field all decline, leaving the caller to re-encode.
+        let age = VPath::root().child_name("age");
+        assert!(!table::patch_scalar(&mut entry, &age, &Scalar::Str(String::from("thirty"))).unwrap());
+        assert!(!table::patch_scalar(&mut entry, &VPath::root(), &Scalar::I64(1)).unwrap());
+
+        let missing = VPath::root().child_name("missing");
+        assert!(!table::patch_scalar(&mut entry, &missing, &Scalar::I64(1)).unwrap());
+
+        // A declined patch leaves the entry byte-for-byte unchanged.
+        let (_, payload) = entry_split(&entry).unwrap();
+        assert_eq!(decode(payload).unwrap(), user(30));
+    }
+
+    #[test]
+    fn an_in_place_scalar_edit_maintains_a_registered_index() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+
+        {
+            let w = table.write().unwrap();
+
+            {
+                let mut meta = w.txn.open_table(META_TABLE).unwrap();
+                let def = IndexDef::new(
+                    String::from("by_age"),
+                    String::from("users/*"),
+                    vec![IndexColumn::asc(VPath::root().child_name("age"))],
+                    false,
+                );
+
+                registry::create(&mut meta, "t", &def).unwrap();
+            }
+
+            w.store_value("users/alice", &user(30)).unwrap();
+            assert_eq!(index_entries(&w), 1);
+
+            // An in-place edit of the indexed column keeps exactly one entry: the old
+            // key is removed and the new one inserted around the patch.
+            let age = VPath::root().child_name("age");
+            w.put_scalar_at(&APath::parse("users/alice").unwrap(), &age, Scalar::I64(31))
+                .unwrap();
+            assert_eq!(index_entries(&w), 1);
+
+            w.commit().unwrap();
+        }
+
+        // The edit persisted.
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
     }
 }

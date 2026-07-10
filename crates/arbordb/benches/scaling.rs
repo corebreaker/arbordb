@@ -8,10 +8,10 @@
 //!   This is ArborDb's headline: the cost stays **flat** as the value grows.
 //! - `*_load_all` — recompose the whole value. This is the linear-in-N baseline the partial read avoids; it is here
 //!   only to make the flat read line legible against something that grows.
-//! - `*_write_one_field` / `*_write_one_element` — change one leaf and persist it. A value is one blob, so this
-//!   re-encodes and rewrites the whole thing: **O(N)**, growing with the value. It is the accepted cost of the model —
-//!   the mirror image of StratoDb, where a shredded one-leaf write touched a single node regardless of size. ArborDb's
-//!   win is on reads, not on partial writes (a `fetch_mut` accessor is the same order, adding a symmetric decode).
+//! - `*_write_one_field` / `*_write_one_element` — change one leaf and persist it through `store_value`, which
+//!   re-encodes and rewrites the whole blob: **O(N)**, growing with the value. This is the whole-value baseline; a
+//!   same-width scalar edit through a `fetch_mut` accessor instead patches the blob in place (the in-place fast path,
+//!   benched as `writes::set_field`), so it sidesteps this cost.
 //!
 //! It drives the dynamic `Value` API directly (no derived entity), so — unlike the
 //! rest of the suite — it needs no `derive` feature.

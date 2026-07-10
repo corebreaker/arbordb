@@ -54,6 +54,11 @@ impl<'a> Reader<'a> {
         self.take(n)
     }
 
+    /// The number of bytes consumed so far — the encoded length of what was read.
+    pub(crate) fn position(&self) -> usize {
+        self.pos
+    }
+
     /// Whether every byte has been consumed (used by round-trip tests).
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {

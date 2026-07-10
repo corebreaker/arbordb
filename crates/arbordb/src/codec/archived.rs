@@ -158,6 +158,16 @@ impl<'a> ArchivedValue<'a> {
     pub(crate) fn to_value(&self) -> AdbResult<Value> {
         self.root().to_value()
     }
+
+    /// If `at` lands on a leaf, the byte range `(offset, len)` of its encoded scalar
+    /// within the blob — the span a same-width overwrite may patch in place. `None`
+    /// if the path is absent or does not land on a leaf.
+    pub(crate) fn leaf_scalar_span(&self, at: &VPath) -> AdbResult<Option<(usize, usize)>> {
+        match self.root().navigate(at)? {
+            Some(node) => node.leaf_scalar_span(),
+            None => Ok(None),
+        }
+    }
 }
 
 /// A cursor at one node inside a value blob, navigated zero-copy.
@@ -191,6 +201,29 @@ impl<'a> ArchivedNode<'a> {
             .ok_or_else(|| AdbError::Corrupt("value blob is truncated".into()))?;
 
         Scalar::decode(&mut Reader::new(body))
+    }
+
+    /// If this is a leaf, the byte range `(offset, len)` of its encoded scalar within
+    /// the blob — the bytes right after the leaf discriminant. `None` for a non-leaf.
+    ///
+    /// The length is measured by decoding the scalar, so it holds for both the
+    /// fixed-width scalars and the length-prefixed ones (strings, bytes, bignums).
+    fn leaf_scalar_span(&self) -> AdbResult<Option<(usize, usize)>> {
+        let off = self.off as usize;
+        if read_u8(self.blob, off)? != LEAF {
+            return Ok(None);
+        }
+
+        let scalar_off = off + 1;
+        let body = self
+            .blob
+            .get(scalar_off..)
+            .ok_or_else(|| AdbError::Corrupt("value blob is truncated".into()))?;
+
+        let mut reader = Reader::new(body);
+        Scalar::decode(&mut reader)?;
+
+        Ok(Some((scalar_off, reader.position())))
     }
 
     /// The number of elements, if this is a list node.
