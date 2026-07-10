@@ -3,7 +3,7 @@ use crate::{
     data::{AData, AValue, ARef, Scalar},
     error::AdbResult,
     entry::{Entry, EntryKind},
-    path::APath,
+    path::{APath, IntoArborPath, IntoValuePath},
     Value,
 };
 
@@ -27,50 +27,50 @@ impl<'a> RootedRead<'a> {
     }
 
     /// A further view, rooted at `sub` relative to this view's root.
-    pub fn rooted(&self, sub: impl AsRef<str>) -> AdbResult<Self> {
+    pub fn rooted(&self, sub: impl IntoArborPath) -> AdbResult<Self> {
         Ok(Self {
             txn:  self.txn,
-            root: self.root.join(&APath::parse(sub.as_ref())?),
+            root: self.root.join(&sub.into_arbor_path()?),
         })
     }
 
     /// Loads a typed value from the file at `path` (relative to the root).
-    pub fn load<T: AData>(&self, path: impl AsRef<str>) -> AdbResult<Option<T>> {
+    pub fn load<T: AData>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
         self.txn.load(self.absolute(path)?)
     }
 
     /// Loads the dynamic [`Value`] at `path` (relative to the root).
-    pub fn load_value(&self, path: impl AsRef<str>) -> AdbResult<Option<Value>> {
+    pub fn load_value(&self, path: impl IntoArborPath) -> AdbResult<Option<Value>> {
         self.txn.load_value(self.absolute(path)?)
     }
 
     /// Opens a read accessor over the file at `path` (relative to the root).
-    pub fn fetch<A: ARef<'static>>(&self, path: impl AsRef<str>) -> AdbResult<Option<A>> {
+    pub fn fetch<A: ARef<'static>>(&self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
         self.txn.fetch(self.absolute(path)?)
     }
 
     /// Reads the scalar at `at` inside the file at `path` (relative to the root).
-    pub fn get(&self, path: impl AsRef<str>, at: impl AsRef<str>) -> AdbResult<Option<Scalar>> {
+    pub fn get(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<Scalar>> {
         self.txn.get(self.absolute(path)?, at)
     }
 
     /// Reads a typed scalar at `at` inside the file at `path` (relative to the root).
-    pub fn get_as<V: AValue>(&self, path: impl AsRef<str>, at: impl AsRef<str>) -> AdbResult<Option<V>> {
+    pub fn get_as<V: AValue>(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<V>> {
         self.txn.get_as(self.absolute(path)?, at)
     }
 
     /// The kind of node at `path` (relative to the root), if any.
-    pub fn kind(&self, path: impl AsRef<str>) -> AdbResult<Option<EntryKind>> {
+    pub fn kind(&self, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
         self.txn.kind(self.absolute(path)?)
     }
 
     /// Whether a node exists at `path` (relative to the root).
-    pub fn exists(&self, path: impl AsRef<str>) -> AdbResult<bool> {
+    pub fn exists(&self, path: impl IntoArborPath) -> AdbResult<bool> {
         self.txn.exists(self.absolute(path)?)
     }
 
     /// Lists the direct children of the directory at `path` (relative to the root).
-    pub fn ls(&self, path: impl AsRef<str>) -> AdbResult<Vec<Entry>> {
+    pub fn ls(&self, path: impl IntoArborPath) -> AdbResult<Vec<Entry>> {
         self.txn.ls(self.absolute(path)?)
     }
 
@@ -86,7 +86,8 @@ impl<'a> RootedRead<'a> {
         self.query(index).prefixed(values).run()
     }
 
-    fn absolute(&self, path: impl AsRef<str>) -> AdbResult<String> {
-        Ok(self.root.join(&APath::parse(path.as_ref())?).to_string())
+    /// Resolves `path` against this view's root into an absolute access path.
+    fn absolute(&self, path: impl IntoArborPath) -> AdbResult<APath> {
+        Ok(self.root.join(&path.into_arbor_path()?))
     }
 }

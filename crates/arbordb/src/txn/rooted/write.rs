@@ -2,7 +2,7 @@ use super::super::WriteTxn;
 use crate::{
     data::{AData, AMut},
     error::AdbResult,
-    path::APath,
+    path::{APath, IntoArborPath},
     Value,
 };
 
@@ -26,49 +26,50 @@ impl<'a> RootedWrite<'a> {
     }
 
     /// A further view, rooted at `sub` relative to this view's root.
-    pub fn rooted(&self, sub: impl AsRef<str>) -> AdbResult<Self> {
+    pub fn rooted(&self, sub: impl IntoArborPath) -> AdbResult<Self> {
         Ok(Self {
             txn:  self.txn,
-            root: self.root.join(&APath::parse(sub.as_ref())?),
+            root: self.root.join(&sub.into_arbor_path()?),
         })
     }
 
     /// Stores a typed value as a file at `path` (relative to the root).
-    pub fn store<T: AData>(&self, path: impl AsRef<str>, value: &T) -> AdbResult<()> {
+    pub fn store<T: AData>(&self, path: impl IntoArborPath, value: &T) -> AdbResult<()> {
         self.txn.store(self.absolute(path)?, value)
     }
 
     /// Stores a dynamic [`Value`] at `path` (relative to the root).
-    pub fn store_value(&self, path: impl AsRef<str>, value: &Value) -> AdbResult<()> {
+    pub fn store_value(&self, path: impl IntoArborPath, value: &Value) -> AdbResult<()> {
         self.txn.store_value(self.absolute(path)?, value)
     }
 
     /// Creates the directory at `path` (relative to the root) and any ancestors.
-    pub fn mkdir(&self, path: impl AsRef<str>) -> AdbResult<()> {
+    pub fn mkdir(&self, path: impl IntoArborPath) -> AdbResult<()> {
         self.txn.mkdir(self.absolute(path)?)
     }
 
     /// Removes the node at `path` (relative to the root). Reports if it existed.
-    pub fn rm(&self, path: impl AsRef<str>) -> AdbResult<bool> {
+    pub fn rm(&self, path: impl IntoArborPath) -> AdbResult<bool> {
         self.txn.rm(self.absolute(path)?)
     }
 
     /// Moves `src` to `dst` (both relative to the root), keeping its identity.
-    pub fn mv(&self, src: impl AsRef<str>, dst: impl AsRef<str>) -> AdbResult<()> {
+    pub fn mv(&self, src: impl IntoArborPath, dst: impl IntoArborPath) -> AdbResult<()> {
         self.txn.mv(self.absolute(src)?, self.absolute(dst)?)
     }
 
     /// Deep-copies the subtree at `src` to `dst` (both relative to the root).
-    pub fn cp(&self, src: impl AsRef<str>, dst: impl AsRef<str>) -> AdbResult<()> {
+    pub fn cp(&self, src: impl IntoArborPath, dst: impl IntoArborPath) -> AdbResult<()> {
         self.txn.cp(self.absolute(src)?, self.absolute(dst)?)
     }
 
     /// Opens a write accessor over the file at `path` (relative to the root).
-    pub fn fetch_mut<A: AMut<'a>>(&self, path: impl AsRef<str>) -> AdbResult<Option<A>> {
+    pub fn fetch_mut<A: AMut<'a>>(&self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
         self.txn.fetch_mut(self.absolute(path)?)
     }
 
-    fn absolute(&self, path: impl AsRef<str>) -> AdbResult<String> {
-        Ok(self.root.join(&APath::parse(path.as_ref())?).to_string())
+    /// Resolves `path` against this view's root into an absolute access path.
+    fn absolute(&self, path: impl IntoArborPath) -> AdbResult<APath> {
+        Ok(self.root.join(&path.into_arbor_path()?))
     }
 }

@@ -95,6 +95,29 @@ fn navigates_nested_values_by_vpath() {
 }
 
 #[test]
+fn accepts_prebuilt_arbor_and_value_paths() {
+    use arbordb::path::{APath, VPath};
+
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    // A pre-built `APath` is accepted anywhere a `&str` access path is (`IntoArborPath`).
+    let alice = APath::parse("users/alice").unwrap();
+
+    let w = table.write().unwrap();
+    w.store_value(&alice, &user("Alice", 30)).unwrap();
+    w.commit().unwrap();
+
+    let r = table.read().unwrap();
+    assert_eq!(r.load_value(&alice).unwrap(), Some(user("Alice", 30)));
+
+    // A `VPath` assembled with the `/` operator is accepted for the intra-value
+    // position (`IntoValuePath`) — equivalent to the string a caller would pass.
+    let at = VPath::root() / "age";
+    assert_eq!(r.get_as::<u32>(alice, at).unwrap(), Some(30));
+}
+
+#[test]
 fn overwrites_a_file_then_removes_it() {
     let db = ArborDb::create_in_memory().unwrap();
     let table = db.open_table("t").unwrap();

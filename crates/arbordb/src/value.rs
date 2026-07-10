@@ -12,7 +12,7 @@
 
 use crate::{
     data::Scalar,
-    path::{IntoPath, Segment, VPath},
+    path::{IntoValuePath, Segment, VPath},
 };
 
 use std::{collections::BTreeMap, mem::replace};
@@ -155,6 +155,30 @@ impl Value {
         }
     }
 
+    /// The number of direct children: a list's element count, a node's entry
+    /// count, and `0` for a leaf — a scalar has no children. Pairs with
+    /// [`is_empty`](Self::is_empty).
+    pub fn len(&self) -> usize {
+        match self {
+            Self::Leaf(_) => 0,
+            Self::List(list) => list.len(),
+            Self::Node(node) => node.len(),
+        }
+    }
+
+    /// Whether this value has no direct children — an empty list or node. A leaf
+    /// counts as empty (structurally, a scalar has no children), so use
+    /// [`node_kind`](Self::node_kind) to tell a leaf apart from an empty container.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The field names of a [`Node`](Value::Node), in sorted order; an empty
+    /// iterator for a leaf or a list (neither has named keys).
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.node().into_iter().flatten().map(|(name, _)| name.as_str())
+    }
+
     /// Empties the value in place: a leaf becomes [`Null`](Scalar::Null), a list
     /// or node drops its children (keeping its kind).
     pub fn clear(&mut self) {
@@ -230,9 +254,26 @@ impl Value {
     }
 
     /// Returns a clone of the subtree at `path`, or `None` if no node sits there
-    /// (or `path` does not parse). The root path returns the whole value.
-    pub fn get_value(&self, path: impl IntoPath) -> Option<Value> {
-        Some(self.subtree(&path.into_path().ok()?)?.clone())
+    /// (or `path` does not parse). The root path returns the whole value. Use
+    /// [`get_value_ref`](Self::get_value_ref) to borrow it without cloning.
+    pub fn get_value(&self, path: impl IntoValuePath) -> Option<Value> {
+        Some(self.get_value_ref(path)?.clone())
+    }
+
+    /// Borrows the subtree at `path` without cloning, or `None` if no node sits
+    /// there (or `path` does not parse). The root path borrows the whole value.
+    pub fn get_value_ref(&self, path: impl IntoValuePath) -> Option<&Value> {
+        self.subtree(&path.into_value_path().ok()?)
+    }
+
+    /// Mutably borrows the subtree at `path`, or `None` if no node sits there (or
+    /// `path` does not parse). The root path borrows the whole value. Unlike
+    /// [`set_value`](Self::set_value) it creates nothing along the way — a path
+    /// leading nowhere yields `None`.
+    pub fn get_value_mut(&mut self, path: impl IntoValuePath) -> Option<&mut Value> {
+        let base = path.into_value_path().ok()?;
+
+        descend_mut(self, base.segments())
     }
 
     /// Sets `value` at `path`, creating missing containers on the way (a `Name`
@@ -242,8 +283,8 @@ impl Value {
     /// never grows a list past its end; on such a conflict (or a path that does not
     /// parse) it leaves `self` untouched and returns `false`. The value at the
     /// destination itself is replaced. The root path replaces the whole value.
-    pub fn set_value(&mut self, path: impl IntoPath, value: Value) -> bool {
-        let Ok(base) = path.into_path() else {
+    pub fn set_value(&mut self, path: impl IntoValuePath, value: Value) -> bool {
+        let Ok(base) = path.into_value_path() else {
             return false;
         };
 
@@ -253,8 +294,8 @@ impl Value {
     /// Removes the subtree at `path`, returning whether anything was removed. The
     /// root path resets the whole value to the [`Null`](Scalar::Null) default. A
     /// path that leads nowhere (or does not parse) is a no-op returning `false`.
-    pub fn remove_value(&mut self, path: impl IntoPath) -> bool {
-        let Ok(base) = path.into_path() else {
+    pub fn remove_value(&mut self, path: impl IntoValuePath) -> bool {
+        let Ok(base) = path.into_value_path() else {
             return false;
         };
 
@@ -559,6 +600,54 @@ mod tests {
         let ls = Value::new_list(vec![leaf(1), leaf(2)]);
         assert_eq!(ls.get_value("[1]"), Some(leaf(2)));
         assert!(ls.get_value("[5]").is_none());
+    }
+
+    #[test]
+    fn len_is_empty_and_keys_by_kind() {
+        // A leaf has no children: len 0, empty, no keys.
+        let lf = leaf(7);
+        assert_eq!(lf.len(), 0);
+        assert!(lf.is_empty());
+        assert!(lf.keys().next().is_none());
+
+        // A list counts its elements and has no named keys.
+        let ls = Value::new_list(vec![leaf(1), leaf(2), leaf(3)]);
+        assert_eq!(ls.len(), 3);
+        assert!(!ls.is_empty());
+        assert!(Value::new_empty_list().is_empty());
+        assert!(ls.keys().next().is_none());
+
+        // A node counts its entries and lists its keys in sorted order.
+        let mut nd = Value::new_empty_node();
+        nd.insert(String::from("b"), leaf(1));
+        nd.insert(String::from("a"), leaf(2));
+        assert_eq!(nd.len(), 2);
+        assert!(!nd.is_empty());
+        assert!(Value::new_empty_node().is_empty());
+        assert_eq!(nd.keys().collect::<Vec<_>>(), ["a", "b"]);
+    }
+
+    #[test]
+    fn get_value_ref_and_mut_borrow_without_cloning() {
+        let mut root = Value::new_empty_node();
+        root.set_value("a/b", leaf(1));
+
+        // A borrow reaches the same node the cloning getter returns.
+        assert_eq!(root.get_value_ref("a/b"), Some(&leaf(1)));
+        let whole = root.clone();
+        assert_eq!(root.get_value_ref(""), Some(&whole));
+        assert!(root.get_value_ref("a/missing").is_none());
+        assert!(root.get_value_ref("a/b/c").is_none()); // through a leaf
+
+        // A mutable borrow edits in place and creates nothing along the way.
+        *root.get_value_mut("a/b").unwrap() = leaf(9);
+        assert_eq!(root.get_value("a/b"), Some(leaf(9)));
+        assert!(root.get_value_mut("a/missing").is_none());
+        assert_eq!(root.get_value("a/b"), Some(leaf(9))); // the failed lookup changed nothing
+
+        // The root path borrows the whole value.
+        root.get_value_mut("").unwrap().clear();
+        assert!(root.is_empty());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use crate::{
     error::{AdbError, AdbResult},
     index::{registry, scan, Pattern},
     node::NodeKind,
-    path::{APath, VPath},
+    path::{APath, IntoArborPath, IntoValuePath, VPath},
     value::Value,
     AKey,
 };
@@ -103,8 +103,8 @@ impl ReadTxn {
 
     /// Loads the whole dynamic [`Value`] stored in the file at `path`, or `None` if
     /// there is nothing there. Errors if `path` names a directory.
-    pub fn load_value(&self, path: impl AsRef<str>) -> AdbResult<Option<Value>> {
-        let path = APath::parse(path.as_ref())?;
+    pub fn load_value(&self, path: impl IntoArborPath) -> AdbResult<Option<Value>> {
+        let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(None);
         };
@@ -126,8 +126,8 @@ impl ReadTxn {
 
     /// Loads a typed value from the file at `path`, or `None` if absent. Errors if
     /// `path` names a directory.
-    pub fn load<T: AData>(&self, path: impl AsRef<str>) -> AdbResult<Option<T>> {
-        let path = APath::parse(path.as_ref())?;
+    pub fn load<T: AData>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
+        let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(None);
         };
@@ -154,8 +154,8 @@ impl ReadTxn {
     /// Opens a read accessor over the file at `path`, navigating its value blob
     /// zero-copy. `None` if the file is absent; errors if `path` names a directory.
     /// The accessor owns a snapshot of the blob, so it may outlive the transaction.
-    pub fn fetch<A: ARef<'static>>(&self, path: impl AsRef<str>) -> AdbResult<Option<A>> {
-        let path = APath::parse(path.as_ref())?;
+    pub fn fetch<A: ARef<'static>>(&self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
+        let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(None);
         };
@@ -181,9 +181,9 @@ impl ReadTxn {
     /// Reads the scalar at `at` inside the file at `path`, navigating the value
     /// blob zero-copy. `None` if the file or the inner path is absent, or if the
     /// inner path does not land on a scalar leaf.
-    pub fn get(&self, path: impl AsRef<str>, at: impl AsRef<str>) -> AdbResult<Option<Scalar>> {
-        let path = APath::parse(path.as_ref())?;
-        let at = VPath::parse(at.as_ref())?;
+    pub fn get(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<Scalar>> {
+        let path = path.into_arbor_path()?;
+        let at = at.into_value_path()?;
 
         let Some(table) = self.open()? else {
             return Ok(None);
@@ -213,7 +213,7 @@ impl ReadTxn {
     }
 
     /// Reads a typed scalar at `at` inside the file at `path`.
-    pub fn get_as<V: AValue>(&self, path: impl AsRef<str>, at: impl AsRef<str>) -> AdbResult<Option<V>> {
+    pub fn get_as<V: AValue>(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<V>> {
         match self.get(path, at)? {
             Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
             None => Ok(None),
@@ -221,8 +221,8 @@ impl ReadTxn {
     }
 
     /// The filesystem kind (file or directory) at `path`, or `None` if absent.
-    pub fn kind(&self, path: impl AsRef<str>) -> AdbResult<Option<EntryKind>> {
-        let path = APath::parse(path.as_ref())?;
+    pub fn kind(&self, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
+        let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(None);
         };
@@ -238,7 +238,7 @@ impl ReadTxn {
     }
 
     /// Whether a file or directory exists at `path`.
-    pub fn exists(&self, path: impl AsRef<str>) -> AdbResult<bool> {
+    pub fn exists(&self, path: impl IntoArborPath) -> AdbResult<bool> {
         Ok(self.kind(path)?.is_some())
     }
 
@@ -262,8 +262,8 @@ impl ReadTxn {
     }
 
     /// A view of this transaction whose access paths are relative to `root`.
-    pub fn rooted(&self, root: impl AsRef<str>) -> AdbResult<RootedRead<'_>> {
-        Ok(RootedRead::new(self, APath::parse(root.as_ref())?))
+    pub fn rooted(&self, root: impl IntoArborPath) -> AdbResult<RootedRead<'_>> {
+        Ok(RootedRead::new(self, root.into_arbor_path()?))
     }
 
     /// Runs a built index query: a prefix scan (exact = full prefix), optional
@@ -356,8 +356,8 @@ impl ReadTxn {
 
     /// Lists the direct children of the directory at `path`, as `(name, kind)`
     /// pairs in name order. Errors if `path` names a file.
-    pub fn ls(&self, path: impl AsRef<str>) -> AdbResult<Vec<Entry>> {
-        let path = APath::parse(path.as_ref())?;
+    pub fn ls(&self, path: impl IntoArborPath) -> AdbResult<Vec<Entry>> {
+        let path = path.into_arbor_path()?;
         let Some(table) = self.open()? else {
             return Ok(Vec::new());
         };

@@ -25,7 +25,7 @@ use crate::{
         maintenance,
         registry::{self, IndexEntry},
     },
-    path::{APath, VPath},
+    path::{APath, IntoArborPath, VPath},
     value::Value,
     AKey,
 };
@@ -366,7 +366,7 @@ impl WriteTxn {
     /// Stores a typed value as a file at `path`, creating parent directories as
     /// needed and replacing whatever was there. The value is decomposed into an
     /// in-memory tree, then encoded to one blob.
-    pub fn store<T: AData>(&self, path: impl AsRef<str>, value: &T) -> AdbResult<()> {
+    pub fn store<T: AData>(&self, path: impl IntoArborPath, value: &T) -> AdbResult<()> {
         let writer = MemWriter::new();
         value.store(&writer, &VPath::root())?;
 
@@ -376,8 +376,8 @@ impl WriteTxn {
     /// Stores a dynamic [`Value`] as a file at `path`, creating parent directories
     /// as needed. Replaces whatever was there: a file overwrite keeps the node's
     /// identity; a directory is removed with its whole subtree first.
-    pub fn store_value(&self, path: impl AsRef<str>, value: &Value) -> AdbResult<()> {
-        self.store_value_at(&APath::parse(path.as_ref())?, value)
+    pub fn store_value(&self, path: impl IntoArborPath, value: &Value) -> AdbResult<()> {
+        self.store_value_at(&path.into_arbor_path()?, value)
     }
 
     /// Stores `value` as a file at an already-parsed access path.
@@ -405,8 +405,8 @@ impl WriteTxn {
     /// overwrite through the accessor that keeps the leaf's byte width patches the blob
     /// in place (no decode, no re-encode); a structural change still rewrites it. The
     /// accessor borrows the transaction, so drop it before `commit`.
-    pub fn fetch_mut<'t, A: AMut<'t>>(&'t self, path: impl AsRef<str>) -> AdbResult<Option<A>> {
-        let apath = APath::parse(path.as_ref())?;
+    pub fn fetch_mut<'t, A: AMut<'t>>(&'t self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
+        let apath = path.into_arbor_path()?;
 
         // Presence check without decoding the value — resolve the node and read its
         // kind alone.
@@ -451,8 +451,8 @@ impl WriteTxn {
 
     /// Creates the directory at `path` (and any missing ancestors). Idempotent;
     /// errors if a path component is an existing file.
-    pub fn mkdir(&self, path: impl AsRef<str>) -> AdbResult<()> {
-        let path = APath::parse(path.as_ref())?;
+    pub fn mkdir(&self, path: impl IntoArborPath) -> AdbResult<()> {
+        let path = path.into_arbor_path()?;
         let mut table = self.txn.open_table(data_def(&self.table))?;
         table::ensure_dir(&mut table, &path)?;
 
@@ -461,8 +461,8 @@ impl WriteTxn {
 
     /// Removes the file or directory at `path` (a directory with its whole
     /// subtree). Returns whether anything was removed.
-    pub fn rm(&self, path: impl AsRef<str>) -> AdbResult<bool> {
-        let path = APath::parse(path.as_ref())?;
+    pub fn rm(&self, path: impl IntoArborPath) -> AdbResult<bool> {
+        let path = path.into_arbor_path()?;
         if path.is_root() {
             return Err(AdbError::CannotAccess(String::from("cannot remove the root")));
         }
@@ -474,9 +474,9 @@ impl WriteTxn {
     /// copy — so `mv` is O(1) and any accessor holding the node's `AKey` stays
     /// valid). Creates `dst`'s parent directories and replaces an existing `dst`.
     /// Errors if `dst` is `src` itself or a descendant of it.
-    pub fn mv(&self, src: impl AsRef<str>, dst: impl AsRef<str>) -> AdbResult<()> {
-        let src = APath::parse(src.as_ref())?;
-        let dst = APath::parse(dst.as_ref())?;
+    pub fn mv(&self, src: impl IntoArborPath, dst: impl IntoArborPath) -> AdbResult<()> {
+        let src = src.into_arbor_path()?;
+        let dst = dst.into_arbor_path()?;
 
         if dst.names().starts_with(src.names()) {
             return Err(AdbError::CannotAccess(String::from(
@@ -500,9 +500,9 @@ impl WriteTxn {
     /// Copies the subtree at `src` to `dst` under fresh identities (a deep copy).
     /// Creates `dst`'s parent directories and replaces an existing `dst`. Errors
     /// if `dst` is `src` itself or a descendant of it.
-    pub fn cp(&self, src: impl AsRef<str>, dst: impl AsRef<str>) -> AdbResult<()> {
-        let src = APath::parse(src.as_ref())?;
-        let dst = APath::parse(dst.as_ref())?;
+    pub fn cp(&self, src: impl IntoArborPath, dst: impl IntoArborPath) -> AdbResult<()> {
+        let src = src.into_arbor_path()?;
+        let dst = dst.into_arbor_path()?;
 
         if dst.names().starts_with(src.names()) {
             return Err(AdbError::CannotAccess(String::from(
@@ -553,8 +553,8 @@ impl WriteTxn {
     }
 
     /// A view of this transaction whose access paths are relative to `root`.
-    pub fn rooted(&self, root: impl AsRef<str>) -> AdbResult<RootedWrite<'_>> {
-        Ok(RootedWrite::new(self, APath::parse(root.as_ref())?))
+    pub fn rooted(&self, root: impl IntoArborPath) -> AdbResult<RootedWrite<'_>> {
+        Ok(RootedWrite::new(self, root.into_arbor_path()?))
     }
 
     /// Commits the transaction, making its changes durable and advancing the

@@ -12,12 +12,25 @@
 //! The `/` operator appends to a `VPath`: another path joins segment-wise
 //! (`a / b`), a string adds one field name (`a / "x"`). See [`VPath::join`] /
 //! [`PathTail`].
+//!
+//! Path-addressed methods accept either kind by trait, never a bare string only:
+//! filesystem methods take [`IntoArborPath`] (an [`APath`] or a string), value-side
+//! methods take [`IntoValuePath`] (a [`VPath`] or a string). So a pre-built path —
+//! including one assembled with `/` — and a string literal are interchangeable.
 
 mod a_path;
 mod functions;
-mod into_path;
+mod into_arbor_path;
+mod into_value_path;
 mod segment;
 mod tail;
 mod v_path;
 
-pub use self::{a_path::APath, into_path::IntoPath, segment::Segment, tail::PathTail, v_path::VPath};
+pub use self::{
+    a_path::APath,
+    into_arbor_path::IntoArborPath,
+    into_value_path::IntoValuePath,
+    segment::Segment,
+    tail::PathTail,
+    v_path::VPath,
+};
