@@ -198,6 +198,17 @@ scalar_adata!(NaiveTime);
 scalar_adata!(DateTime<Utc>);
 scalar_adata!(TimeDelta);
 
+// When a big-number type is BOTH a native `Scalar` and an as-data type, it stores
+// as its native leaf. The as-data-only path (`Bytes` leaf) lives in `bignum`.
+#[cfg(all(feature = "bigint-as-scalar", feature = "bigint-as-data"))]
+scalar_adata!(num_bigint::BigInt);
+
+#[cfg(all(feature = "bigfloat-as-scalar", feature = "bigfloat-as-data"))]
+scalar_adata!(num_bigfloat::BigFloat);
+
+#[cfg(all(feature = "rational-as-scalar", feature = "rational-as-data"))]
+scalar_adata!(num_rational::BigRational);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,5 +263,30 @@ mod tests {
 
         assert_eq!(Option::<i32>::from_scalar(&Scalar::Null).unwrap(), None);
         assert_eq!(Option::<i32>::from_scalar(&Scalar::I32(3)).unwrap(), Some(3));
+    }
+
+    // When both features are on (e.g. `--all-features`), a big number stores as its
+    // native `Scalar` leaf through `AData` — the as-data `Bytes` path is compiled out.
+    #[cfg(all(feature = "bigint-as-scalar", feature = "bigint-as-data"))]
+    #[test]
+    fn bigint_is_adata_via_a_native_scalar_leaf() {
+        use crate::ArborDb;
+        use num_bigint::BigInt;
+
+        let big = BigInt::parse_bytes(b"123456789012345678901234567890", 10).unwrap();
+
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+
+        {
+            let w = table.write().unwrap();
+            w.store::<BigInt>("x", &big).unwrap();
+            w.commit().unwrap();
+        }
+
+        // Round-trips through `from_scalar(Scalar::BigInt)`, so it was stored as the
+        // native scalar, not as a `Bytes` leaf.
+        let r = table.read().unwrap();
+        assert_eq!(r.load::<BigInt>("x").unwrap(), Some(big));
     }
 }
