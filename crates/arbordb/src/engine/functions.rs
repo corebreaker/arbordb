@@ -86,8 +86,10 @@ where
 pub(crate) fn fetch_entry_kind<R>(table: &R, akey: AKey) -> AdbResult<Option<EntryKind>>
 where
     R: ReadableTable<u128, EntryBytes>, {
-    match read_entry(table, akey)? {
-        Some(entry) => Ok(Some(get_entry_kind(&entry)?)),
+    // Read the kind tag straight from the borrowed page — never copy a whole
+    // (possibly large) entry into an owned buffer just to read its leading byte.
+    match table.get(u128::from(akey))? {
+        Some(guard) => Ok(Some(get_entry_kind(guard.value())?)),
         None => Ok(None),
     }
 }
@@ -97,11 +99,13 @@ where
 pub(crate) fn child_of<R>(table: &R, parent: AKey, name: &str) -> AdbResult<Option<AKey>>
 where
     R: ReadableTable<u128, EntryBytes>, {
-    let Some(entry) = read_entry(table, parent)? else {
+    // Navigate the directory blob in place: read it borrowed, extract the one child
+    // key, drop the guard — never copy a whole directory to read a single entry.
+    let Some(guard) = table.get(u128::from(parent))? else {
         return Ok(None);
     };
 
-    let (kind, payload) = entry_split(&entry)?;
+    let (kind, payload) = entry_split(guard.value())?;
     if kind != EntryKind::Dir {
         return Ok(None);
     }
