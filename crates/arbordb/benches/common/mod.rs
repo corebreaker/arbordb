@@ -1,9 +1,11 @@
 //! Shared fixtures for the ArborDb benchmark suite.
 //!
-//! Every bench target (`reads`, `writes`, `indexes`) pulls its dataset, entity
-//! type and helpers from here, so the numbers across categories describe the same
-//! shape of data. Built behind the `derive` feature (the benches use a
-//! `#[derive(AData)]` entity), so they run with `cargo bench --features derive`.
+//! Every bench target that shares the `User` entity (`reads`, `writes`, `indexes`,
+//! `deletes`, `dynamic_value`) pulls its dataset, entity type and helpers from here,
+//! so the numbers across categories describe the same shape of data. (`lists`
+//! defines its own list-bearing entity.) Built behind the `derive` feature (the
+//! benches use a `#[derive(AData)]` entity), so they run with `cargo bench
+//! --features derive`.
 //!
 //! Each target uses a subset of these helpers, hence the crate-wide `dead_code`
 //! allowance.

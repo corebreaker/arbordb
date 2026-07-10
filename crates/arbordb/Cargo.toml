@@ -54,6 +54,27 @@ name = "indexes"
 harness = false
 required-features = ["derive"]
 
+[[bench]]
+name = "deletes"
+harness = false
+required-features = ["derive"]
+
+[[bench]]
+name = "dynamic_value"
+harness = false
+required-features = ["derive"]
+
+[[bench]]
+name = "lists"
+harness = false
+required-features = ["derive"]
+
+# `scaling` drives the dynamic `Value` API directly, so — unlike the rest — it needs
+# no derive feature.
+[[bench]]
+name = "scaling"
+harness = false
+
 [features]
 default = []
 derive = ["dep:arbordb-derive"]
