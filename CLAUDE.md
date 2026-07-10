@@ -93,7 +93,9 @@ Each paragraph is **one physical line**; blank lines separate paragraphs. No col
 
 **Index model (later phase).** Named, composite (ordered columns), per-column ASC/DESC, optional uniqueness, order-preserving key encoding, pattern scope, query builder, back-fill — as in StratoDb, but a scope is a pattern over APaths, a column is a `VPath` into each value, and an index entry's entity identity is the value's `AKey`.
 
-**Deferred (do not implement until requested):** JSON/YAML export; the benchmark-comparison tool.
+**Export (JSON/YAML).** A read-only, hand-written renderer (the `export` module — no external JSON/YAML crate, mirroring the hand-rolled codec) turns a stored value into text. The `JsonExporter` / `YamlExporter` traits (each generic over its path type) are implemented for `ReadTxn` and `RootedRead` — which render the `Value` stored at an `APath` (a directory is refused, since it has no value of its own) — and for `Value`, which renders the in-memory subtree at a `VPath`. It is export-only and one-directional; scalars with no native JSON/YAML form take a textual one (Base64 for bytes, ISO 8601 / RFC 3339 for dates, decimal seconds for a duration, `null` for a non-finite float).
+
+**Deferred (do not implement until requested):** the benchmark-comparison tool.
 
 ---
 
@@ -105,7 +107,7 @@ Each paragraph is **one physical line**; blank lines separate paragraphs. No col
 4. **Secondary indexes**.
 5. **Docs & polish** — rooted views, README, rustdoc, examples, cross-feature tests, benches, CI (CircleCI + GitHub Actions).
 
-Deferred to the end: JSON/YAML export, benchmark-comparison tool.
+Deferred to the end: the benchmark-comparison tool.
 
 ---
 

@@ -35,6 +35,8 @@ rather than shredding every scalar into its own keyed node.
 - **Secondary indexes.** Named, composite, per-column ASC/DESC, optionally unique, scoped to a path pattern (`users/*`).
   The key encoding is order-preserving, so prefix queries are correct; write-time maintenance keeps them in sync.
 - **Rooted views.** A view that makes every path relative to a fixed root, and scopes index queries to that subtree.
+- **JSON / YAML export.** Render a stored value — or an in-memory `Value` subtree — to JSON or YAML
+  with a hand-written, dependency-free, read-only writer.
 - **Transactional.** Concurrent readers, a single serialized writer, snapshot-consistent reads,
   durable-on-commit writes.
 - **Opaque engine.** The underlying key-value engine never appears in the public API.
@@ -211,6 +213,55 @@ let age: Option<i64> = alice.get_as("", "age")?; // reads users/alice's `age`
 
 ---
 
+## JSON / YAML export
+
+ArborDb renders a stored value — or an in-memory `Value` subtree — to **JSON or YAML** with a hand-written,
+dependency-free writer (no `serde_json` / `serde_yaml`, mirroring the bespoke value codec).
+It is **read-only and one-directional**: there is no import path, and no cargo feature is required.
+
+The `JsonExporter` / `YamlExporter` traits are implemented for `ReadTxn` and `RootedRead`,
+which render the `Value` stored at an `APath` (a directory has no value of its own, so it is refused),
+and for `Value`, which renders the in-memory subtree at a `VPath`. Object fields come out in sorted order;
+JSON takes an optional indent (`None` compact, `Some(n)` pretty). Scalars with no native JSON/YAML form take a
+textual one — Base64 for raw bytes, ISO 8601 / RFC 3339 for dates and times, decimal seconds for a duration,
+`null` for a non-finite float.
+
+```rust
+use std::collections::BTreeMap;
+use arbordb::{data::Scalar, export::{JsonExporter, YamlExporter}, ArborDb, Value};
+
+fn main() -> arbordb::AdbResult<()> {
+    let db = ArborDb::create_in_memory()?;
+    let table = db.open_table("people")?;
+
+    let w = table.write()?;
+    w.store_value(
+        "users/alice",
+        &Value::Node(BTreeMap::from([
+            (String::from("name"), Value::Leaf(Scalar::Str(String::from("Alice")))),
+            (String::from("age"),  Value::Leaf(Scalar::U32(30))),
+        ])),
+    )?;
+    w.commit()?;
+
+    let r = table.read()?;
+
+    // Compact JSON, pretty JSON, and YAML for the value stored at an access path.
+    assert_eq!(r.export_to_json("users/alice", None)?, r#"{"age":30,"name":"Alice"}"#);
+    println!("{}", r.export_to_json("users/alice", Some(2))?);
+    print!("{}", r.export_to_yaml("users/alice")?);
+
+    // An in-memory `Value` renders a subtree navigated by a `VPath`.
+    let value = r.load_value("users/alice")?.unwrap();
+    assert_eq!(value.export_to_json("name", None)?, r#""Alice""#);
+    Ok(())
+}
+```
+
+See [`examples/export.rs`](crates/arbordb/examples/export.rs).
+
+---
+
 ## Entry timestamps
 
 With the `entry-timestamps` feature,
@@ -299,18 +350,22 @@ including across byte-length and sign boundaries.
 
 ## Cargo features
 
-| Feature                                                          | Default | Pulls in                                                                                 | Effect                                                                           |
-|------------------------------------------------------------------|:-------:|------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------|
-| `derive`                                                         |    —    | `arbordb-derive`                                                                         | `#[derive(AData)]` and the `#[arbor(...)]` attributes                            |
-| `parallel`                                                       |    —    | `rayon`                                                                                  | parallelize batch operations                                                     |
-| `serde`                                                          |    —    | `serde`                                                                                  | `Serialize` / `Deserialize` for public types and `Value`; `store_serde_value` / `load_serde_value` (straight to/from the value codec) |
-| `entry-timestamps`                                               |    —    | `chrono`                                                                                 | per-vnode `created` / `modified` / `accessed` datetimes (out-of-band, ignorable) |
-| `permissions`                                                    |    —    | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `ed25519-dalek`, `getrandom` | user/password auth, per-vnode ACLs, MAC + signature tamper detection             |
-| `bignum`                                                         |    —    | both umbrellas below                                                                     | every big-number type, as scalar **and** data                                    |
-| `bignum-as-scalar`                                               |    —    | the three `*-as-scalar`                                                                  | big-number `Scalar` variants + `AValue`                                          |
-| `bignum-as-data`                                                 |    —    | the three `*-as-data`                                                                    | big-number `AData` impls (a `Bytes` leaf when not also a scalar)                 |
-| `bigint-as-scalar` / `bigfloat-as-scalar` / `rational-as-scalar` |    —    | the matching `num-*` crate                                                               | one type as a `Scalar`                                                           |
-| `bigint-as-data` / `bigfloat-as-data` / `rational-as-data`       |    —    | the matching `num-*` crate                                                               | one type as `AData`                                                              |
+| Feature              | Pulls in                                                                                 | Effect                                                                                                                                |
+|----------------------|------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+| `derive`             | `arbordb-derive`                                                                         | `#[derive(AData)]` and the `#[arbor(...)]` attributes                                                                                 |
+| `parallel`           | `rayon`                                                                                  | parallelize batch operations                                                                                                          |
+| `serde`              | `serde`                                                                                  | `Serialize` / `Deserialize` for public types and `Value`; `store_serde_value` / `load_serde_value` (straight to/from the value codec) |
+| `entry-timestamps`   | `chrono`                                                                                 | per-vnode `created` / `modified` / `accessed` datetimes (out-of-band, ignorable)                                                      |
+| `permissions`        | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `ed25519-dalek`, `getrandom` | user/password auth, per-vnode ACLs, MAC + signature tamper detection                                                                  |
+| `bignum`             | both umbrellas below                                                                     | every big-number type, as scalar **and** data                                                                                         |
+| `bignum-as-scalar`   | the three `*-as-scalar`                                                                  | big-number `Scalar` variants + `AValue`                                                                                               |
+| `bignum-as-data`     | the three `*-as-data`                                                                    | big-number `AData` impls (a `Bytes` leaf when not also a scalar)                                                                      |
+| `bigint-as-scalar`   | the matching `num-*` crate                                                               | one type as a `Scalar`                                                                                                                |
+| `bigfloat-as-scalar` | the matching `num-*` crate                                                               | one type as a `Scalar`                                                                                                                |
+| `rational-as-scalar` | the matching `num-*` crate                                                               | one type as a `Scalar`                                                                                                                |
+| `bigint-as-data`     | the matching `num-*` crate                                                               | one type as `AData`                                                                                                                   |
+| `bigfloat-as-data`   | the matching `num-*` crate                                                               | one type as `AData`                                                                                                                   |
+| `rational-as-data`   | the matching `num-*` crate                                                               | one type as `AData`                                                                                                                   |
 
 Nothing is on by default.
 
@@ -328,21 +383,21 @@ Nothing is on by default.
 
 ## Project status
 
-| Area                                                                        |   State    |
-|-----------------------------------------------------------------------------|:----------:|
-| Core store (virtual FS, zero-copy value codec, paths, transactions, caches) |     ✅      |
-| `AData` trait, accessors, container types                                   |     ✅      |
-| `#[derive(AData)]` + the full `#[arbor(...)]` attribute set                 |     ✅      |
-| Secondary indexes (composite, unique, ordered, back-filled, queryable)      |     ✅      |
-| Big-number scalar/data feature matrix (`bignum`)                            |     ✅      |
-| Rooted views                                                                |     ✅      |
-| Dynamic `Value` document type                                               |     ✅      |
-| Entry timestamps (`entry-timestamps`)                                       |     ✅      |
-| Permissions, ACLs, MAC + signature integrity (`permissions`)                |     ✅      |
-| Documentation, runnable examples                                            |     ✅      |
-| Criterion benchmark suite                                                   |     ✅      |
-| Continuous integration                                                      |     ✅      |
-| JSON / YAML export                                                          | ⏳ deferred |
+| Area                                                                        | State |
+|-----------------------------------------------------------------------------|:-----:|
+| Core store (virtual FS, zero-copy value codec, paths, transactions, caches) |   ✅   |
+| `AData` trait, accessors, container types                                   |   ✅   |
+| `#[derive(AData)]` + the full `#[arbor(...)]` attribute set                 |   ✅   |
+| Secondary indexes (composite, unique, ordered, back-filled, queryable)      |   ✅   |
+| Big-number scalar/data feature matrix (`bignum`)                            |   ✅   |
+| Rooted views                                                                |   ✅   |
+| Dynamic `Value` document type                                               |   ✅   |
+| Entry timestamps (`entry-timestamps`)                                       |   ✅   |
+| Permissions, ACLs, MAC + signature integrity (`permissions`)                |   ✅   |
+| Documentation, runnable examples                                            |   ✅   |
+| Criterion benchmark suite                                                   |   ✅   |
+| Continuous integration                                                      |   ✅   |
+| JSON / YAML export (read-only)                                              |   ✅   |
 
 ArborDb is under active development:
 the capabilities marked ✅ are implemented and tested, but the on-disk format and public API are not yet stable

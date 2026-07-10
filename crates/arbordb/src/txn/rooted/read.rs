@@ -7,6 +7,7 @@ use crate::{
     data::{AData, AValue, ARef, Scalar},
     error::AdbResult,
     entry::{Entry, EntryKind},
+    export::{JsonExporter, YamlExporter},
     path::{APath, IntoArborPath, IntoValuePath},
     Value,
 };
@@ -101,5 +102,19 @@ impl<'a> RootedRead<'a> {
     /// Resolves `path` against this view's root into an absolute access path.
     fn absolute(&self, path: impl IntoArborPath) -> AdbResult<APath> {
         Ok(self.root.join(&path.into_arbor_path()?))
+    }
+}
+
+impl<P: IntoArborPath> JsonExporter<P> for RootedRead<'_> {
+    /// Exports the value stored at `path` (relative to the root) as JSON.
+    fn export_to_json(&self, path: P, indent: Option<usize>) -> AdbResult<String> {
+        self.txn.export_to_json(self.absolute(path)?, indent)
+    }
+}
+
+impl<P: IntoArborPath> YamlExporter<P> for RootedRead<'_> {
+    /// Exports the value stored at `path` (relative to the root) as YAML.
+    fn export_to_yaml(&self, path: P) -> AdbResult<String> {
+        self.txn.export_to_yaml(self.absolute(path)?)
     }
 }

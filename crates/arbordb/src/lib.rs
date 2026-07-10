@@ -25,6 +25,8 @@
 //!   with `#[arbor(index(...))]` or built with [`Table::create_index`], and queried with
 //!   [`ReadTxn::find`](txn::ReadTxn::find).
 //! - [Rooted views](txn::RootedRead) that make every path relative to a fixed root.
+//! - Read-only [JSON / YAML export](export) of a stored value or an in-memory [`Value`] subtree, rendered by a
+//!   hand-written, dependency-free writer.
 //! - Optional per-vnode `created` / `modified` / `accessed` timestamps (`entry-timestamps`), and user/password
 //!   authentication with per-vnode ACLs and MAC + signature tamper detection, verified even for a guest
 //!   (`permissions`).
@@ -78,6 +80,7 @@ mod serde;
 
 pub mod access;
 pub mod data;
+pub mod export;
 pub mod index;
 pub mod path;
 pub mod txn;
