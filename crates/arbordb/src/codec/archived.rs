@@ -45,12 +45,9 @@ const NODE: u8 = 2;
 
 /// Serialises `value` into a self-contained value blob.
 pub(crate) fn encode(value: &Value) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(HEADER_LEN);
-    buf.push(FORMAT_VERSION);
-    buf.extend_from_slice(&0u32.to_be_bytes()); // root-offset placeholder, back-patched below
-
+    let mut buf = begin_blob();
     let root = encode_node(value, &mut buf);
-    buf[1..HEADER_LEN].copy_from_slice(&root.to_be_bytes());
+    patch_root(&mut buf, root);
 
     buf
 }
@@ -64,46 +61,84 @@ pub(crate) fn decode(blob: &[u8]) -> AdbResult<Value> {
 /// offset of the vnode's own header byte.
 fn encode_node(value: &Value, buf: &mut Vec<u8>) -> u32 {
     match value {
-        Value::Leaf(scalar) => {
-            let off = offset(buf);
-            buf.push(LEAF);
-            scalar.encode(buf);
-
-            off
-        }
+        Value::Leaf(scalar) => push_leaf(buf, scalar),
         Value::List(items) => {
             let child_offsets: Vec<u32> = items.iter().map(|item| encode_node(item, buf)).collect();
 
-            let off = offset(buf);
-            buf.push(LIST);
-            codec::put_u32(buf, items.len() as u32);
-            for child in child_offsets {
-                codec::put_u32(buf, child);
-            }
-
-            off
+            push_list(buf, &child_offsets)
         }
         Value::Node(map) => {
-            let mut entries: Vec<(u32, u32, u32)> = Vec::with_capacity(map.len());
+            // A `BTreeMap` iterates name-sorted, exactly what `push_object` requires.
+            let mut entries: Vec<(&str, u32)> = Vec::with_capacity(map.len());
             for (name, child) in map {
                 let child_off = encode_node(child, buf);
-                let name_off = offset(buf);
-                buf.extend_from_slice(name.as_bytes());
-                entries.push((name_off, name.len() as u32, child_off));
+                entries.push((name.as_str(), child_off));
             }
 
-            let off = offset(buf);
-            buf.push(NODE);
-            codec::put_u32(buf, map.len() as u32);
-            for (name_off, name_len, child_off) in entries {
-                codec::put_u32(buf, name_off);
-                codec::put_u32(buf, name_len);
-                codec::put_u32(buf, child_off);
-            }
-
-            off
+            push_object(buf, &entries)
         }
     }
+}
+
+/// Begins a value blob: the version byte plus a placeholder for the root offset,
+/// which [`patch_root`] fills in once the root vnode has been written last.
+pub(crate) fn begin_blob() -> Vec<u8> {
+    let mut buf = Vec::with_capacity(HEADER_LEN);
+    buf.push(FORMAT_VERSION);
+    buf.extend_from_slice(&0u32.to_be_bytes());
+
+    buf
+}
+
+/// Back-patches the header's root offset once the root vnode sits at `root`.
+pub(crate) fn patch_root(buf: &mut [u8], root: u32) {
+    buf[1..HEADER_LEN].copy_from_slice(&root.to_be_bytes());
+}
+
+/// Appends a leaf vnode holding `scalar`, returning its absolute offset.
+pub(crate) fn push_leaf(buf: &mut Vec<u8>, scalar: &Scalar) -> u32 {
+    let off = offset(buf);
+    buf.push(LEAF);
+    scalar.encode(buf);
+
+    off
+}
+
+/// Appends a list vnode over `children` (their already-written offsets), returning
+/// its absolute offset.
+pub(crate) fn push_list(buf: &mut Vec<u8>, children: &[u32]) -> u32 {
+    let off = offset(buf);
+    buf.push(LIST);
+    codec::put_u32(buf, children.len() as u32);
+    for child in children {
+        codec::put_u32(buf, *child);
+    }
+
+    off
+}
+
+/// Appends an object vnode over `entries` — `(field name, already-written child
+/// offset)` pairs that MUST be name-sorted and unique, since lookups binary-search
+/// the table. Writes the field-name bytes and then the entry table, returning the
+/// object's absolute offset.
+pub(crate) fn push_object(buf: &mut Vec<u8>, entries: &[(&str, u32)]) -> u32 {
+    let mut records: Vec<(u32, u32, u32)> = Vec::with_capacity(entries.len());
+    for (name, child_off) in entries {
+        let name_off = offset(buf);
+        buf.extend_from_slice(name.as_bytes());
+        records.push((name_off, name.len() as u32, *child_off));
+    }
+
+    let off = offset(buf);
+    buf.push(NODE);
+    codec::put_u32(buf, records.len() as u32);
+    for (name_off, name_len, child_off) in records {
+        codec::put_u32(buf, name_off);
+        codec::put_u32(buf, name_len);
+        codec::put_u32(buf, child_off);
+    }
+
+    off
 }
 
 /// The current write position as a `u32` offset (values stay far below 4 GiB).
@@ -296,7 +331,7 @@ impl<'a> ArchivedNode<'a> {
     }
 
     /// Every `(field name, child vnode)` of this object, in name order.
-    fn entries(&self) -> AdbResult<Vec<(&'a str, ArchivedNode<'a>)>> {
+    pub(crate) fn entries(&self) -> AdbResult<Vec<(&'a str, ArchivedNode<'a>)>> {
         let off = self.off as usize;
         if read_u8(self.blob, off)? != NODE {
             return Err(AdbError::Corrupt(

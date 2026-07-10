@@ -16,3 +16,6 @@ pub(crate) use self::{
     putters::{put_bytes, put_u32},
     reader::Reader,
 };
+
+#[cfg(feature = "serde")]
+pub(crate) use self::archived::{ArchivedNode, begin_blob, patch_root, push_leaf, push_list, push_object};

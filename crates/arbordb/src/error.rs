@@ -144,6 +144,12 @@ pub enum AdbError {
     /// into a group), which is immutable by design.
     #[error("'{0}' is frozen and cannot be modified")]
     Frozen(String),
+
+    /// A Serde `Serialize` or `Deserialize` failed while mapping to or from ArborDb's
+    /// value codec (for `store_serde_value` / `load_serde_value`).
+    #[cfg(feature = "serde")]
+    #[error("serde error: {0}")]
+    Serde(String),
 }
 
 impl AdbError {
@@ -153,5 +159,19 @@ impl AdbError {
     where
         E: Error + Send + Sync + 'static, {
         AdbError::Engine(Box::new(error))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::ser::Error for AdbError {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        AdbError::Serde(msg.to_string())
+    }
+}
+
+#[cfg(feature = "serde")]
+impl serde::de::Error for AdbError {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        AdbError::Serde(msg.to_string())
     }
 }

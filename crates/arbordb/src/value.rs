@@ -17,6 +17,9 @@ use crate::{
 
 use std::{collections::BTreeMap, mem::replace};
 
+#[cfg(feature = "serde")]
+use crate::error::AdbResult;
+
 /// A dynamic document: a scalar leaf, an ordered list, or a named map of values —
 /// the faithful in-memory form of a stored value.
 #[derive(Clone, Debug, PartialEq)]
@@ -53,6 +56,26 @@ impl Value {
     /// A vnode wrapping the given map.
     pub fn new_node(node: BTreeMap<String, Value>) -> Self {
         Value::Node(node)
+    }
+
+    /// Maps any [`serde::Serialize`] value into a native `Value` tree — objects,
+    /// lists, and scalar leaves — so it is indexable and navigable by `VPath`, just
+    /// like a value built through [`AData`](crate::AData). The inverse of
+    /// [`to_serde_value`](Self::to_serde_value).
+    ///
+    /// To store a Serde value, prefer
+    /// [`WriteTxn::store_serde_value`](crate::txn::WriteTxn::store_serde_value), which
+    /// encodes straight to the blob without this intermediate tree.
+    #[cfg(feature = "serde")]
+    pub fn from_serde_value<T: serde::Serialize + ?Sized>(v: &T) -> AdbResult<Self> {
+        crate::serde::to_value(v)
+    }
+
+    /// Reconstructs a [`serde::de::DeserializeOwned`] value from this `Value` tree —
+    /// the inverse of [`from_serde_value`](Self::from_serde_value).
+    #[cfg(feature = "serde")]
+    pub fn to_serde_value<T: serde::de::DeserializeOwned>(&self) -> AdbResult<T> {
+        crate::serde::from_value(self)
     }
 
     /// The scalar, if this is a [`Leaf`](Value::Leaf).
@@ -362,6 +385,13 @@ fn set_in(target: &mut Value, segments: &[Segment], value: Value) -> bool {
     }
 }
 
+impl Default for Value {
+    /// The empty default is a [`Null`](Scalar::Null) leaf.
+    fn default() -> Self {
+        Value::Leaf(Scalar::Null)
+    }
+}
+
 /// Builds a brand-new subtree placing `value` at `segments`. `None` if it cannot
 /// be created — an `Index` in fresh territory can only be `0`, since a new list
 /// starts empty, so any higher index has no slot.
@@ -428,13 +458,6 @@ fn descend_mut<'a>(mut current: &'a mut Value, segments: &[Segment]) -> Option<&
     }
 
     Some(current)
-}
-
-impl Default for Value {
-    /// The empty default is a [`Null`](Scalar::Null) leaf.
-    fn default() -> Self {
-        Value::Leaf(Scalar::Null)
-    }
 }
 
 #[cfg(test)]

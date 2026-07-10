@@ -73,13 +73,16 @@ mod vnode;
 #[cfg(feature = "permissions")]
 mod crypto;
 
+#[cfg(feature = "serde")]
+mod serde;
+
 pub mod access;
 pub mod data;
 pub mod index;
 pub mod path;
 pub mod txn;
 
-/// Public access-control types (`Mode`, `Rights`, `NodeAcl`) for the `permissions` feature.
+/// Public access-control types (`Rights`, `AclClass`) for the `permissions` feature.
 #[cfg(feature = "permissions")]
 pub mod acl;
 
