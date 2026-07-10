@@ -2,37 +2,49 @@
 
 use super::{
     context::{table, Context},
+    grab::{self, Grab},
     rooted::RootedWrite,
+    IndexQuery,
 };
 
 use crate::{
     access::{MemWriter, MutCursor, Writer},
     codec::decode,
-    data::{AData, AMut, Scalar},
+    data::{AData, AMut, ARef, AValue, Scalar},
     db::DbInner,
-    engine::{data_def, fetch_entry_kind, read_entry, resolve, entry_split, EntryKind, INDEX_TABLE, META_TABLE},
+    engine::{data_def, entry_split, fetch_entry_kind, read_entry, resolve, Entry, EntryKind, INDEX_TABLE, META_TABLE},
     error::{AdbError, AdbResult},
     index::{
         maintenance,
         registry::{self, IndexEntry},
+        scan,
+        Pattern,
     },
-    path::{APath, IntoArborPath, VPath},
+    path::{APath, IntoArborPath, IntoValuePath, VPath},
     value::Value,
+    AKey,
 };
 
 use redb::WriteTransaction;
 use std::sync::Arc;
 
 #[cfg(feature = "entry-timestamps")]
-use crate::inode::{self, INODES_TABLE};
+use crate::{
+    inode::{self, read_timestamps, NodeTimestamps, INODES_TABLE},
+    time::timestamp_now,
+};
 
 #[cfg(feature = "permissions")]
 use crate::{
     acl::{AclClass, Rights},
-    inode::{read_acl, read_mac},
+    codec::ArchivedDir,
+    engine::EntryBytes,
+    inode::{read_acl, read_mac, Acl},
     perm::{self, Principal},
-    AKey,
 };
+
+#[cfg(feature = "permissions")]
+use redb::ReadableTable;
 
 /// Deletes every value owned by `uid` in `table`, within `txn`, bypassing ACL
 /// checks (the caller must already be an authorized administrator). Used by user
@@ -179,15 +191,31 @@ impl WriteTxn {
     /// authenticated user holding the integrity key.
     #[cfg(feature = "permissions")]
     fn verify_entry(&self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
+        if !matches!(self.principal.as_ref(), Principal::User(_)) {
+            return Ok(());
+        }
+
+        let inodes = self.txn.open_table(INODES_TABLE)?;
+
+        self.verify_with(&inodes, akey, entry)
+    }
+
+    /// Verifies `akey`'s keyed MAC over `entry` and its ACL, using an already-open
+    /// `$inodes` handle so a caller mid-walk need not reopen the table (a write
+    /// transaction refuses a second open of the same table). A no-op unless this
+    /// handle is an authenticated user — the only writer that holds the key.
+    #[cfg(feature = "permissions")]
+    fn verify_with<R>(&self, inodes: &R, akey: AKey, entry: &[u8]) -> AdbResult<()>
+    where
+        R: ReadableTable<&'static [u8], &'static [u8]>, {
         let Principal::User(session) = self.principal.as_ref() else {
             return Ok(());
         };
 
-        let inodes = self.txn.open_table(INODES_TABLE)?;
-        let acl = read_acl(&inodes, &self.table, akey)?
+        let acl = read_acl(inodes, &self.table, akey)?
             .map(|acl| acl.encode())
             .unwrap_or_default();
-        let stored = read_mac(&inodes, &self.table, akey)?;
+        let stored = read_mac(inodes, &self.table, akey)?;
         let expected = perm::integrity::mac_value(session.key(), &self.table, akey, entry, &acl);
 
         match stored {
@@ -197,6 +225,49 @@ impl WriteTxn {
                 self.table
             ))),
         }
+    }
+
+    /// Whether ACL enforcement applies — a protected database written as an
+    /// authenticated user, not an unrestricted handle. (A guest cannot write.)
+    #[cfg(feature = "permissions")]
+    fn enforced(&self) -> bool {
+        !matches!(self.principal.as_ref(), Principal::Unrestricted)
+    }
+
+    /// Resolves `path` over the write transaction's own tables with an `Access`
+    /// check (and integrity verify) on every directory traversed. `None` if a
+    /// component along the way is missing.
+    #[cfg(feature = "permissions")]
+    fn resolve_enforced<R>(&self, data: &R, path: &APath) -> AdbResult<Option<AKey>>
+    where
+        R: ReadableTable<u128, EntryBytes>, {
+        let inodes = self.txn.open_table(INODES_TABLE)?;
+
+        let mut akey = AKey::ROOT;
+        for name in path.names() {
+            let acl = read_acl(&inodes, &self.table, akey)?;
+            perm::access::authorize(&self.principal, akey, acl.as_ref(), Rights::Access)?;
+
+            let Some(entry) = read_entry(data, akey)? else {
+                return Ok(None);
+            };
+
+            // A tampered directory blob could redirect a name to another vnode, so
+            // verify each directory descended through.
+            self.verify_with(&inodes, akey, &entry)?;
+
+            let (kind, payload) = entry_split(&entry)?;
+            if kind != EntryKind::Dir {
+                return Ok(None);
+            }
+
+            match ArchivedDir::new(payload)?.get(name.as_str())? {
+                Some(child) => akey = child,
+                None => return Ok(None),
+            }
+        }
+
+        Ok(Some(akey))
     }
 
     /// Loads the current (uncommitted) value of the file at `path`, or `None` if
@@ -265,7 +336,7 @@ impl WriteTxn {
 
     /// Resolves a group name to its id, erroring if no such group exists.
     #[cfg(feature = "permissions")]
-    fn gid_of(&self, group: &str) -> AdbResult<u32> {
+    fn require_gid(&self, group: &str) -> AdbResult<u32> {
         let meta = self.txn.open_table(META_TABLE)?;
 
         perm::store::gid_of(&meta, group)?.ok_or_else(|| AdbError::CannotAccess(format!("no group named '{group}'")))
@@ -281,7 +352,7 @@ impl WriteTxn {
 
         // Resolve a group name to its id before opening the write context.
         let gid = match &class {
-            AclClass::Group(name) => Some(self.gid_of(name)?),
+            AclClass::Group(name) => Some(self.require_gid(name)?),
             _ => None,
         };
 
@@ -303,7 +374,7 @@ impl WriteTxn {
     #[cfg(feature = "permissions")]
     pub fn add_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
-        let gid = self.gid_of(group)?;
+        let gid = self.require_gid(group)?;
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
@@ -317,7 +388,7 @@ impl WriteTxn {
     #[cfg(feature = "permissions")]
     pub fn del_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
-        let gid = self.gid_of(group)?;
+        let gid = self.require_gid(group)?;
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
@@ -449,6 +520,108 @@ impl WriteTxn {
         Ok(RootedWrite::new(self, root.into_arbor_path()?))
     }
 
+    // -- Reads over this transaction's own (uncommitted) state ---------------
+    //
+    // A writer reads exactly what a reader does, but over its own pending
+    // changes and without the caches — so a read-modify-write stays atomic
+    // within one transaction. See the [`ReadOps`] surface for the shared bodies.
+
+    /// Loads a typed value from the file at `path`, or `None` if absent. Errors if
+    /// `path` names a directory.
+    pub fn load<T: AData>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
+        grab::load(self, path)
+    }
+
+    /// Loads a file stored at `path` into any [`serde::de::DeserializeOwned`] value,
+    /// reading the value blob directly over the zero-copy codec. `None` if absent;
+    /// errors if `path` names a directory.
+    #[cfg(feature = "serde")]
+    pub fn load_serde_value<T: serde::de::DeserializeOwned>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
+        grab::load_serde_value(self, path)
+    }
+
+    /// Loads the whole dynamic [`Value`] stored in the file at `path`, or `None` if
+    /// there is nothing there. Errors if `path` names a directory.
+    pub fn load_value(&self, path: impl IntoArborPath) -> AdbResult<Option<Value>> {
+        grab::load_value(self, path)
+    }
+
+    /// Opens a read accessor over the file at `path`, navigating its value blob
+    /// zero-copy. `None` if the file is absent; errors if `path` names a directory.
+    /// The accessor owns a snapshot of the blob, so it may outlive the transaction.
+    /// For a *mutable* accessor use [`fetch_mut`](Self::fetch_mut).
+    pub fn fetch<A: ARef<'static>>(&self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
+        grab::fetch(self, path)
+    }
+
+    /// Reads the scalar at `at` inside the file at `path`, navigating the value
+    /// blob zero-copy. `None` if the file or the inner path is absent, or if the
+    /// inner path does not land on a scalar leaf.
+    pub fn get(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<Scalar>> {
+        grab::get(self, path, at)
+    }
+
+    /// Reads a typed scalar at `at` inside the file at `path`.
+    pub fn get_as<V: AValue>(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<V>> {
+        grab::get_as(self, path, at)
+    }
+
+    /// The filesystem kind (file or directory) at `path`, or `None` if absent.
+    pub fn kind(&self, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
+        grab::kind(self, path)
+    }
+
+    /// Whether a file or directory exists at `path`.
+    pub fn exists(&self, path: impl IntoArborPath) -> AdbResult<bool> {
+        grab::exists(self, path)
+    }
+
+    /// Lists the direct children of the directory at `path`, as `(name, kind)`
+    /// pairs in name order. Errors if `path` names a file.
+    pub fn ls(&self, path: impl IntoArborPath) -> AdbResult<Vec<Entry>> {
+        grab::ls(self, path)
+    }
+
+    /// The created / modified / accessed timestamps of the vnode at `path`, or
+    /// `None` if the vnode is absent or has no recorded metadata yet.
+    #[cfg(feature = "entry-timestamps")]
+    pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
+        grab::times(self, path)
+    }
+
+    /// The [`Rights`] the file or directory at `path` grants `class`. Errors with
+    /// [`ValueNotFound`](AdbError::ValueNotFound) if nothing exists at `path`.
+    #[cfg(feature = "permissions")]
+    pub fn get_acl(&self, path: impl IntoArborPath, class: AclClass) -> AdbResult<Rights> {
+        grab::get_acl(self, path, class)
+    }
+
+    /// The name of the owner of the file or directory at `path`, or `None` if the
+    /// vnode is absent or has no ACL.
+    #[cfg(feature = "permissions")]
+    pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
+        grab::owner(self, path)
+    }
+
+    /// The names of the groups the file or directory at `path` belongs to, sorted.
+    #[cfg(feature = "permissions")]
+    pub fn groups(&self, path: impl IntoArborPath) -> AdbResult<Vec<String>> {
+        grab::groups(self, path)
+    }
+
+    /// Finds the entities an index points at, recomposing each as a `T`. Sees this
+    /// transaction's own uncommitted changes.
+    pub fn find<T: AData>(&self, index: &str, values: &[Scalar]) -> AdbResult<Vec<T>> {
+        grab::find(self, index, values)
+    }
+
+    /// Starts an [`IndexQuery`] against `index` — a builder for prefix matches,
+    /// reverse order, and subtree scoping. Sees this transaction's own uncommitted
+    /// changes.
+    pub fn query(&self, index: &str) -> IndexQuery<'_> {
+        IndexQuery::new(self, index)
+    }
+
     /// Commits the transaction, making its changes durable and advancing the
     /// database generation (so cached resolutions from earlier snapshots retire).
     pub fn commit(self) -> AdbResult<()> {
@@ -480,6 +653,102 @@ impl WriteTxn {
         drop(guard);
 
         Ok(())
+    }
+}
+
+impl Grab for WriteTxn {
+    fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
+        let data = self.txn.open_table(data_def(&self.table))?;
+
+        #[cfg(feature = "permissions")]
+        if self.enforced() {
+            return self.resolve_enforced(&data, path);
+        }
+
+        crate::engine::resolve(&data, path)
+    }
+
+    fn entry_blob(&self, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>> {
+        let data = self.txn.open_table(data_def(&self.table))?;
+
+        Ok(read_entry(&data, akey)?.map(Arc::new))
+    }
+
+    fn lookup_index(&self, index: &str) -> AdbResult<Option<IndexEntry>> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        registry::lookup(&meta, &self.table, index)
+    }
+
+    fn scan_index(&self, entry: &IndexEntry, cols: &[u8]) -> AdbResult<Vec<AKey>> {
+        let index_table = self.txn.open_table(INDEX_TABLE)?;
+
+        scan::scan_prefix(&index_table, entry.id(), cols, entry.def().unique())
+    }
+
+    fn affected_under(&self, pattern: &Pattern, root: &APath) -> AdbResult<Vec<AKey>> {
+        let data = self.txn.open_table(data_def(&self.table))?;
+
+        pattern.affected_entities(&data, root)
+    }
+
+    #[cfg(feature = "permissions")]
+    fn authorize(&self, akey: AKey, needed: Rights) -> AdbResult<()> {
+        if !self.enforced() {
+            return Ok(());
+        }
+
+        let inodes = self.txn.open_table(INODES_TABLE)?;
+        let acl = read_acl(&inodes, &self.table, akey)?;
+
+        perm::access::authorize(&self.principal, akey, acl.as_ref(), needed)
+    }
+
+    #[cfg(feature = "permissions")]
+    fn verify(&self, akey: AKey, blob: &[u8]) -> AdbResult<()> {
+        self.verify_entry(akey, blob)
+    }
+
+    #[cfg(feature = "permissions")]
+    fn acl_of(&self, akey: AKey) -> AdbResult<Option<Acl>> {
+        let inodes = self.txn.open_table(INODES_TABLE)?;
+
+        read_acl(&inodes, &self.table, akey)
+    }
+
+    #[cfg(feature = "permissions")]
+    fn gid_of(&self, group: &str) -> AdbResult<Option<u32>> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        perm::store::gid_of(&meta, group)
+    }
+
+    #[cfg(feature = "permissions")]
+    fn user_name(&self, uid: u32) -> AdbResult<Option<String>> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        perm::store::name_of_user(&meta, uid)
+    }
+
+    #[cfg(feature = "permissions")]
+    fn group_name(&self, gid: u32) -> AdbResult<Option<String>> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        perm::store::name_of_group(&meta, gid)
+    }
+
+    #[cfg(feature = "entry-timestamps")]
+    fn record_access(&self, akey: AKey) {
+        // A writer deposits directly into the database-wide log; `commit` persists
+        // it in this same transaction.
+        self.inner.deposit_access(&self.table, vec![(akey, timestamp_now())]);
+    }
+
+    #[cfg(feature = "entry-timestamps")]
+    fn timestamps_of(&self, akey: AKey) -> AdbResult<Option<NodeTimestamps>> {
+        let inodes = self.txn.open_table(INODES_TABLE)?;
+
+        read_timestamps(&inodes, &self.table, akey)
     }
 }
 

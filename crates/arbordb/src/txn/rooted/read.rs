@@ -12,6 +12,12 @@ use crate::{
     Value,
 };
 
+#[cfg(feature = "permissions")]
+use crate::acl::{AclClass, Rights};
+
+#[cfg(feature = "entry-timestamps")]
+use crate::inode::NodeTimestamps;
+
 /// A [`ReadTxn`] whose access paths are relative to a fixed root.
 pub struct RootedRead<'a> {
     /// The transaction every path is forwarded to.
@@ -97,6 +103,33 @@ impl<'a> RootedRead<'a> {
     /// view's root, each recomposed as a `T`.
     pub fn find<T: AData>(&self, index: &str, values: &[Scalar]) -> AdbResult<Vec<T>> {
         self.query(index).prefixed(values).run()
+    }
+
+    /// The created / modified / accessed timestamps of the vnode at `path`
+    /// (relative to the root), or `None` if it is absent or has no recorded metadata.
+    #[cfg(feature = "entry-timestamps")]
+    pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
+        self.txn.times(self.absolute(path)?)
+    }
+
+    /// The [`Rights`] the vnode at `path` (relative to the root) grants `class`.
+    #[cfg(feature = "permissions")]
+    pub fn get_acl(&self, path: impl IntoArborPath, class: AclClass) -> AdbResult<Rights> {
+        self.txn.get_acl(self.absolute(path)?, class)
+    }
+
+    /// The name of the owner of the vnode at `path` (relative to the root), or
+    /// `None` if it is absent or has no ACL.
+    #[cfg(feature = "permissions")]
+    pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
+        self.txn.owner(self.absolute(path)?)
+    }
+
+    /// The names of the groups the vnode at `path` (relative to the root) belongs
+    /// to, sorted.
+    #[cfg(feature = "permissions")]
+    pub fn groups(&self, path: impl IntoArborPath) -> AdbResult<Vec<String>> {
+        self.txn.groups(self.absolute(path)?)
     }
 
     /// Resolves `path` against this view's root into an absolute access path.

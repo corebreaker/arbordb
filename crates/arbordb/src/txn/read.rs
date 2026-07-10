@@ -1,35 +1,43 @@
 //! The opaque read transaction: a consistent snapshot of one table.
 
-use super::{query::IndexQuery, rooted::RootedRead};
+use super::{
+    query::IndexQuery,
+    grab::{self, Grab},
+    rooted::RootedRead,
+};
+
 use crate::{
-    access::{ArchivedReader, Reader},
     cache::PathCache,
-    codec::{decode, ArchivedDir, ArchivedValue},
+    codec::ArchivedDir,
     data::{AData, ARef, AValue, Scalar},
-    engine::{data_def, get_entry_kind, entry_split, EntryBytes, INDEX_TABLE, META_TABLE},
+    engine::{data_def, entry_split, EntryBytes, INDEX_TABLE, META_TABLE},
     entry::{Entry, EntryKind},
-    error::{AdbError, AdbResult},
-    index::{registry, scan, Pattern},
-    vnode::NodeKind,
-    path::{APath, IntoArborPath, IntoValuePath, VPath},
+    error::AdbResult,
+    index::{
+        registry::{self, IndexEntry},
+        scan,
+        Pattern,
+    },
+    path::{APath, IntoArborPath, IntoValuePath},
     value::Value,
     AKey,
 };
 
 use redb::{ReadOnlyTable, ReadTransaction, ReadableTable, TableError};
-use std::{collections::HashSet, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(feature = "permissions")]
 use crate::{
     acl::{AclClass, Rights},
-    inode::{read_acl, read_mac, read_sig},
+    error::AdbError,
+    inode::{read_acl, read_mac, read_sig, Acl},
     perm::{self, Principal},
 };
 
 #[cfg(feature = "entry-timestamps")]
 use crate::{
     db::DbInner,
-    inode::{NodeTimestamps, read_timestamps, INODES_TABLE},
+    inode::{read_timestamps, NodeTimestamps, INODES_TABLE},
     time::timestamp_now,
 };
 
@@ -40,7 +48,8 @@ use std::{collections::HashMap, sync::Mutex};
 ///
 /// Path resolution and hot-vnode reads are amortized through the table's shared
 /// path cache, tagged with the snapshot's `generation` so a stale entry reads as
-/// a miss.
+/// a miss. The value/filesystem read methods are thin wrappers over the shared
+/// `Grab` surface.
 pub struct ReadTxn {
     /// The underlying engine read snapshot.
     txn:        ReadTransaction,
@@ -92,7 +101,7 @@ impl ReadTxn {
     /// later by a committed write or an explicit flush). Best-effort: a poisoned
     /// lock simply skips the record.
     #[cfg(feature = "entry-timestamps")]
-    fn record_access(&self, akey: AKey) {
+    fn buffer_access(&self, akey: AKey) {
         if let Ok(mut log) = self.access_log.lock() {
             log.insert(akey, timestamp_now());
         }
@@ -109,7 +118,7 @@ impl ReadTxn {
 
     /// The entry blob for `akey`, served from the blob cache or read once from the
     /// engine (and then cached). `None` if the vnode is absent.
-    fn entry_blob<R>(&self, table: &R, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>>
+    fn blob_at<R>(&self, table: &R, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>>
     where
         R: ReadableTable<u128, EntryBytes>, {
         if let Some(blob) = self.cache.get_blob(self.generation, akey)? {
@@ -255,7 +264,7 @@ impl ReadTxn {
 
             perm::access::authorize(&self.principal, akey, acl.as_ref(), Rights::Access)?;
 
-            let Some(blob) = self.entry_blob(table, akey)? else {
+            let Some(blob) = self.blob_at(table, akey)? else {
                 return Ok(None);
             };
 
@@ -294,7 +303,7 @@ impl ReadTxn {
 
         let mut akey = AKey::ROOT;
         for name in path.names() {
-            let Some(blob) = self.entry_blob(table, akey)? else {
+            let Some(blob) = self.blob_at(table, akey)? else {
                 return Ok(None);
             };
 
@@ -317,37 +326,7 @@ impl ReadTxn {
     /// Loads a typed value from the file at `path`, or `None` if absent. Errors if
     /// `path` names a directory.
     pub fn load<T: AData>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Rights::Access)?;
-
-        #[cfg(feature = "entry-timestamps")]
-        self.record_access(akey);
-
-        let Some(blob) = self.entry_blob(&table, akey)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(akey, &blob)?;
-
-        match get_entry_kind(&blob)? {
-            EntryKind::File => {
-                // Skip the one-byte entry tag; the value payload starts at offset 1.
-                let reader = ArchivedReader::new(blob, 1);
-
-                Ok(Some(T::load(&reader, &VPath::root())?))
-            }
-            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
-        }
+        grab::load(self, path)
     }
 
     /// Loads a file stored at `path` into any [`serde::de::DeserializeOwned`] value,
@@ -357,174 +336,48 @@ impl ReadTxn {
     /// `None` if absent; errors if `path` names a directory.
     #[cfg(feature = "serde")]
     pub fn load_serde_value<T: serde::de::DeserializeOwned>(&self, path: impl IntoArborPath) -> AdbResult<Option<T>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Rights::Access)?;
-
-        #[cfg(feature = "entry-timestamps")]
-        self.record_access(akey);
-
-        let Some(blob) = self.entry_blob(&table, akey)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(akey, &blob)?;
-
-        let (kind, payload) = entry_split(&blob)?;
-        match kind {
-            EntryKind::File => Ok(Some(crate::serde::from_blob(payload)?)),
-            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
-        }
+        grab::load_serde_value(self, path)
     }
 
     /// Loads the whole dynamic [`Value`] stored in the file at `path`, or `None` if
     /// there is nothing there. Errors if `path` names a directory.
     pub fn load_value(&self, path: impl IntoArborPath) -> AdbResult<Option<Value>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Rights::Access)?;
-
-        #[cfg(feature = "entry-timestamps")]
-        self.record_access(akey);
-
-        let Some(blob) = self.entry_blob(&table, akey)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(akey, &blob)?;
-
-        let (kind, payload) = entry_split(&blob)?;
-        match kind {
-            EntryKind::File => Ok(Some(decode(payload)?)),
-            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
-        }
+        grab::load_value(self, path)
     }
 
     /// Opens a read accessor over the file at `path`, navigating its value blob
     /// zero-copy. `None` if the file is absent; errors if `path` names a directory.
     /// The accessor owns a snapshot of the blob, so it may outlive the transaction.
     pub fn fetch<A: ARef<'static>>(&self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Rights::Access)?;
-
-        #[cfg(feature = "entry-timestamps")]
-        self.record_access(akey);
-
-        let Some(blob) = self.entry_blob(&table, akey)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(akey, &blob)?;
-
-        match get_entry_kind(&blob)? {
-            EntryKind::File => {
-                let reader: Arc<dyn Reader> = Arc::new(ArchivedReader::new(blob, 1));
-
-                Ok(Some(A::open(reader, VPath::root())))
-            }
-            EntryKind::Dir => Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file"))),
-        }
+        grab::fetch(self, path)
     }
 
     /// Reads the scalar at `at` inside the file at `path`, navigating the value
     /// blob zero-copy. `None` if the file or the inner path is absent, or if the
     /// inner path does not land on a scalar leaf.
     pub fn get(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<Scalar>> {
-        let path = path.into_arbor_path()?;
-        let at = at.into_value_path()?;
-
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Rights::Access)?;
-
-        #[cfg(feature = "entry-timestamps")]
-        self.record_access(akey);
-
-        let Some(blob) = self.entry_blob(&table, akey)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(akey, &blob)?;
-
-        let (kind, payload) = entry_split(&blob)?;
-        if kind != EntryKind::File {
-            return Ok(None);
-        }
-
-        let Some(node) = ArchivedValue::new(payload)?.root().navigate(&at)? else {
-            return Ok(None);
-        };
-
-        match node.kind()? {
-            NodeKind::Leaf => Ok(Some(node.scalar()?)),
-            _ => Ok(None),
-        }
+        grab::get(self, path, at)
     }
 
     /// Reads a typed scalar at `at` inside the file at `path`.
     pub fn get_as<V: AValue>(&self, path: impl IntoArborPath, at: impl IntoValuePath) -> AdbResult<Option<V>> {
-        match self.get(path, at)? {
-            Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
-            None => Ok(None),
-        }
+        grab::get_as(self, path, at)
     }
 
     /// The filesystem kind (file or directory) at `path`, or `None` if absent.
     pub fn kind(&self, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        match self.entry_blob(&table, akey)? {
-            Some(blob) => Ok(Some(get_entry_kind(&blob)?)),
-            None => Ok(None),
-        }
+        grab::kind(self, path)
     }
 
     /// Whether a file or directory exists at `path`.
     pub fn exists(&self, path: impl IntoArborPath) -> AdbResult<bool> {
-        Ok(self.kind(path)?.is_some())
+        grab::exists(self, path)
+    }
+
+    /// Lists the direct children of the directory at `path`, as `(name, kind)`
+    /// pairs in name order. Errors if `path` names a file.
+    pub fn ls(&self, path: impl IntoArborPath) -> AdbResult<Vec<Entry>> {
+        grab::ls(self, path)
     }
 
     /// The created / modified / accessed timestamps of the vnode at `path`, or
@@ -535,22 +388,7 @@ impl ReadTxn {
     /// snapshot is buffered and persisted later (see the crate docs), so it may lag.
     #[cfg(feature = "entry-timestamps")]
     pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        let inodes = match self.txn.open_table(INODES_TABLE) {
-            Ok(inodes) => inodes,
-            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
-            Err(err) => return Err(err.into()),
-        };
-
-        read_timestamps(&inodes, &self.table, akey)
+        grab::times(self, path)
     }
 
     /// The [`Rights`] the file or directory at `path` grants `class`.
@@ -563,34 +401,7 @@ impl ReadTxn {
     /// [`groups`](Self::groups).
     #[cfg(feature = "permissions")]
     pub fn get_acl(&self, path: impl IntoArborPath, class: AclClass) -> AdbResult<Rights> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Err(AdbError::ValueNotFound(path));
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Err(AdbError::ValueNotFound(path));
-        };
-
-        let acl = match self.open_inodes()? {
-            Some(inodes) => read_acl(&inodes, &self.table, akey)?,
-            None => None,
-        };
-        let Some(acl) = acl else {
-            return Ok(Rights::None);
-        };
-
-        Ok(match class {
-            AclClass::User => acl.owner_rights(),
-            AclClass::Other => acl.other_rights(),
-            AclClass::Group(name) => {
-                let meta = self.txn.open_table(META_TABLE)?;
-                match perm::store::gid_of(&meta, &name)? {
-                    Some(gid) => acl.group_rights(gid),
-                    None => Rights::None,
-                }
-            }
-        })
+        grab::get_acl(self, path, class)
     }
 
     /// The name of the owner of the file or directory at `path`, or `None` if the
@@ -598,60 +409,14 @@ impl ReadTxn {
     /// is no longer in the store.
     #[cfg(feature = "permissions")]
     pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(None);
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(None);
-        };
-
-        let acl = match self.open_inodes()? {
-            Some(inodes) => read_acl(&inodes, &self.table, akey)?,
-            None => None,
-        };
-        let Some(acl) = acl else {
-            return Ok(None);
-        };
-
-        let meta = self.txn.open_table(META_TABLE)?;
-        let name = perm::store::name_of_user(&meta, acl.owner_uid())?.unwrap_or_else(|| acl.owner_uid().to_string());
-
-        Ok(Some(name))
+        grab::owner(self, path)
     }
 
     /// The names of the groups the file or directory at `path` belongs to, sorted;
     /// empty when the vnode is absent, has no ACL, or is in no group.
     #[cfg(feature = "permissions")]
     pub fn groups(&self, path: impl IntoArborPath) -> AdbResult<Vec<String>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(Vec::new());
-        };
-
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Ok(Vec::new());
-        };
-
-        let acl = match self.open_inodes()? {
-            Some(inodes) => read_acl(&inodes, &self.table, akey)?,
-            None => None,
-        };
-        let Some(acl) = acl else {
-            return Ok(Vec::new());
-        };
-
-        let meta = self.txn.open_table(META_TABLE)?;
-        let mut names = Vec::new();
-        for gid in acl.group_ids() {
-            if let Some(name) = perm::store::name_of_group(&meta, gid)? {
-                names.push(name);
-            }
-        }
-        names.sort();
-
-        Ok(names)
+        grab::groups(self, path)
     }
 
     /// Finds the entities an index points at, recomposing each as a `T`.
@@ -661,10 +426,10 @@ impl ReadTxn {
     /// slice matches every indexed entity. Results come back in index order
     /// (ascending by the encoded key, honoring each column's ASC/DESC). For reverse
     /// order or a subtree scope use [`query`](Self::query). Errors with
-    /// [`IndexNotFound`](AdbError::IndexNotFound) for an unknown index and
-    /// [`IndexArity`](AdbError::IndexArity) for more values than the index has columns.
+    /// [`IndexNotFound`](crate::AdbError::IndexNotFound) for an unknown index and
+    /// [`IndexArity`](crate::AdbError::IndexArity) for more values than the index has columns.
     pub fn find<T: AData>(&self, index: &str, values: &[Scalar]) -> AdbResult<Vec<T>> {
-        self.query(index).prefixed(values).run()
+        grab::find(self, index, values)
     }
 
     /// Starts an [`IndexQuery`] against `index` — a builder for prefix matches,
@@ -677,147 +442,102 @@ impl ReadTxn {
     pub fn rooted(&self, root: impl IntoArborPath) -> AdbResult<RootedRead<'_>> {
         Ok(RootedRead::new(self, root.into_arbor_path()?))
     }
+}
 
-    /// Runs a built index query: a prefix scan (exact = full prefix), optional
-    /// subtree scoping, optional reversal, then recomposes each hit as a `T`.
-    pub(crate) fn execute_query<T: AData>(
-        &self,
-        index: &str,
-        prefix: &[Scalar],
-        reverse: bool,
-        root: &APath,
-    ) -> AdbResult<Vec<T>> {
-        let entry = {
-            let meta = self.txn.open_table(META_TABLE)?;
+impl Grab for ReadTxn {
+    fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
+        let Some(table) = self.open()? else {
+            // The root always resolves, even before the data table is materialized;
+            // any named component needs the table.
+            return Ok(path.is_root().then_some(AKey::ROOT));
+        };
 
-            registry::lookup(&meta, &self.table, index)?
+        self.resolve_cached(&table, path)
+    }
+
+    fn entry_blob(&self, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>> {
+        match self.open()? {
+            Some(table) => self.blob_at(&table, akey),
+            None => Ok(None),
         }
-        .ok_or_else(|| AdbError::IndexNotFound {
-            index: index.to_string(),
-        })?;
+    }
 
-        let def = entry.def();
-        if prefix.len() > def.columns().len() {
-            return Err(AdbError::IndexArity {
-                index:    index.to_string(),
-                expected: def.columns().len(),
-                got:      prefix.len(),
-            });
-        }
+    fn lookup_index(&self, index: &str) -> AdbResult<Option<IndexEntry>> {
+        let meta = self.txn.open_table(META_TABLE)?;
 
-        // `encode_columns` zips with the columns, so a short `prefix` encodes only
-        // its leading columns — exactly the byte prefix a prefix scan needs.
-        let cols = def.encode_columns(prefix);
+        registry::lookup(&meta, &self.table, index)
+    }
 
+    fn scan_index(&self, entry: &IndexEntry, cols: &[u8]) -> AdbResult<Vec<AKey>> {
         let index_table = match self.txn.open_table(INDEX_TABLE) {
             Ok(table) => table,
             Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
             Err(err) => return Err(err.into()),
         };
 
-        let mut entities = scan::scan_prefix(&index_table, entry.id(), &cols, def.unique())?;
-
-        let Some(data) = self.open()? else {
-            return Ok(Vec::new());
-        };
-
-        // Restrict to entities at or under `root` (a rooted view scopes here).
-        if !root.is_empty() {
-            let pattern = Pattern::parse(def.pattern())?;
-            if pattern.depth() < root.len() {
-                return Ok(Vec::new());
-            }
-
-            let under: HashSet<AKey> = pattern.affected_entities(&data, root)?.into_iter().collect();
-            entities.retain(|entity| under.contains(entity));
-        }
-
-        // The scan yields ascending index order; reverse the materialized hits for
-        // descending order.
-        if reverse {
-            entities.reverse();
-        }
-
-        // Each match is addressed by its stable key; recompose it from its own blob.
-        let mut out = Vec::with_capacity(entities.len());
-        for entity in entities {
-            if let Some(value) = self.load_entity::<T>(&data, entity)? {
-                out.push(value);
-            }
-        }
-
-        Ok(out)
+        scan::scan_prefix(&index_table, entry.id(), cols, entry.def().unique())
     }
 
-    /// Recomposes the file stored under `entity` as a `T`, or `None` when the
-    /// entity is absent or is a directory (not a decodable value).
-    fn load_entity<T: AData>(&self, table: &ReadOnlyTable<u128, EntryBytes>, entity: AKey) -> AdbResult<Option<T>> {
-        // An index query silently skips entities the principal may not read.
-        #[cfg(feature = "permissions")]
-        match self.authorize_target(entity, Rights::Access) {
-            Ok(()) => {}
-            Err(AdbError::PermissionDenied(_)) => return Ok(None),
-            Err(err) => return Err(err),
-        }
-
-        let Some(blob) = self.entry_blob(table, entity)? else {
-            return Ok(None);
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(entity, &blob)?;
-
-        match get_entry_kind(&blob)? {
-            EntryKind::File => {
-                let reader = ArchivedReader::new(blob, 1);
-
-                Ok(Some(T::load(&reader, &VPath::root())?))
-            }
-            EntryKind::Dir => Ok(None),
+    fn affected_under(&self, pattern: &Pattern, root: &APath) -> AdbResult<Vec<AKey>> {
+        match self.open()? {
+            Some(data) => pattern.affected_entities(&data, root),
+            None => Ok(Vec::new()),
         }
     }
 
-    /// Lists the direct children of the directory at `path`, as `(name, kind)`
-    /// pairs in name order. Errors if `path` names a file.
-    pub fn ls(&self, path: impl IntoArborPath) -> AdbResult<Vec<Entry>> {
-        let path = path.into_arbor_path()?;
-        let Some(table) = self.open()? else {
-            return Ok(Vec::new());
-        };
+    #[cfg(feature = "permissions")]
+    fn authorize(&self, akey: AKey, needed: Rights) -> AdbResult<()> {
+        self.authorize_target(akey, needed)
+    }
 
-        let Some(akey) = self.resolve_cached(&table, &path)? else {
-            return Err(AdbError::ValueNotFound(path));
-        };
+    #[cfg(feature = "permissions")]
+    fn verify(&self, akey: AKey, blob: &[u8]) -> AdbResult<()> {
+        self.verify_integrity(akey, blob)
+    }
 
-        #[cfg(feature = "permissions")]
-        self.authorize_target(akey, Rights::Access)?;
-
-        #[cfg(feature = "entry-timestamps")]
-        self.record_access(akey);
-
-        let Some(blob) = self.entry_blob(&table, akey)? else {
-            return Ok(Vec::new()); // the root directory, not yet materialized
-        };
-
-        #[cfg(feature = "permissions")]
-        self.verify_integrity(akey, &blob)?;
-
-        let (kind, payload) = entry_split(&blob)?;
-        if kind != EntryKind::Dir {
-            return Err(AdbError::CannotAccess(format!("'{path}' is a file, not a directory")));
+    #[cfg(feature = "permissions")]
+    fn acl_of(&self, akey: AKey) -> AdbResult<Option<Acl>> {
+        match self.open_inodes()? {
+            Some(inodes) => read_acl(&inodes, &self.table, akey),
+            None => Ok(None),
         }
+    }
 
-        let dir = ArchivedDir::new(payload)?;
-        let mut out = Vec::with_capacity(dir.len()?);
-        for (name, child) in dir.entries()? {
-            let child_blob = self
-                .entry_blob(&table, child)?
-                .ok_or_else(|| AdbError::Corrupt("a directory entry points at a missing vnode".into()))?;
+    #[cfg(feature = "permissions")]
+    fn gid_of(&self, group: &str) -> AdbResult<Option<u32>> {
+        let meta = self.txn.open_table(META_TABLE)?;
 
-            out.push(Entry::new(name.to_string(), get_entry_kind(&child_blob)?));
-        }
+        perm::store::gid_of(&meta, group)
+    }
 
-        Ok(out)
+    #[cfg(feature = "permissions")]
+    fn user_name(&self, uid: u32) -> AdbResult<Option<String>> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        perm::store::name_of_user(&meta, uid)
+    }
+
+    #[cfg(feature = "permissions")]
+    fn group_name(&self, gid: u32) -> AdbResult<Option<String>> {
+        let meta = self.txn.open_table(META_TABLE)?;
+
+        perm::store::name_of_group(&meta, gid)
+    }
+
+    #[cfg(feature = "entry-timestamps")]
+    fn record_access(&self, akey: AKey) {
+        self.buffer_access(akey);
+    }
+
+    #[cfg(feature = "entry-timestamps")]
+    fn timestamps_of(&self, akey: AKey) -> AdbResult<Option<NodeTimestamps>> {
+        let inodes = match self.txn.open_table(INODES_TABLE) {
+            Ok(inodes) => inodes,
+            Err(TableError::TableDoesNotExist(_)) => return Ok(None),
+            Err(err) => return Err(err.into()),
+        };
+
+        read_timestamps(&inodes, &self.table, akey)
     }
 }
 

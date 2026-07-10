@@ -28,6 +28,43 @@ fn tmp_db() -> (tempfile::TempDir, PathBuf) {
 }
 
 #[test]
+fn rooted_views_forward_acl_reads_relative_to_the_root() {
+    let master = ArborDb::create_in_memory().unwrap().change_password("pw").unwrap();
+    let table = master.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store_value("dir/file", &leaf(1)).unwrap();
+        w.set_acl("dir/file", AclClass::Other, Rights::Access).unwrap();
+
+        // The rooted write view reads the same ACL, owner, and groups as the
+        // absolute path, on this transaction's own uncommitted state.
+        let dir = w.rooted("dir").unwrap();
+        assert_eq!(
+            dir.get_acl("file", AclClass::Other).unwrap(),
+            w.get_acl("dir/file", AclClass::Other).unwrap()
+        );
+
+        assert_eq!(dir.owner("file").unwrap(), w.owner("dir/file").unwrap());
+        assert_eq!(dir.groups("file").unwrap(), w.groups("dir/file").unwrap());
+
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+    let dir = r.rooted("dir").unwrap();
+
+    assert_eq!(dir.get_acl("file", AclClass::Other).unwrap(), Rights::Access);
+    assert_eq!(dir.owner("file").unwrap(), Some(String::from("master")));
+    assert_eq!(
+        dir.get_acl("file", AclClass::User).unwrap(),
+        r.get_acl("dir/file", AclClass::User).unwrap()
+    );
+
+    assert_eq!(dir.groups("file").unwrap(), r.groups("dir/file").unwrap());
+}
+
+#[test]
 fn change_password_promotes_an_unprotected_database_to_master() {
     let (_dir, path) = tmp_db();
 

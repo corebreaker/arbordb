@@ -10,7 +10,7 @@
 //!
 //! [`IndexArity`]: crate::AdbError::IndexArity
 
-use super::ReadTxn;
+use super::grab::{self, Grab};
 use crate::{
     data::{AData, Scalar},
     error::AdbResult,
@@ -20,8 +20,8 @@ use crate::{
 /// A pending index query: an exact or prefix match against an index, optionally
 /// reversed or subtree-scoped. Build it up, then [`run`](IndexQuery::run).
 pub struct IndexQuery<'t> {
-    /// The transaction the query runs against.
-    txn:     &'t ReadTxn,
+    /// The transaction the query runs against (a read or a write snapshot).
+    txn:     &'t dyn Grab,
     /// The name of the index to scan.
     index:   String,
     /// The leading column values to match (empty matches every entity).
@@ -33,7 +33,7 @@ pub struct IndexQuery<'t> {
 }
 
 impl<'t> IndexQuery<'t> {
-    pub(crate) fn new(txn: &'t ReadTxn, index: &str) -> Self {
+    pub(crate) fn new(txn: &'t dyn Grab, index: &str) -> Self {
         Self {
             txn,
             index: index.to_string(),
@@ -71,7 +71,6 @@ impl<'t> IndexQuery<'t> {
 
     /// Runs the query, recomposing each matched entity as a `T`.
     pub fn run<T: AData>(self) -> AdbResult<Vec<T>> {
-        self.txn
-            .execute_query(&self.index, &self.prefix, self.reverse, &self.root)
+        grab::execute_query(self.txn, &self.index, &self.prefix, self.reverse, &self.root)
     }
 }

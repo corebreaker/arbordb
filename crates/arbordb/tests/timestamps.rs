@@ -11,6 +11,30 @@ fn leaf(n: i64) -> Value {
 }
 
 #[test]
+fn rooted_views_forward_times_relative_to_the_root() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let t = db.open_table("t").unwrap();
+
+    {
+        let w = t.write().unwrap();
+        w.store_value("dir/file", &leaf(1)).unwrap();
+
+        // The rooted write view reads the same times as the absolute path, on this
+        // transaction's own uncommitted state.
+        let dir = w.rooted("dir").unwrap();
+        assert_eq!(dir.times("file").unwrap(), w.times("dir/file").unwrap());
+
+        w.commit().unwrap();
+    }
+
+    let r = t.read().unwrap();
+    let dir = r.rooted("dir").unwrap();
+    assert_eq!(dir.times("file").unwrap(), r.times("dir/file").unwrap());
+    assert!(dir.times("file").unwrap().is_some());
+    assert!(dir.times("missing").unwrap().is_none());
+}
+
+#[test]
 fn create_sets_all_three_times_together() {
     let db = ArborDb::create_in_memory().unwrap();
     let t = db.open_table("t").unwrap();

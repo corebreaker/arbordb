@@ -6,6 +6,8 @@ mod read;
 mod rooted;
 mod write;
 
+pub(crate) mod grab;
+
 pub use self::{
     query::IndexQuery,
     read::ReadTxn,

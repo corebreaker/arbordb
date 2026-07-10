@@ -11,7 +11,11 @@ use crate::{
     engine::EntryKind,
     error::{AdbError, AdbResult},
     path::{APath, IntoArborPath, IntoValuePath, VPath},
-    txn::ReadTxn,
+    txn::{
+        grab::{self, Grab},
+        ReadTxn,
+        WriteTxn,
+    },
     value::Value,
 };
 
@@ -60,6 +64,22 @@ impl<P: IntoArborPath> YamlExporter<P> for ReadTxn {
     }
 }
 
+impl<P: IntoArborPath> JsonExporter<P> for WriteTxn {
+    /// Exports the value the write transaction stores at `path` — including its own
+    /// uncommitted changes — as JSON.
+    fn export_to_json(&self, path: P, indent: Option<usize>) -> AdbResult<String> {
+        Ok(to_json(&txn_value(self, path.into_arbor_path()?)?, indent))
+    }
+}
+
+impl<P: IntoArborPath> YamlExporter<P> for WriteTxn {
+    /// Exports the value the write transaction stores at `path` — including its own
+    /// uncommitted changes — as YAML.
+    fn export_to_yaml(&self, path: P) -> AdbResult<String> {
+        Ok(to_yaml(&txn_value(self, path.into_arbor_path()?)?))
+    }
+}
+
 impl<P: IntoValuePath> JsonExporter<P> for Value {
     fn export_to_json(&self, path: P, indent: Option<usize>) -> AdbResult<String> {
         Ok(to_json(navigate(self, &path.into_value_path()?)?, indent))
@@ -72,12 +92,13 @@ impl<P: IntoValuePath> YamlExporter<P> for Value {
     }
 }
 
-/// The [`Value`] a read transaction exports for `path`: the whole value stored in
-/// the file there. A directory has no value of its own — its children are separate
-/// vnodes — so it is refused; a path that resolves to nothing is not found.
-fn txn_value(txn: &ReadTxn, path: APath) -> AdbResult<Value> {
-    match txn.kind(&path)? {
-        Some(EntryKind::File) => txn.load_value(&path)?.ok_or_else(|| AdbError::ValueNotFound(path)),
+/// The [`Value`] a transaction exports for `path`: the whole value stored in the
+/// file there. A directory has no value of its own — its children are separate
+/// vnodes — so it is refused; a path that resolves to nothing is not found. Works
+/// for a read snapshot or a writer's own uncommitted state alike.
+fn txn_value(src: &dyn Grab, path: APath) -> AdbResult<Value> {
+    match grab::kind(src, &path)? {
+        Some(EntryKind::File) => grab::load_value(src, &path)?.ok_or_else(|| AdbError::ValueNotFound(path)),
         Some(EntryKind::Dir) => Err(AdbError::CannotAccess(format!(
             "'{path}' is a directory and cannot be exported"
         ))),
