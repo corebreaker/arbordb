@@ -1,5 +1,6 @@
 //! The opaque write transaction: serialized mutation of one table.
 
+use super::rooted::RootedWrite;
 use crate::{
     access::{MemWriter, MutCursor, Writer},
     codec::{decode, encode, encode_dir, ArchivedDir},
@@ -213,6 +214,11 @@ impl WriteTxn {
         }
 
         Ok(result)
+    }
+
+    /// A view of this transaction whose access paths are relative to `root`.
+    pub fn rooted(&self, root: impl AsRef<str>) -> AdbResult<RootedWrite<'_>> {
+        Ok(RootedWrite::new(self, APath::parse(root.as_ref())?))
     }
 
     /// Commits the transaction, making its changes durable and advancing the

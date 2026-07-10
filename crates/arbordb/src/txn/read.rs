@@ -1,6 +1,7 @@
 //! The opaque read transaction: a consistent snapshot of one table.
 
 use super::query::IndexQuery;
+use super::rooted::RootedRead;
 use crate::{
     access::{ArchivedReader, Reader},
     cache::PathCache,
@@ -261,6 +262,11 @@ impl ReadTxn {
     /// reverse order, and subtree scoping.
     pub fn query(&self, index: &str) -> IndexQuery<'_> {
         IndexQuery::new(self, index)
+    }
+
+    /// A view of this transaction whose access paths are relative to `root`.
+    pub fn rooted(&self, root: impl AsRef<str>) -> AdbResult<RootedRead<'_>> {
+        Ok(RootedRead::new(self, APath::parse(root.as_ref())?))
     }
 
     /// Runs a built index query: a prefix scan (exact = full prefix), optional

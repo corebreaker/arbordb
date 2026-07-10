@@ -23,6 +23,7 @@ mod constants;
 mod datetime;
 mod db;
 mod engine;
+mod error;
 mod key;
 mod node;
 mod table;
@@ -30,7 +31,6 @@ mod value;
 
 pub mod access;
 pub mod data;
-pub mod error;
 pub mod index;
 pub mod path;
 pub mod txn;
