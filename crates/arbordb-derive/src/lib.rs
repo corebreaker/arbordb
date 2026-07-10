@@ -65,7 +65,7 @@ fn expand_struct(
     let desc_name = format_ident!("Arbor{}Desc", name);
     let field_names: Vec<String> = fields
         .iter()
-        .filter(|field| field.attrs.in_shape())
+        .filter(|field| field.attrs.in_shape() && !field.attrs.is_flatten())
         .map(|field| field.name.clone())
         .collect();
 

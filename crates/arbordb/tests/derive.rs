@@ -1062,3 +1062,56 @@ fn bound_override_drops_the_default_adata_bound() {
     assert_eq!(r.load::<Phantomish<Marker>>("x").unwrap(), Some(value));
     assert_eq!(r.get_as::<i64>("x", "value").unwrap(), Some(5));
 }
+
+// A flattened inner struct: its fields merge into the parent's node.
+#[derive(AData, Debug, Clone, PartialEq)]
+struct Meta {
+    created: i64,
+    author:  String,
+}
+
+#[derive(AData, Debug, Clone, PartialEq)]
+struct Doc {
+    title: String,
+    #[arbor(flatten)]
+    meta:  Meta,
+}
+
+#[test]
+fn flatten_merges_the_field_into_the_parent_node() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    let doc = Doc {
+        title: String::from("T"),
+        meta:  Meta {
+            created: 100,
+            author:  String::from("Ann"),
+        },
+    };
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Doc>("x", &doc).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // Round-trips.
+    assert_eq!(r.load::<Doc>("x").unwrap(), Some(doc));
+
+    // The inner fields sit directly on the parent node — there is no `meta` node.
+    assert_eq!(r.get_as::<i64>("x", "created").unwrap(), Some(100));
+    assert!(r.get("x", "author").unwrap().is_some());
+    assert!(r.get("x", "meta").unwrap().is_none());
+
+    // Desc lists only the named field; the flattened one has no node of its own.
+    assert_eq!(ArborDocDesc::FIELDS, &["title"]);
+
+    // The accessor for a flattened field opens on the parent node.
+    let view: ArborDoc<'static> = r.fetch("x").unwrap().unwrap();
+    assert_eq!(view.title().get().unwrap(), "T");
+    assert_eq!(view.meta().created().get().unwrap(), 100);
+    assert_eq!(view.meta().author().get().unwrap(), "Ann");
+}

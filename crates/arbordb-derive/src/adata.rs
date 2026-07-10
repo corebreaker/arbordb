@@ -19,6 +19,14 @@ pub(crate) fn adata_impl(
     // and `store_with` / `with` replace the field type's `AData::store`.
     let stores = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
         let ident = field.ident;
+
+        // Flattened: store the value at the parent's node, merging its fields in.
+        if field.attrs.is_flatten() {
+            return quote! {
+                ::arbordb::data::AData::store(&self.#ident, writer, at)?;
+            };
+        }
+
         let stored = &field.name;
 
         let store = match field.attrs.store_fn() {
@@ -51,6 +59,13 @@ pub(crate) fn adata_impl(
 
             return quote! {
                 #ident: #default,
+            };
+        }
+
+        // Flattened: the value occupies the parent's node, so load from `at` directly.
+        if field.attrs.is_flatten() {
+            return quote! {
+                #ident: <#ty as ::arbordb::data::AData>::load(reader, at)?,
             };
         }
 

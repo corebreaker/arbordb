@@ -2,8 +2,9 @@
 
 use crate::attr::default::FieldDefault;
 
-use proc_macro2::TokenStream;
+use proc_macro2::{Span, TokenStream};
 use quote::quote;
+use syn::spanned::Spanned;
 use syn::{parse_quote, Attribute, LitStr, Path, Token};
 
 /// Parsed field attributes.
@@ -32,6 +33,9 @@ pub(crate) struct FieldAttrs {
     /// Module supplying both `store` and `load` (`with = "module"`); sugar for the
     /// two above.
     pub(crate) with:          Option<Path>,
+    /// Flatten the field's (object) value into the parent's node — stored and
+    /// loaded at the parent's path rather than a named child.
+    pub(crate) flatten:       Option<Span>,
 }
 
 impl FieldAttrs {
@@ -109,6 +113,12 @@ impl FieldAttrs {
                     return Ok(());
                 }
 
+                if meta.path.is_ident("flatten") {
+                    out.flatten = Some(meta.path.span());
+
+                    return Ok(());
+                }
+
                 Err(meta.error("unknown arbor field attribute"))
             })?;
         }
@@ -157,8 +167,33 @@ impl FieldAttrs {
         self.with.as_ref().map(|module| parse_quote! { #module::load })
     }
 
+    /// Whether the field is flattened into the parent's node (stored and loaded at
+    /// the parent's path rather than a named child).
+    pub(crate) fn is_flatten(&self) -> bool {
+        self.flatten.is_some()
+    }
+
     /// Rejects attribute combinations that cannot both hold.
     fn check_conflicts(&self) -> syn::Result<()> {
+        // A flattened field has no named node of its own, so no other attribute applies.
+        if let Some(span) = self.flatten
+            && (self.rename.is_some()
+                || !self.aliases.is_empty()
+                || self.skip
+                || self.skip_store
+                || self.skip_load
+                || self.skip_store_if.is_some()
+                || self.default.is_some()
+                || self.with.is_some()
+                || self.store_with.is_some()
+                || self.load_with.is_some())
+        {
+            return Err(syn::Error::new(
+                span,
+                "`flatten` cannot be combined with other field attributes",
+            ));
+        }
+
         // `with` already sets both sides; an explicit `store_with`/`load_with` is redundant.
         if self.with.is_some()
             && let Some(dup) = self.store_with.as_ref().or(self.load_with.as_ref())

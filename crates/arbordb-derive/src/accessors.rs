@@ -24,13 +24,21 @@ pub(crate) fn accessors(
     let ref_getters = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
         let getter = field.ident;
         let ty = field.ty;
-        let stored = &field.name;
+
+        // A flattened field shares the parent's node: open the accessor right there.
+        let base = if field.attrs.is_flatten() {
+            quote! { self.base.clone() }
+        } else {
+            let stored = &field.name;
+
+            quote! { self.base.child_name(#stored) }
+        };
 
         quote! {
             #vis fn #getter(&self) -> <#ty as ::arbordb::data::AData>::Ref<'t> {
                 <<#ty as ::arbordb::data::AData>::Ref<'t> as ::arbordb::data::ARef<'t>>::open(
                     ::std::sync::Arc::clone(&self.reader),
-                    self.base.child_name(#stored),
+                    #base,
                 )
             }
         }
@@ -39,13 +47,21 @@ pub(crate) fn accessors(
     let mut_getters = fields.iter().filter(|field| field.attrs.in_shape()).map(|field| {
         let getter = format_ident!("{}_mut", field.ident);
         let ty = field.ty;
-        let stored = &field.name;
+
+        // A flattened field shares the parent's node: open the accessor right there.
+        let base = if field.attrs.is_flatten() {
+            quote! { self.base.clone() }
+        } else {
+            let stored = &field.name;
+
+            quote! { self.base.child_name(#stored) }
+        };
 
         quote! {
             #vis fn #getter(&self) -> <#ty as ::arbordb::data::AData>::Mut<'t> {
                 <<#ty as ::arbordb::data::AData>::Mut<'t> as ::arbordb::data::AMut<'t>>::open(
                     ::std::sync::Arc::clone(&self.writer),
-                    self.base.child_name(#stored),
+                    #base,
                 )
             }
         }
