@@ -46,6 +46,12 @@ jobs:
           name: Clippy (bignum-as-data path)
           command: "cargo clippy --all-targets --features bignum-as-data -- -D warnings"
       - run:
+          name: Clippy (entry-timestamps)
+          command: "cargo clippy --all-targets --features entry-timestamps -- -D warnings"
+      - run:
+          name: Clippy (permissions)
+          command: "cargo clippy --all-targets --features permissions -- -D warnings"
+      - run:
           name: Build docs
           command: "cargo doc --all-features --no-deps"
 
@@ -68,6 +74,12 @@ jobs:
       - run:
           name: Spot-check the bignum-as-data path
           command: "cargo test -p arbordb --features bignum-as-data"
+      - run:
+          name: Spot-check the entry-timestamps feature
+          command: "cargo test -p arbordb --features entry-timestamps"
+      - run:
+          name: Spot-check the permissions feature
+          command: "cargo test -p arbordb --features permissions"
 
   coverage:
     docker:

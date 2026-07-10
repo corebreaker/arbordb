@@ -179,6 +179,36 @@ let age: Option<i64> = alice.get_as("", "age")?; // reads users/alice's `age`
 
 ---
 
+## Entry timestamps
+
+With the `entry-timestamps` feature, every file and directory carries `created` / `modified` / `accessed` datetimes (POSIX ctime/mtime/atime style). They live **out-of-band** in a reserved side table, so the data-table format is unchanged — a binary built *without* the feature opens the same database and simply ignores them. Access times are **deferred**: a read buffers the time in memory, and it becomes durable on the next committed write or an explicit `flush_access_times()`, so a read burst never turns into a write burst.
+
+```rust
+let r = table.read()?;
+if let Some(times) = r.times("users/alice")? {
+    println!("created {}, modified {}", times.created(), times.modified());
+}
+```
+
+See [`examples/timestamps.rs`](crates/arbordb/examples/timestamps.rs).
+
+---
+
+## Permissions & integrity
+
+The `permissions` feature (which turns on `entry-timestamps`) adds user/password authentication, per-vnode access control, and tamper detection. A database starts unprotected; `change_password` on an unprotected handle **promotes** it — minting the master user, a per-user keyring, and a random database integrity key — and authenticates the caller as master.
+
+- **Authentication.** Passwords are never stored. A random integrity key `K` is wrapped (XChaCha20-Poly1305) under an Argon2id key derived from each user's password; authenticating *is* unwrapping `K`, so a wrong password fails the AEAD tag. `open_with_authentication(path, user, password)` opens and authenticates in one step; opening a protected database without credentials yields a read-only **guest**.
+- **Access control.** Every vnode has an owner, an optional group, and read/write/walk bits for owner/group/other (`walk` gates directory traversal). Changing an ACL needs `write` on the vnode — there is no separate admin right. The **master user** bypasses all ACLs; the **master group** administers users and groups (without bypassing value ACLs); the **guest** is strictly read-only.
+- **Integrity.** With `K` in hand, every value carries a keyed BLAKE3 MAC binding the value bytes *and* its ACL, and the user/group store carries a MAC bound to a monotonic epoch. An authenticated read verifies the MAC and returns `AdbError::Tampered` on a mismatch — so a program that edits the raw file with the storage engine alone, bypassing ArborDb, is detected. Writes verify before they trust or re-seal, so tampering cannot be laundered into a fresh valid tag.
+- **Administration.** `add_user` / `add_group` / `rename_*` / `assign_user_to_group` / `remove_user` (cascades the values it owns) / `remove_group` (unassigns it and strips it from every ACL); `chown` / `chgrp` / `chmod` / `get_acl`.
+
+A binary built *without* `permissions` refuses to open a protected database (`AdbError::DatabaseProtected`); one built without `entry-timestamps` opens a timestamped database and ignores the timestamps.
+
+See [`examples/permissions.rs`](crates/arbordb/examples/permissions.rs).
+
+---
+
 ## Big numbers
 
 The optional `bignum` features add arbitrary-precision `BigInt`, fixed-precision `BigFloat`, and rational `BigRational` support. Each type can be stored either as a native `Scalar` variant (`*-as-scalar`) or as composite data via a `Bytes` leaf (`*-as-data`); the index encoding orders them correctly, including across byte-length and sign boundaries.
@@ -191,6 +221,8 @@ The optional `bignum` features add arbitrary-precision `BigInt`, fixed-precision
 |---|:---:|---|---|
 | `derive` | — | `arbordb-derive` | `#[derive(AData)]` and the `#[arbor(...)]` attributes |
 | `parallel` | — | `rayon` | parallelize batch operations |
+| `entry-timestamps` | — | `chrono` | per-vnode `created` / `modified` / `accessed` datetimes (out-of-band, ignorable) |
+| `permissions` | — | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `getrandom` | user/password auth, per-vnode ACLs, keyed-MAC tamper detection |
 | `bignum` | — | both umbrellas below | every big-number type, as scalar **and** data |
 | `bignum-as-scalar` | — | the three `*-as-scalar` | big-number `Scalar` variants + `AValue` |
 | `bignum-as-data` | — | the three `*-as-data` | big-number `AData` impls (a `Bytes` leaf when not also a scalar) |
@@ -220,9 +252,11 @@ Nothing is on by default.
 | Big-number scalar/data feature matrix (`bignum`) | ✅ |
 | Rooted views | ✅ |
 | Dynamic `Value` document type | ✅ |
-| Documentation, runnable examples | 🚧 |
-| Criterion benchmark suite | 🚧 |
-| Continuous integration | 🚧 |
+| Entry timestamps (`entry-timestamps`) | ✅ |
+| Permissions, ACLs, keyed-MAC integrity (`permissions`) | ✅ |
+| Documentation, runnable examples | ✅ |
+| Criterion benchmark suite | ✅ |
+| Continuous integration | ✅ |
 | JSON / YAML export | ⏳ deferred |
 
 ArborDb is under active development: the capabilities marked ✅ are implemented and tested, but the on-disk format and public API are not yet stable and the crate is not yet released.
