@@ -32,7 +32,7 @@ pub(crate) use self::{
 #[cfg(feature = "permissions")]
 pub(crate) use self::{
     acl::Acl,
-    functions::{read_acl, read_mac, read_sig, seal_mac, seal_sig, set_acl, set_default_acl, strip_group},
+    functions::{read_acl, read_meta, seal_mac, seal_sig, set_acl, set_default_acl, stamp_and_seal, strip_group},
 };
 
 pub use datetime::NodeTimestamps;

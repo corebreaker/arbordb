@@ -18,9 +18,12 @@ use super::table::{cascade_delete, collect_owned, unlink_child};
 #[cfg(feature = "permissions")]
 use crate::{
     acl::Rights,
-    inode::{read_acl, read_mac, seal_mac, seal_sig, set_acl, set_default_acl, Acl},
+    inode::{read_acl, read_meta, seal_mac, seal_sig, set_acl, Acl},
     perm::{self, Principal},
 };
+
+#[cfg(not(feature = "permissions"))]
+use super::DirBuffer;
 
 use redb::ReadableTable;
 use std::collections::BTreeMap;
@@ -46,6 +49,13 @@ pub(in super::super) struct Context<'txn, 'a> {
     /// One timestamp shared by every vnode this mutation touches.
     #[cfg(feature = "entry-timestamps")]
     now: i64,
+
+    /// The transaction's write-back cache of dirty directories. Directory reads
+    /// consult it first and directory writes buffer into it (flushed at commit),
+    /// turning a bulk load under one parent from O(N²) into O(N). Absent under
+    /// `permissions`, where directory reads must verify and ACL checks see each write.
+    #[cfg(not(feature = "permissions"))]
+    dirs: &'a DirBuffer,
 
     /// The identity performing the mutation; drives ACL enforcement.
     #[cfg(feature = "permissions")]
@@ -76,28 +86,31 @@ impl<'txn, 'a> Context<'txn, 'a> {
         self.principal
     }
 
-    /// Bundles the data table with the per-vnode metadata table (this build has
-    /// timestamps but no permission system, so there is no principal).
+    /// Bundles the data table with the per-vnode metadata table and the directory
+    /// write-back cache (this build has timestamps but no permission system).
     #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
     pub(in super::super) fn new(
         data: &'a mut DataTable<'txn>,
         inodes: &'a mut InodeTable<'txn>,
         table: &'a str,
+        dirs: &'a DirBuffer,
     ) -> Self {
         Self {
             data,
             inodes,
             table,
             now: timestamp_now(),
+            dirs,
         }
     }
 
-    /// Bundles the data table alone (the metadata table exists only under the
-    /// `entry-timestamps` feature).
+    /// Bundles the data table with the directory write-back cache (the metadata table
+    /// exists only under the `entry-timestamps` feature).
     #[cfg(not(feature = "entry-timestamps"))]
-    pub(in super::super) fn new(data: &'a mut DataTable<'txn>) -> Self {
+    pub(in super::super) fn new(data: &'a mut DataTable<'txn>, dirs: &'a DirBuffer) -> Self {
         Self {
             data,
+            dirs,
         }
     }
 
@@ -106,13 +119,29 @@ impl<'txn, 'a> Context<'txn, 'a> {
     pub(super) fn put_entry(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
         self.data.insert(u128::from(akey), entry)?;
 
-        #[cfg(feature = "entry-timestamps")]
+        // Timestamps-only build: record the write time in the inode.
+        #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
         inode::touch(self.inodes, self.table, akey, self.now)?;
 
+        // Protected build: an authenticated user stamps the timestamps, the default
+        // ACL, and both integrity tags in one read-modify-write of the inode; an
+        // unrestricted handle (an unprotected database) only records the write time.
         #[cfg(feature = "permissions")]
-        {
-            self.stamp_default_acl(akey)?;
-            self.seal_integrity(akey, entry)?;
+        match self.principal {
+            Principal::User(session) => {
+                let table = self.table;
+                let now = self.now;
+                // The root carries no ACL; every other fresh vnode is owned by the writer.
+                let owner = (akey != AKey::ROOT).then_some(session.uid());
+
+                inode::stamp_and_seal(self.inodes, table, akey, now, owner, |acl| {
+                    (
+                        perm::integrity::mac_value(session.key(), table, akey, entry, acl),
+                        perm::integrity::sign_value(session.signer(), table, akey, entry, acl),
+                    )
+                })?;
+            }
+            _ => inode::touch(self.inodes, self.table, akey, self.now)?,
         }
 
         Ok(())
@@ -124,6 +153,10 @@ impl<'txn, 'a> Context<'txn, 'a> {
 
         #[cfg(feature = "entry-timestamps")]
         inode::forget(self.inodes, self.table, akey)?;
+
+        // Drop any buffered copy so the commit-time flush never resurrects it.
+        #[cfg(not(feature = "permissions"))]
+        self.dirs.forget(akey);
 
         Ok(())
     }
@@ -140,6 +173,20 @@ impl<'txn, 'a> Context<'txn, 'a> {
         }
 
         Ok(entry)
+    }
+
+    /// Whether vnode `akey` exists — a bare presence probe that neither copies the
+    /// entry nor verifies it (any actual read of its bytes still verifies). Lets a
+    /// caller that only needs "is it there?" skip materializing a whole blob.
+    pub(super) fn has_entry(&self, akey: AKey) -> AdbResult<bool> {
+        // A directory mutated in this transaction lives in the write-back cache, which
+        // is authoritative until the commit-time flush.
+        #[cfg(not(feature = "permissions"))]
+        if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            return Ok(true);
+        }
+
+        Ok(self.data.get(u128::from(akey))?.is_some())
     }
 
     /// Fetches `akey`'s entry, verifies its integrity tag (for a keyed principal),
@@ -165,6 +212,16 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// The child of directory `parent` named `name`, verifying `parent`'s
     /// integrity first. `None` if `parent` is absent, is a file, or has no such child.
     pub(super) fn child(&self, parent: AKey, name: &str) -> AdbResult<Option<AKey>> {
+        // A directory buffered in this transaction is authoritative; read it there.
+        #[cfg(not(feature = "permissions"))]
+        if self.dirs.dirty()
+            && let Some(found) = self
+                .dirs
+                .read(|dirs| dirs.get(&parent).map(|children| children.get(name).copied()))
+        {
+            return Ok(found);
+        }
+
         Ok(self
             .with_entry(parent, |entry| {
                 let (kind, payload) = entry_split(entry)?;
@@ -180,12 +237,26 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// The filesystem kind of `akey`, verifying its integrity first. `None` if
     /// the vnode is absent.
     pub(super) fn kind(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
+        // A buffered vnode is always a directory (only directories buffer).
+        #[cfg(not(feature = "permissions"))]
+        if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            return Ok(Some(EntryKind::Dir));
+        }
+
         self.with_entry(akey, |entry| Ok(entry_split(entry)?.0))
     }
 
     /// Directory `akey`'s children as an owned map, verifying its integrity first
     /// (empty if the vnode is absent). Errors if `akey` is a file.
     pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<String, AKey>> {
+        // A directory buffered in this transaction is authoritative.
+        #[cfg(not(feature = "permissions"))]
+        if self.dirs.dirty()
+            && let Some(children) = self.dirs.read(|dirs| dirs.get(&akey).cloned())
+        {
+            return Ok(children);
+        }
+
         let children = self.with_entry(akey, |entry| {
             let (kind, payload) = entry_split(entry)?;
             if kind != EntryKind::Dir {
@@ -204,6 +275,96 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(children.unwrap_or_default())
     }
 
+    /// The child keys to recurse into when cascade-deleting `akey`, read borrowed
+    /// (and verified) in one shot: `None` if the vnode is absent, an empty vec for a
+    /// file, and its children for a directory. Deleting a file therefore never copies
+    /// its (possibly large) blob just to learn it has no children.
+    pub(super) fn cascade_children(&self, akey: AKey) -> AdbResult<Option<Vec<AKey>>> {
+        // A buffered directory is authoritative: yield its cached children.
+        #[cfg(not(feature = "permissions"))]
+        if self.dirs.dirty()
+            && let Some(children) = self
+                .dirs
+                .read(|dirs| dirs.get(&akey).map(|m| m.values().copied().collect::<Vec<_>>()))
+        {
+            return Ok(Some(children));
+        }
+
+        self.with_entry(akey, |entry| {
+            let (kind, payload) = entry_split(entry)?;
+            match kind {
+                EntryKind::File => Ok(Vec::new()),
+                EntryKind::Dir => Ok(ArchivedDir::new(payload)?
+                    .entries()?
+                    .into_iter()
+                    .map(|(_, child)| child)
+                    .collect()),
+            }
+        })
+    }
+
+    /// Whether directory writes should buffer in the write-back cache (an index-free
+    /// database) rather than re-encode and write the blob on every link.
+    #[cfg(not(feature = "permissions"))]
+    pub(super) fn buffering(&self) -> bool {
+        self.dirs.active()
+    }
+
+    /// Buffers `map` as directory `akey`'s whole child-map (a fresh or replaced
+    /// directory), to be encoded and written once at commit.
+    #[cfg(not(feature = "permissions"))]
+    pub(super) fn buffer_dir(&self, akey: AKey, map: BTreeMap<String, AKey>) {
+        self.dirs.write(|dirs| {
+            dirs.insert(akey, map);
+        });
+    }
+
+    /// Adds a `name → child` link to directory `parent` in the write-back cache,
+    /// seeding it from the engine on first touch. A bulk of links then mutates one
+    /// in-memory map (O(1) each) instead of re-encoding the directory blob per link.
+    #[cfg(not(feature = "permissions"))]
+    pub(super) fn dir_link(&self, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
+        // Load the parent's current children on its first touch this transaction.
+        let seed = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&parent)) {
+            None
+        } else {
+            Some(self.dir_children(parent)?)
+        };
+
+        self.dirs.write(|dirs| {
+            let children = match seed {
+                Some(loaded) => dirs.entry(parent).or_insert(loaded),
+                None => dirs.get_mut(&parent).expect("the parent is buffered"),
+            };
+
+            children.insert(name.to_string(), child);
+        });
+
+        Ok(())
+    }
+
+    /// Removes a `name` link from directory `parent` in the write-back cache, seeding
+    /// it from the engine on first touch.
+    #[cfg(not(feature = "permissions"))]
+    pub(super) fn dir_unlink(&self, parent: AKey, name: &str) -> AdbResult<()> {
+        let seed = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&parent)) {
+            None
+        } else {
+            Some(self.dir_children(parent)?)
+        };
+
+        self.dirs.write(|dirs| {
+            let children = match seed {
+                Some(loaded) => dirs.entry(parent).or_insert(loaded),
+                None => dirs.get_mut(&parent).expect("the parent is buffered"),
+            };
+
+            children.remove(name);
+        });
+
+        Ok(())
+    }
+
     /// Verifies `akey`'s integrity tag over `entry` and its current ACL, erroring
     /// with [`AdbError::Tampered`] on a mismatch. A no-op for an unrestricted
     /// handle or the keyless guest (a non-protected database has no integrity key).
@@ -213,13 +374,12 @@ impl<'txn, 'a> Context<'txn, 'a> {
             return Ok(());
         };
 
-        let acl = read_acl(&*self.inodes, self.table, akey)?
-            .map(|acl| acl.encode())
-            .unwrap_or_default();
-        let stored = read_mac(&*self.inodes, self.table, akey)?;
+        // The ACL and MAC come from one inode decode (the tag binds both).
+        let (acl, mac, _sig) = read_meta(&*self.inodes, self.table, akey)?;
+        let acl = acl.map(|acl| acl.encode()).unwrap_or_default();
         let expected = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
 
-        match stored {
+        match mac {
             Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
             _ => Err(AdbError::Tampered(format!(
                 "integrity check failed for a vnode in table '{}'",
@@ -269,27 +429,19 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(Some(akey))
     }
 
-    /// Resolves `path` with no access checks (this build has no permission system).
+    /// Resolves `path` with no access checks (this build has no permission system),
+    /// walking through [`child`](Self::child) so buffered directories are honoured.
     #[cfg(not(feature = "permissions"))]
     pub(super) fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
-        crate::engine::resolve(&*self.data, path)
-    }
-
-    /// Stamps the default ACL (owner = the authenticated user, its first group)
-    /// on a freshly created vnode; a no-op for an unrestricted handle or when an
-    /// ACL is already present, so an overwrite preserves it.
-    #[cfg(feature = "permissions")]
-    fn stamp_default_acl(&mut self, akey: AKey) -> AdbResult<()> {
-        // The root is special and carries no ACL.
-        if akey == AKey::ROOT {
-            return Ok(());
+        let mut akey = AKey::ROOT;
+        for name in path.names() {
+            match self.child(akey, name.as_str())? {
+                Some(child) => akey = child,
+                None => return Ok(None),
+            }
         }
 
-        if let Principal::User(session) = self.principal {
-            set_default_acl(self.inodes, self.table, akey, session.uid())?;
-        }
-
-        Ok(())
+        Ok(Some(akey))
     }
 
     /// Reads `akey`'s ACL, if it has one.
@@ -302,28 +454,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
     #[cfg(feature = "permissions")]
     pub(super) fn write_acl(&mut self, akey: AKey, acl: Acl) -> AdbResult<()> {
         set_acl(self.inodes, self.table, akey, acl)
-    }
-
-    /// Seals `akey`'s integrity tags over its entry bytes and current ACL: the
-    /// keyed MAC an authenticated reader verifies *and* the signature a guest
-    /// verifies. A no-op for an unrestricted handle — a non-protected database has
-    /// no keys, so nothing is sealed. Only an authenticated user reaches here (a
-    /// guest cannot write).
-    #[cfg(feature = "permissions")]
-    fn seal_integrity(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
-        if let Principal::User(session) = self.principal {
-            let acl = read_acl(&*self.inodes, self.table, akey)?
-                .map(|acl| acl.encode())
-                .unwrap_or_default();
-
-            let mac = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
-            seal_mac(self.inodes, self.table, akey, mac)?;
-
-            let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, entry, &acl);
-            seal_sig(self.inodes, self.table, akey, sig)?;
-        }
-
-        Ok(())
     }
 
     /// Re-seals `akey`'s integrity tags after an ACL change: the entry bytes are
@@ -342,7 +472,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
             let mac = perm::integrity::mac_value(session.key(), self.table, akey, &entry, &acl);
             seal_mac(self.inodes, self.table, akey, mac)?;
 
-            let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, &entry, &acl);
+            let sig = perm::integrity::sign_value(session.signer(), self.table, akey, &entry, &acl);
             seal_sig(self.inodes, self.table, akey, sig)?;
         }
 

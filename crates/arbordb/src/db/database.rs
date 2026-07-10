@@ -228,7 +228,7 @@ impl ArborDb {
 
         Ok(Self {
             inner:     self.inner,
-            principal: Arc::new(Principal::User(session)),
+            principal: Arc::new(Principal::User(Box::new(session))),
         })
     }
 
@@ -252,7 +252,7 @@ impl ArborDb {
 
                 return Ok(Self {
                     inner:     Arc::clone(&self.inner),
-                    principal: Arc::new(Principal::User(session)),
+                    principal: Arc::new(Principal::User(Box::new(session))),
                 });
             }
             Principal::User(session) => {

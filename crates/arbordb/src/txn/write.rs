@@ -39,12 +39,18 @@ use crate::{
     acl::{AclClass, Rights},
     codec::ArchivedDir,
     engine::EntryBytes,
-    inode::{read_acl, read_mac, Acl},
+    inode::{read_acl, read_meta, Acl},
     perm::{self, Principal},
 };
 
 #[cfg(feature = "permissions")]
 use redb::ReadableTable;
+
+#[cfg(not(feature = "permissions"))]
+use super::context::DirBuffer;
+
+#[cfg(not(feature = "permissions"))]
+use crate::{codec::encode_dir, engine::dir_entry};
 
 /// Deletes every value owned by `uid` in `table`, within `txn`, bypassing ACL
 /// checks (the caller must already be an authorized administrator). Used by user
@@ -67,6 +73,12 @@ pub struct WriteTxn {
     /// The database-wide shared state (for the generation bump on commit).
     inner: Arc<DbInner>,
 
+    /// The write-back cache of dirty directories, flushed to the engine at commit.
+    /// Buffering is on only for an index-free database (so index maintenance always
+    /// reads current state); it turns a bulk load under one parent into O(N).
+    #[cfg(not(feature = "permissions"))]
+    dirs: DirBuffer,
+
     /// The identity performing the writes; drives ACL enforcement.
     #[cfg(feature = "permissions")]
     principal: Arc<Principal>,
@@ -79,13 +91,61 @@ impl WriteTxn {
         inner: Arc<DbInner>,
         #[cfg(feature = "permissions")] principal: Arc<Principal>,
     ) -> Self {
+        // Buffer directory writes only when no index needs the engine kept current.
+        #[cfg(not(feature = "permissions"))]
+        let dirs = DirBuffer::new(!inner.has_any_index());
+
         Self {
             txn,
             table,
             inner,
+            #[cfg(not(feature = "permissions"))]
+            dirs,
             #[cfg(feature = "permissions")]
             principal,
         }
+    }
+
+    /// The filesystem kind of `akey`, consulting the write-back cache (a buffered
+    /// vnode is always a directory) before the engine. `None` if absent.
+    #[cfg(not(feature = "permissions"))]
+    fn kind_of(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
+        if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            return Ok(Some(EntryKind::Dir));
+        }
+
+        let table = self.txn.open_table(data_def(&self.table))?;
+
+        fetch_entry_kind(&table, akey)
+    }
+
+    /// Resolves `path` for a read on this transaction, consulting the write-back
+    /// cache per directory so the walk sees this transaction's own buffered links
+    /// before the (stale-until-flush) engine.
+    #[cfg(not(feature = "permissions"))]
+    fn resolve_buffered<R>(&self, data: &R, path: &APath) -> AdbResult<Option<AKey>>
+    where
+        R: redb::ReadableTable<u128, crate::engine::EntryBytes>, {
+        let mut akey = AKey::ROOT;
+        for name in path.names() {
+            // A buffered parent is authoritative; otherwise walk the engine.
+            let next = if self.dirs.dirty()
+                && let Some(found) = self
+                    .dirs
+                    .read(|dirs| dirs.get(&akey).map(|children| children.get(name.as_str()).copied()))
+            {
+                found
+            } else {
+                crate::engine::child_of(data, akey, name.as_str())?
+            };
+
+            match next {
+                Some(child) => akey = child,
+                None => return Ok(None),
+            }
+        }
+
+        Ok(Some(akey))
     }
 
     /// Stores a typed value as a file at `path`, creating parent directories as
@@ -171,18 +231,34 @@ impl WriteTxn {
         // Presence check without decoding the value — resolve the vnode and read its
         // kind alone. The resolved key is handed to the cursor as a hint, so an
         // in-place scalar patch through it need not walk the directory tree again.
-        let akey = {
+        //
+        // The resolution is cache-aware, so a file stored earlier in this same
+        // transaction — its parent directory still buffered, not yet in the engine —
+        // is found here too. (Under `permissions` there is no buffering, and this is
+        // the original raw-engine walk.)
+        #[cfg(not(feature = "permissions"))]
+        let resolved = self.resolve(&apath)?;
+        #[cfg(not(feature = "permissions"))]
+        let kind = match resolved {
+            Some(akey) => self.kind_of(akey)?,
+            None => None,
+        };
+
+        #[cfg(feature = "permissions")]
+        let (resolved, kind) = {
             let table = self.txn.open_table(data_def(&self.table))?;
             match resolve(&table, &apath)? {
-                Some(akey) => match fetch_entry_kind(&table, akey)? {
-                    Some(EntryKind::File) => akey,
-                    Some(EntryKind::Dir) => {
-                        return Err(AdbError::CannotAccess(format!("'{apath}' is a directory, not a file")));
-                    }
-                    None => return Ok(None),
-                },
-                None => return Ok(None),
+                Some(akey) => (Some(akey), fetch_entry_kind(&table, akey)?),
+                None => (None, None),
             }
+        };
+
+        let akey = match (resolved, kind) {
+            (Some(akey), Some(EntryKind::File)) => akey,
+            (Some(_), Some(EntryKind::Dir)) => {
+                return Err(AdbError::CannotAccess(format!("'{apath}' is a directory, not a file")));
+            }
+            _ => return Ok(None),
         };
 
         let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath, akey));
@@ -206,31 +282,42 @@ impl WriteTxn {
         self.verify_with(&inodes, akey, entry)
     }
 
-    /// Verifies `akey`'s keyed MAC over `entry` and its ACL, using an already-open
-    /// `$inodes` handle so a caller mid-walk need not reopen the table (a write
-    /// transaction refuses a second open of the same table). A no-op unless this
-    /// handle is an authenticated user — the only writer that holds the key.
+    /// Checks `akey`'s keyed MAC over `entry`, given its ACL and MAC the caller has
+    /// **already decoded**. A no-op unless this handle is an authenticated user — the
+    /// only writer that holds the key (a guest cannot write).
     #[cfg(feature = "permissions")]
-    fn verify_with<R>(&self, inodes: &R, akey: AKey, entry: &[u8]) -> AdbResult<()>
-    where
-        R: ReadableTable<&'static [u8], &'static [u8]>, {
+    fn check_mac(&self, akey: AKey, entry: &[u8], acl: Option<&Acl>, mac: Option<[u8; 32]>) -> AdbResult<()> {
         let Principal::User(session) = self.principal.as_ref() else {
             return Ok(());
         };
 
-        let acl = read_acl(inodes, &self.table, akey)?
-            .map(|acl| acl.encode())
-            .unwrap_or_default();
-        let stored = read_mac(inodes, &self.table, akey)?;
+        let acl = acl.map(|acl| acl.encode()).unwrap_or_default();
         let expected = perm::integrity::mac_value(session.key(), &self.table, akey, entry, &acl);
 
-        match stored {
+        match mac {
             Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
             _ => Err(AdbError::Tampered(format!(
                 "integrity check failed for a vnode in table '{}'",
                 self.table
             ))),
         }
+    }
+
+    /// Verifies `akey`'s keyed MAC over `entry`, reading its ACL and MAC from an
+    /// already-open `$inodes` handle in a **single** decode (a write transaction
+    /// refuses a second open of the same table, so the handle is threaded through).
+    /// A no-op unless this handle is an authenticated user.
+    #[cfg(feature = "permissions")]
+    fn verify_with<R>(&self, inodes: &R, akey: AKey, entry: &[u8]) -> AdbResult<()>
+    where
+        R: ReadableTable<&'static [u8], &'static [u8]>, {
+        if !matches!(self.principal.as_ref(), Principal::User(_)) {
+            return Ok(());
+        }
+
+        let (acl, mac, _sig) = read_meta(inodes, &self.table, akey)?;
+
+        self.check_mac(akey, entry, acl.as_ref(), mac)
     }
 
     /// Whether ACL enforcement applies — a protected database written as an
@@ -251,7 +338,9 @@ impl WriteTxn {
 
         let mut akey = AKey::ROOT;
         for name in path.names() {
-            let acl = read_acl(&inodes, &self.table, akey)?;
+            // One inode decode per directory: the ACL authorizes the traversal and,
+            // with the MAC, verifies the directory blob just below.
+            let (acl, mac, _sig) = read_meta(&inodes, &self.table, akey)?;
             perm::access::authorize(&self.principal, akey, acl.as_ref(), Rights::Access)?;
 
             let Some(entry) = read_entry(data, akey)? else {
@@ -260,7 +349,7 @@ impl WriteTxn {
 
             // A tampered directory blob could redirect a name to another vnode, so
             // verify each directory descended through.
-            self.verify_with(&inodes, akey, &entry)?;
+            self.check_mac(akey, &entry, acl.as_ref(), mac)?;
 
             let (kind, payload) = entry_split(&entry)?;
             if kind != EntryKind::Dir {
@@ -311,9 +400,9 @@ impl WriteTxn {
         #[cfg(feature = "permissions")]
         let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
         #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-        let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, &self.dirs);
         #[cfg(not(feature = "entry-timestamps"))]
-        let mut ctx = Context::new(&mut data);
+        let mut ctx = Context::new(&mut data, &self.dirs);
 
         table::ensure_dir(&mut ctx, &path)?;
 
@@ -495,11 +584,30 @@ impl WriteTxn {
             #[cfg(feature = "permissions")]
             let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
             #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-            let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, &self.dirs);
             #[cfg(not(feature = "entry-timestamps"))]
-            let mut ctx = Context::new(&mut data);
+            let mut ctx = Context::new(&mut data, &self.dirs);
 
             return apply(&mut ctx);
+        }
+
+        // Index maintenance below reads the engine directly, so the engine must
+        // reflect the current directory structure: flush any buffered directories
+        // (from earlier writes in this transaction) and stop buffering for the rest
+        // of it. A no-op when buffering is already off (the usual indexed case).
+        #[cfg(not(feature = "permissions"))]
+        {
+            let pending = self.dirs.take_and_disable();
+
+            #[cfg(feature = "entry-timestamps")]
+            let now = timestamp_now();
+
+            for (akey, map) in pending {
+                data.insert(u128::from(akey), dir_entry(&encode_dir(&map)).as_slice())?;
+
+                #[cfg(feature = "entry-timestamps")]
+                inode::touch(&mut inodes, &self.table, akey, now)?;
+            }
         }
 
         let mut index = self.txn.open_table(INDEX_TABLE)?;
@@ -514,9 +622,9 @@ impl WriteTxn {
             #[cfg(feature = "permissions")]
             let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
             #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-            let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, &self.dirs);
             #[cfg(not(feature = "entry-timestamps"))]
-            let mut ctx = Context::new(&mut data);
+            let mut ctx = Context::new(&mut data, &self.dirs);
 
             apply(&mut ctx)?
         };
@@ -641,8 +749,35 @@ impl WriteTxn {
         let WriteTxn {
             txn,
             inner,
+            #[cfg(not(feature = "permissions"))]
+            table,
+            #[cfg(not(feature = "permissions"))]
+            dirs,
             ..
         } = self;
+
+        // Flush the write-back cache: every directory mutated in this transaction is
+        // encoded and written once here, rather than on each child link.
+        #[cfg(not(feature = "permissions"))]
+        {
+            let pending = dirs.take();
+            if !pending.is_empty() {
+                let mut data = txn.open_table(data_def(&table))?;
+
+                #[cfg(feature = "entry-timestamps")]
+                let mut inodes = txn.open_table(INODES_TABLE)?;
+                #[cfg(feature = "entry-timestamps")]
+                let now = timestamp_now();
+
+                for (akey, map) in pending {
+                    let entry = dir_entry(&encode_dir(&map));
+                    data.insert(u128::from(akey), entry.as_slice())?;
+
+                    #[cfg(feature = "entry-timestamps")]
+                    inode::touch(&mut inodes, &table, akey, now)?;
+                }
+            }
+        }
 
         // Persist any buffered read access times in this same transaction.
         #[cfg(feature = "entry-timestamps")]
@@ -678,10 +813,28 @@ impl Grab for WriteTxn {
             return self.resolve_enforced(&data, path);
         }
 
-        crate::engine::resolve(&data, path)
+        // A reader on this transaction must see directories buffered by its own
+        // uncommitted writes, so the walk consults the write-back cache per segment.
+        #[cfg(feature = "permissions")]
+        let resolved = crate::engine::resolve(&data, path);
+        #[cfg(not(feature = "permissions"))]
+        let resolved = self.resolve_buffered(&data, path);
+
+        resolved
     }
 
     fn entry_blob(&self, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>> {
+        // A directory buffered in this transaction has no committed blob yet; encode
+        // its cached child-map so a read (a `kind`/`ls` probe) sees the current state.
+        #[cfg(not(feature = "permissions"))]
+        if self.dirs.dirty()
+            && let Some(blob) = self
+                .dirs
+                .read(|dirs| dirs.get(&akey).map(|children| dir_entry(&encode_dir(children))))
+        {
+            return Ok(Some(Arc::new(blob)));
+        }
+
         let data = self.txn.open_table(data_def(&self.table))?;
 
         Ok(read_entry(&data, akey)?.map(Arc::new))
@@ -922,11 +1075,9 @@ mod tests {
             w.store_value("users/alice", &user(30)).unwrap();
 
             // The key the file actually resolves to — the hint a mutable accessor
-            // would carry. The edit lands through it.
-            let akey = {
-                let data = w.txn.open_table(data_def("t")).unwrap();
-                resolve(&data, &alice).unwrap().unwrap()
-            };
+            // would carry. Resolved through the transaction's own (cache-aware) surface
+            // so it sees the just-stored file whose parent directory is still buffered.
+            let akey = Grab::resolve(&w, &alice).unwrap().unwrap();
 
             w.put_scalar_at(&alice, Some(akey), &age, Scalar::I64(31)).unwrap();
             w.commit().unwrap();

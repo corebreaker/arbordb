@@ -9,4 +9,10 @@ mod ctx;
 
 pub(super) mod table;
 
+#[cfg(not(feature = "permissions"))]
+mod dir_cache;
+
 pub(super) use ctx::Context;
+
+#[cfg(not(feature = "permissions"))]
+pub(super) use dir_cache::DirBuffer;

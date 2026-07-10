@@ -30,7 +30,7 @@ use std::sync::Arc;
 use crate::{
     acl::{AclClass, Rights},
     error::AdbError,
-    inode::{read_acl, read_mac, read_sig, Acl},
+    inode::{read_acl, read_meta, Acl},
     perm::{self, Principal},
 };
 
@@ -182,36 +182,26 @@ impl ReadTxn {
         perm::access::authorize(&self.principal, akey, acl.as_ref(), needed)
     }
 
-    /// Verifies vnode `akey`'s integrity tag over `blob` and its ACL, using an
-    /// already-open `$inodes` handle. A no-op unless the reader holds the integrity
-    /// key: only an authenticated user can verify — the guest has no key, so a guest
-    /// read is unverified (and the guest is read-only anyway).
+    /// Checks vnode `akey`'s integrity tag over `blob`, given metadata the caller has
+    /// **already decoded** (its ACL and both tags, read once). An authenticated
+    /// reader checks the fast keyed MAC; a keyless guest checks the Ed25519 signature
+    /// with the public key; an unrestricted handle has nothing to verify.
     #[cfg(feature = "permissions")]
-    fn verify_blob(
+    fn check_tag(
         &self,
-        inodes: Option<&ReadOnlyTable<&'static [u8], &'static [u8]>>,
         akey: AKey,
         blob: &[u8],
+        acl: Option<&Acl>,
+        mac: Option<[u8; 32]>,
+        sig: Option<[u8; crate::crypto::SIG_LEN]>,
     ) -> AdbResult<()> {
-        // Both tags bind the ACL, so read it once for whichever check the principal
-        // runs. (An unrestricted handle never reaches here — it resolves unenforced.)
-        let acl = match inodes {
-            Some(table) => read_acl(table, &self.table, akey)?
-                .map(|acl| acl.encode())
-                .unwrap_or_default(),
-            None => Vec::new(),
-        };
-
         match self.principal.as_ref() {
             // An authenticated reader verifies the fast keyed MAC.
             Principal::User(session) => {
-                let stored = inodes
-                    .map(|table| read_mac(table, &self.table, akey))
-                    .transpose()?
-                    .flatten();
+                let acl = acl.map(|acl| acl.encode()).unwrap_or_default();
                 let expected = perm::integrity::mac_value(session.key(), &self.table, akey, blob, &acl);
 
-                match stored {
+                match mac {
                     Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
                     _ => Err(self.tampered()),
                 }
@@ -222,12 +212,9 @@ impl ReadTxn {
             Principal::Guest {
                 pubkey,
             } => {
-                let stored = inodes
-                    .map(|table| read_sig(table, &self.table, akey))
-                    .transpose()?
-                    .flatten();
+                let acl = acl.map(|acl| acl.encode()).unwrap_or_default();
 
-                match stored {
+                match sig {
                     Some(sig) if perm::integrity::verify_value(pubkey, &self.table, akey, blob, &acl, &sig) => Ok(()),
                     _ => Err(self.tampered()),
                 }
@@ -236,6 +223,30 @@ impl ReadTxn {
             // An unrestricted handle (a non-protected database) has nothing to verify.
             Principal::Unrestricted => Ok(()),
         }
+    }
+
+    /// Verifies vnode `akey`'s integrity tag over `blob`, reading its ACL and tag from
+    /// an already-open `$inodes` handle in a **single** decode. A no-op for an
+    /// unrestricted handle — the guest has no key of its own, so it verifies via the
+    /// public-key signature (and is read-only anyway).
+    #[cfg(feature = "permissions")]
+    fn verify_blob(
+        &self,
+        inodes: Option<&ReadOnlyTable<&'static [u8], &'static [u8]>>,
+        akey: AKey,
+        blob: &[u8],
+    ) -> AdbResult<()> {
+        // An unrestricted handle has nothing to verify — skip the inode read entirely.
+        if matches!(self.principal.as_ref(), Principal::Unrestricted) {
+            return Ok(());
+        }
+
+        let (acl, mac, sig) = match inodes {
+            Some(table) => read_meta(table, &self.table, akey)?,
+            None => (None, None, None),
+        };
+
+        self.check_tag(akey, blob, acl.as_ref(), mac, sig)
     }
 
     /// The tamper error naming this snapshot's table.
@@ -268,9 +279,11 @@ impl ReadTxn {
 
         let mut akey = AKey::ROOT;
         for name in path.names() {
-            let acl = match &inodes {
-                Some(t) => read_acl(t, &self.table, akey)?,
-                None => None,
+            // One inode decode per directory: the ACL authorizes the traversal and,
+            // with a tag, verifies the directory blob just below.
+            let (acl, mac, sig) = match &inodes {
+                Some(t) => read_meta(t, &self.table, akey)?,
+                None => (None, None, None),
             };
 
             perm::access::authorize(&self.principal, akey, acl.as_ref(), Rights::Access)?;
@@ -281,7 +294,7 @@ impl ReadTxn {
 
             // A tampered directory blob could redirect a name to another vnode, so
             // verify each directory descended through (for a keyed principal).
-            self.verify_blob(inodes.as_ref(), akey, &blob)?;
+            self.check_tag(akey, &blob, acl.as_ref(), mac, sig)?;
 
             let (kind, payload) = entry_split(&blob)?;
             if kind != EntryKind::Dir {

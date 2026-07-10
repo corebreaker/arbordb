@@ -1,6 +1,6 @@
 use super::ctx::Context;
 use crate::{
-    codec::{decode, encode, encode_dir, ArchivedDir, ArchivedValue},
+    codec::{decode, encode, encode_dir, ArchivedValue},
     data::Scalar,
     engine::{dir_entry, file_entry, entry_split, EntryKind},
     error::{AdbError, AdbResult},
@@ -197,6 +197,8 @@ pub(in crate::txn) fn rm_into(ctx: &mut Context, path: &APath) -> AdbResult<bool
     #[cfg(feature = "permissions")]
     ctx.check(parent, Rights::Access)?;
 
+    // A borrowed child lookup — `None` (nothing to remove) when `parent` is absent,
+    // a file, or has no such child, so `rm` stays idempotent on a missing path.
     let Some(akey) = ctx.child(parent, name)? else {
         return Ok(false);
     };
@@ -279,24 +281,44 @@ pub(in crate::txn) fn cp_into(ctx: &mut Context, src: &APath, dst: &APath) -> Ad
     Ok(())
 }
 
-/// Writes `map` as directory `akey`'s children.
+/// Writes `map` as directory `akey`'s children — buffered into the write-back cache
+/// when buffering is on, otherwise encoded and written to the engine at once.
 pub(in crate::txn) fn put_dir(ctx: &mut Context, akey: AKey, map: &BTreeMap<String, AKey>) -> AdbResult<()> {
+    #[cfg(not(feature = "permissions"))]
+    if ctx.buffering() {
+        ctx.buffer_dir(akey, map.clone());
+
+        return Ok(());
+    }
+
     let entry = dir_entry(&encode_dir(map));
     ctx.put_entry(akey, entry.as_slice())?;
 
     Ok(())
 }
 
-/// Adds (or replaces) a `name → child` link in directory `parent`.
+/// Adds (or replaces) a `name → child` link in directory `parent`. When buffering,
+/// the parent's cached child-map is mutated in place (O(1)); otherwise the whole
+/// directory is read, edited, and rewritten.
 pub(in crate::txn) fn link_child(ctx: &mut Context, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
+    #[cfg(not(feature = "permissions"))]
+    if ctx.buffering() {
+        return ctx.dir_link(parent, name, child);
+    }
+
     let mut map = ctx.dir_children(parent)?;
     map.insert(name.to_string(), child);
 
     put_dir(ctx, parent, &map)
 }
 
-/// Removes the `name` link from directory `parent`.
+/// Removes the `name` link from directory `parent` (in place when buffering).
 pub(in crate::txn) fn unlink_child(ctx: &mut Context, parent: AKey, name: &str) -> AdbResult<()> {
+    #[cfg(not(feature = "permissions"))]
+    if ctx.buffering() {
+        return ctx.dir_unlink(parent, name);
+    }
+
     let mut map = ctx.dir_children(parent)?;
     map.remove(name);
 
@@ -305,7 +327,9 @@ pub(in crate::txn) fn unlink_child(ctx: &mut Context, parent: AKey, name: &str) 
 
 /// Ensures the root directory exists.
 pub(in crate::txn) fn ensure_root(ctx: &mut Context) -> AdbResult<()> {
-    if ctx.read_verified(AKey::ROOT)?.is_none() {
+    // A bare presence probe — the root's contents are read (and verified) by the
+    // directory walk that follows, so materializing its blob here would be wasted.
+    if !ctx.has_entry(AKey::ROOT)? {
         put_dir(ctx, AKey::ROOT, &BTreeMap::new())?;
     }
 
@@ -346,19 +370,10 @@ pub(in crate::txn) fn ensure_dir(ctx: &mut Context, path: &APath) -> AdbResult<A
 
 /// Removes vnode `akey` and, if it is a directory, its whole subtree.
 pub(in crate::txn) fn cascade_delete(ctx: &mut Context, akey: AKey) -> AdbResult<()> {
-    let children = match ctx.read_verified(akey)? {
-        Some(entry) => {
-            let (kind, payload) = entry_split(&entry)?;
-            match kind {
-                EntryKind::Dir => ArchivedDir::new(payload)?
-                    .entries()?
-                    .into_iter()
-                    .map(|(_, child)| child)
-                    .collect::<Vec<_>>(),
-                EntryKind::File => Vec::new(),
-            }
-        }
-        None => return Ok(()),
+    // Read the vnode borrowed once: a file yields no children (no owned copy of its
+    // blob), a directory yields the subtree to recurse into.
+    let Some(children) = ctx.cascade_children(akey)? else {
+        return Ok(());
     };
 
     for child in children {
@@ -376,25 +391,25 @@ pub(in crate::txn) fn deep_copy(ctx: &mut Context, akey: AKey) -> AdbResult<AKey
     #[cfg(feature = "permissions")]
     ctx.check(akey, Rights::Access)?;
 
-    let entry = ctx
-        .read_verified(akey)?
-        .ok_or_else(|| AdbError::Corrupt("copying a missing vnode".into()))?;
-    let (kind, payload) = entry_split(&entry)?;
     let fresh = AKey::generate();
 
-    match kind {
+    // `kind` and `dir_children` consult the write-back cache, so a directory this
+    // transaction has already modified is copied in its current (buffered) state, not
+    // the stale engine one. A file's blob is always in the engine (files write through).
+    match ctx
+        .kind(akey)?
+        .ok_or_else(|| AdbError::Corrupt("copying a missing vnode".into()))?
+    {
         EntryKind::File => {
+            let entry = ctx
+                .read_verified(akey)?
+                .ok_or_else(|| AdbError::Corrupt("copying a missing vnode".into()))?;
+
             ctx.put_entry(fresh, entry.as_slice())?;
         }
         EntryKind::Dir => {
-            let children: Vec<(String, AKey)> = ArchivedDir::new(payload)?
-                .entries()?
-                .into_iter()
-                .map(|(name, child)| (name.to_string(), child))
-                .collect();
-
             let mut copied = BTreeMap::new();
-            for (name, child) in children {
+            for (name, child) in ctx.dir_children(akey)? {
                 copied.insert(name, deep_copy(ctx, child)?);
             }
 

@@ -78,16 +78,17 @@ fn value_digest(table: &str, akey: AKey, blob: &[u8], acl: &[u8]) -> [u8; MAC_LE
     *hasher.finalize().as_bytes()
 }
 
-/// Signs vnode `akey`'s entry `blob` and encoded `acl` under the private `seed`,
-/// producing the tag a keyless guest verifies with [`verify_value`].
+/// Signs vnode `akey`'s entry `blob` and encoded `acl` with `signer`, producing the
+/// tag a keyless guest verifies with [`verify_value`]. `signer` holds the expanded
+/// signing key, so signing a value never re-derives it from the seed.
 pub(crate) fn sign_value(
-    seed: &[u8; crypto::SEED_LEN],
+    signer: &crypto::Signer,
     table: &str,
     akey: AKey,
     blob: &[u8],
     acl: &[u8],
 ) -> [u8; crypto::SIG_LEN] {
-    crypto::sign(seed, &value_digest(table, akey, blob, acl))
+    signer.sign(&value_digest(table, akey, blob, acl))
 }
 
 /// Whether `sig` is a valid signature of vnode `akey`'s entry `blob` and encoded
@@ -186,7 +187,8 @@ mod tests {
         let seed = crypto::random_seed().unwrap();
         let pubkey = crypto::public_key(&seed);
         let akey = AKey::from(1u128);
-        let sig = sign_value(&seed, "t", akey, b"blob", b"acl");
+        let signer = crypto::Signer::new(&seed);
+        let sig = sign_value(&signer, "t", akey, b"blob", b"acl");
 
         // The genuine signature verifies; a different table, key, blob, or ACL fails.
         assert!(verify_value(&pubkey, "t", akey, b"blob", b"acl", &sig));
@@ -196,7 +198,8 @@ mod tests {
         assert!(!verify_value(&pubkey, "t", akey, b"blob", b"acm", &sig));
 
         // A signature from a different seed does not verify under this public key.
-        let other = sign_value(&crypto::random_seed().unwrap(), "t", akey, b"blob", b"acl");
+        let other_signer = crypto::Signer::new(&crypto::random_seed().unwrap());
+        let other = sign_value(&other_signer, "t", akey, b"blob", b"acl");
         assert!(!verify_value(&pubkey, "t", akey, b"blob", b"acl", &other));
     }
 

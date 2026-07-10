@@ -1,7 +1,7 @@
 //! The identity a database handle acts as.
 
 use super::constants::{MASTER_UID, MASTER_GID, SUPER_GID};
-use crate::crypto::{KEY_LEN, PUBKEY_LEN, SEED_LEN};
+use crate::crypto::{Signer, KEY_LEN, PUBKEY_LEN, SEED_LEN};
 
 /// The identity a database handle acts as.
 pub(crate) enum Principal {
@@ -17,8 +17,9 @@ pub(crate) enum Principal {
         pubkey: [u8; PUBKEY_LEN],
     },
 
-    /// An authenticated user of a protected database.
-    User(Session),
+    /// An authenticated user of a protected database. Boxed because a [`Session`]
+    /// (with its expanded signer) is far larger than the other variants.
+    User(Box<Session>),
 }
 
 /// An authenticated session: who the caller is and the secrets they unlocked — the
@@ -32,8 +33,12 @@ pub(crate) struct Session {
     gids:      Vec<u32>,
     /// The database integrity key this session unlocked.
     key:       [u8; KEY_LEN],
-    /// The database signing seed this session unlocked.
+    /// The database signing seed this session unlocked (kept for re-wrapping the
+    /// secret bundle into another user's keyring).
     sign_seed: [u8; SEED_LEN],
+    /// The expanded signer over `sign_seed`, so a protected write never re-derives
+    /// the signing key from the seed.
+    signer:    Signer,
 }
 
 impl Session {
@@ -45,6 +50,7 @@ impl Session {
             gids,
             key,
             sign_seed,
+            signer: Signer::new(&sign_seed),
         }
     }
 
@@ -68,9 +74,14 @@ impl Session {
         &self.key
     }
 
-    /// The unlocked database signing seed (signs values).
+    /// The unlocked database signing seed (for re-wrapping into another keyring).
     pub(crate) fn sign_seed(&self) -> &[u8; SEED_LEN] {
         &self.sign_seed
+    }
+
+    /// The session's reusable value signer (keeps the expanded signing key).
+    pub(crate) fn signer(&self) -> &Signer {
+        &self.signer
     }
 
     // The predicates below are consumed by ACL enforcement (a later permissions

@@ -455,6 +455,7 @@ pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Sess
     // Back-fill: stamp a master-owned default ACL and seal an integrity tag on every
     // pre-existing vnode, so authenticated reads verify and non-root data has an owner.
     {
+        let signer = crypto::Signer::new(&seed);
         let mut inodes = txn.open_table(INODES_TABLE)?;
         for table in &tables {
             let rows: Vec<(AKey, Vec<u8>)> = {
@@ -487,7 +488,7 @@ pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Sess
                     &mut inodes,
                     table,
                     akey,
-                    integrity::sign_value(&seed, table, akey, &entry, &acl),
+                    integrity::sign_value(&signer, table, akey, &entry, &acl),
                 )?;
             }
         }
