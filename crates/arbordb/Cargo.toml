@@ -25,6 +25,7 @@ arbordb-derive = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+num-bigint = "0.4"  # the bignum cross-feature test constructs `BigInt`s directly
 tempfile = "3.27"
 
 # `basic` uses only the default API; the rest need the derive macro.
