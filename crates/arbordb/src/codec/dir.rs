@@ -70,12 +70,16 @@ impl<'a> ArchivedDir<'a> {
     pub(crate) fn get(&self, name: &str) -> AdbResult<Option<AKey>> {
         let count = self.len()?;
 
+        let needle = name.as_bytes();
         let (mut lo, mut hi) = (0usize, count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let entry = 4 + mid * ENTRY;
 
-            match self.entry_name(entry)?.as_bytes().cmp(name.as_bytes()) {
+            // Compare the raw name bytes: the table is byte-sorted and names were
+            // validated as UTF-8 at write time, so the per-comparison `from_utf8`
+            // check is unnecessary here.
+            match self.entry_name_bytes(entry)?.cmp(needle) {
                 Ordering::Less => lo = mid + 1,
                 Ordering::Greater => hi = mid,
                 Ordering::Equal => return Ok(Some(self.entry_akey(entry)?)),
@@ -98,11 +102,18 @@ impl<'a> ArchivedDir<'a> {
         Ok(out)
     }
 
-    /// The child name of the entry whose record starts at `entry`.
-    fn entry_name(&self, entry: usize) -> AdbResult<&'a str> {
+    /// The raw name bytes of the entry whose record starts at `entry`. Used by the
+    /// binary search, which orders by bytes and needs no UTF-8 check.
+    fn entry_name_bytes(&self, entry: usize) -> AdbResult<&'a [u8]> {
         let name_off = read_u32(self.blob, entry)? as usize;
         let name_len = read_u32(self.blob, entry + 4)? as usize;
-        let bytes = slice(self.blob, name_off, name_len)?;
+
+        slice(self.blob, name_off, name_len)
+    }
+
+    /// The child name of the entry whose record starts at `entry`.
+    fn entry_name(&self, entry: usize) -> AdbResult<&'a str> {
+        let bytes = self.entry_name_bytes(entry)?;
 
         std::str::from_utf8(bytes).map_err(|_| AdbError::Corrupt("invalid utf-8 in a directory name".into()))
     }

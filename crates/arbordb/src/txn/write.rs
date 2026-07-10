@@ -150,9 +150,14 @@ impl WriteTxn {
     /// to the same width as the one already there, the blob is patched in place — no
     /// decode, no re-encode — otherwise the value is decoded, updated, and re-encoded.
     /// Registered indexes are maintained across either path.
-    pub(crate) fn put_scalar_at(&self, path: &APath, at: &VPath, scalar: Scalar) -> AdbResult<()> {
+    ///
+    /// `hint` is a vnode key the caller already resolved for `path` — a mutable
+    /// accessor from [`fetch_mut`](Self::fetch_mut) supplies one so the common in-place
+    /// patch skips re-walking the directory tree; it is trusted only while it still
+    /// names a live vnode (see [`table::put_scalar_into`]).
+    pub(crate) fn put_scalar_at(&self, path: &APath, hint: Option<AKey>, at: &VPath, scalar: Scalar) -> AdbResult<()> {
         self.reindex_around(std::slice::from_ref(path), |ctx| {
-            table::put_scalar_into(ctx, path, at, &scalar)
+            table::put_scalar_into(ctx, path, hint, at, &scalar)
         })
     }
 
@@ -164,12 +169,13 @@ impl WriteTxn {
         let apath = path.into_arbor_path()?;
 
         // Presence check without decoding the value — resolve the vnode and read its
-        // kind alone.
-        {
+        // kind alone. The resolved key is handed to the cursor as a hint, so an
+        // in-place scalar patch through it need not walk the directory tree again.
+        let akey = {
             let table = self.txn.open_table(data_def(&self.table))?;
             match resolve(&table, &apath)? {
                 Some(akey) => match fetch_entry_kind(&table, akey)? {
-                    Some(EntryKind::File) => {}
+                    Some(EntryKind::File) => akey,
                     Some(EntryKind::Dir) => {
                         return Err(AdbError::CannotAccess(format!("'{apath}' is a directory, not a file")));
                     }
@@ -177,9 +183,9 @@ impl WriteTxn {
                 },
                 None => return Ok(None),
             }
-        }
+        };
 
-        let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath));
+        let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath, akey));
 
         Ok(Some(A::open(cursor, VPath::root())))
     }
@@ -892,7 +898,7 @@ mod tests {
             // An in-place edit of the indexed column keeps exactly one entry: the old
             // key is removed and the new one inserted around the patch.
             let age = VPath::root().child_name("age");
-            w.put_scalar_at(&APath::parse("users/alice").unwrap(), &age, Scalar::I64(31))
+            w.put_scalar_at(&APath::parse("users/alice").unwrap(), None, &age, Scalar::I64(31))
                 .unwrap();
             assert_eq!(index_entries(&w), 1);
 
@@ -900,6 +906,55 @@ mod tests {
         }
 
         // The edit persisted.
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
+    }
+
+    #[test]
+    fn a_correct_scalar_hint_patches_the_hinted_vnode() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+        let alice = APath::parse("users/alice").unwrap();
+        let age = VPath::root().child_name("age");
+
+        {
+            let w = table.write().unwrap();
+            w.store_value("users/alice", &user(30)).unwrap();
+
+            // The key the file actually resolves to — the hint a mutable accessor
+            // would carry. The edit lands through it.
+            let akey = {
+                let data = w.txn.open_table(data_def("t")).unwrap();
+                resolve(&data, &alice).unwrap().unwrap()
+            };
+
+            w.put_scalar_at(&alice, Some(akey), &age, Scalar::I64(31)).unwrap();
+            w.commit().unwrap();
+        }
+
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
+    }
+
+    #[test]
+    fn a_stale_scalar_hint_falls_back_to_resolving_the_path() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+        let alice = APath::parse("users/alice").unwrap();
+        let age = VPath::root().child_name("age");
+
+        {
+            let w = table.write().unwrap();
+            w.store_value("users/alice", &user(30)).unwrap();
+
+            // A hint that names no live vnode (as a cursor's key would after the path
+            // was removed) is not trusted: the write resolves the path afresh and still
+            // lands on the real file, exactly as the un-hinted path does.
+            let stale = AKey::generate();
+            w.put_scalar_at(&alice, Some(stale), &age, Scalar::I64(31)).unwrap();
+            w.commit().unwrap();
+        }
+
         let r = table.read().unwrap();
         assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
     }

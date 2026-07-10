@@ -16,6 +16,7 @@ use crate::{
     path::{APath, VPath},
     txn::WriteTxn,
     value::Value,
+    AKey,
 };
 
 /// A read/write cursor over one file, reloading and rewriting it per operation.
@@ -24,14 +25,19 @@ pub(crate) struct MutCursor<'t> {
     txn:   &'t WriteTxn,
     /// The access path of the file this cursor operates on.
     apath: APath,
+    /// The vnode key `fetch_mut` resolved for `apath` — a hint that lets the in-place
+    /// scalar patch skip re-walking the directory tree (validated on use, so a path
+    /// removed since falls back to a fresh resolve).
+    akey:  AKey,
 }
 
 impl<'t> MutCursor<'t> {
-    /// Opens a cursor over the file at `apath`.
-    pub(crate) fn open(txn: &'t WriteTxn, apath: APath) -> Self {
+    /// Opens a cursor over the file at `apath`, whose vnode `fetch_mut` resolved to `akey`.
+    pub(crate) fn open(txn: &'t WriteTxn, apath: APath, akey: AKey) -> Self {
         Self {
             txn,
             apath,
+            akey,
         }
     }
 
@@ -78,7 +84,7 @@ impl Reader for MutCursor<'_> {
 
 impl Writer for MutCursor<'_> {
     fn put_scalar(&self, at: &VPath, scalar: Scalar) -> AdbResult<()> {
-        self.txn.put_scalar_at(&self.apath, at, scalar)
+        self.txn.put_scalar_at(&self.apath, Some(self.akey), at, scalar)
     }
 
     fn ensure_container(&self, at: &VPath, list: bool) -> AdbResult<()> {

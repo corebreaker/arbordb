@@ -68,16 +68,58 @@ pub(in crate::txn) fn store_value_into(ctx: &mut Context, path: &APath, value: &
     store_blob_into(ctx, path, &encode(value))
 }
 
-/// Sets the scalar at `at` inside the file at `path`. When the new scalar keeps the
-/// current leaf's byte width the blob is patched in place — no decode, no
-/// re-encode; otherwise the value is decoded, updated, and re-encoded. Creates the
-/// file (and its parents) when it does not exist yet.
-pub(in crate::txn) fn put_scalar_into(ctx: &mut Context, path: &APath, at: &VPath, scalar: &Scalar) -> AdbResult<()> {
+/// Resolves `path` and reads its (verified) entry — the walk-the-tree path shared by
+/// [`resolve_target`] both as its default and as the fallback when a stale hint no
+/// longer names a live vnode.
+fn resolve_and_read(ctx: &Context, path: &APath) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
     let akey = ctx.resolve(path)?;
     let entry = match akey {
         Some(akey) => ctx.read_verified(akey)?,
         None => None,
     };
+
+    Ok((akey, entry))
+}
+
+/// Resolves the target file for a scalar write, honouring a caller's key `hint`
+/// where that is sound.
+///
+/// Without access control the hint — from a mutable accessor that already walked the
+/// path — is trusted while it still names a live vnode, so the directory tree is not
+/// re-walked. Under `permissions`, `ctx.resolve` performs the per-directory `Access`
+/// checks a scalar edit still requires, so the hint is ignored there and the path is
+/// resolved afresh; a stale hint (its vnode gone) likewise falls back, recreating the
+/// file at `path` exactly as an un-hinted write does.
+fn resolve_target(ctx: &Context, path: &APath, hint: Option<AKey>) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
+    #[cfg(not(feature = "permissions"))]
+    if let Some(key) = hint
+        && let Some(entry) = ctx.read_verified(key)?
+    {
+        return Ok((Some(key), Some(entry)));
+    }
+
+    #[cfg(feature = "permissions")]
+    let _ = hint;
+
+    resolve_and_read(ctx, path)
+}
+
+/// Sets the scalar at `at` inside the file at `path`. When the new scalar keeps the
+/// current leaf's byte width the blob is patched in place — no decode, no
+/// re-encode; otherwise the value is decoded, updated, and re-encoded. Creates the
+/// file (and its parents) when it does not exist yet.
+///
+/// `hint` is a vnode key the caller already resolved for `path` (a mutable accessor
+/// that just walked it), passed on to [`resolve_target`] to skip re-walking the
+/// directory tree where that is sound.
+pub(in crate::txn) fn put_scalar_into(
+    ctx: &mut Context,
+    path: &APath,
+    hint: Option<AKey>,
+    at: &VPath,
+    scalar: &Scalar,
+) -> AdbResult<()> {
+    let (akey, entry) = resolve_target(ctx, path, hint)?;
 
     let mut value = match (akey, entry) {
         (Some(akey), Some(mut entry)) => {

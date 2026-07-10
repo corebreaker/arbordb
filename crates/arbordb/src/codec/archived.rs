@@ -307,13 +307,17 @@ impl<'a> ArchivedNode<'a> {
         let count = read_u32(self.blob, off + 1)? as usize;
         let table = off + 5;
 
+        let needle = name.as_bytes();
         let (mut lo, mut hi) = (0usize, count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let entry = table + mid * 12;
-            let entry_name = self.entry_name(entry)?;
+            // Compare the raw name bytes: the table is byte-sorted and names were
+            // validated as UTF-8 at write time, so skipping the per-comparison
+            // `from_utf8` check is both correct and faster.
+            let entry_name = self.entry_name_bytes(entry)?;
 
-            match entry_name.as_bytes().cmp(name.as_bytes()) {
+            match entry_name.cmp(needle) {
                 Ordering::Less => lo = mid + 1,
                 Ordering::Greater => hi = mid,
                 Ordering::Equal => {
@@ -360,11 +364,18 @@ impl<'a> ArchivedNode<'a> {
         Ok(out)
     }
 
-    /// The field name of the object entry whose 12-byte record starts at `entry`.
-    fn entry_name(&self, entry: usize) -> AdbResult<&'a str> {
+    /// The raw name bytes of the object entry whose 12-byte record starts at `entry`.
+    /// Used by the binary search, which orders by bytes and needs no UTF-8 check.
+    fn entry_name_bytes(&self, entry: usize) -> AdbResult<&'a [u8]> {
         let name_off = read_u32(self.blob, entry)? as usize;
         let name_len = read_u32(self.blob, entry + 4)? as usize;
-        let bytes = slice(self.blob, name_off, name_len)?;
+
+        slice(self.blob, name_off, name_len)
+    }
+
+    /// The field name of the object entry whose 12-byte record starts at `entry`.
+    fn entry_name(&self, entry: usize) -> AdbResult<&'a str> {
+        let bytes = self.entry_name_bytes(entry)?;
 
         std::str::from_utf8(bytes).map_err(|_| AdbError::Corrupt("invalid utf-8 in a field name".into()))
     }

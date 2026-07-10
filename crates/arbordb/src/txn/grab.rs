@@ -273,7 +273,7 @@ pub(crate) fn get_as<V: AValue>(
     at: impl IntoValuePath,
 ) -> AdbResult<Option<V>> {
     match get(src, path, at)? {
-        Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
+        Some(scalar) => Ok(Some(V::from_scalar_owned(scalar)?)),
         None => Ok(None),
     }
 }

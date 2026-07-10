@@ -27,7 +27,7 @@ impl<'t, T: AValue> Leaf<'t, T> {
     /// Reads and decodes the scalar; errors if nothing is stored there.
     pub fn get(&self) -> AdbResult<T> {
         match self.reader.scalar_at(&self.base)? {
-            Some(scalar) => T::from_scalar(&scalar),
+            Some(scalar) => T::from_scalar_owned(scalar),
             None => Err(AdbError::PathNotFound(self.base.clone())),
         }
     }
@@ -63,7 +63,7 @@ impl<'t, T: AValue> LeafMut<'t, T> {
     /// Reads and decodes the scalar (a writer can read its own state).
     pub fn get(&self) -> AdbResult<T> {
         match self.writer.scalar_at(&self.base)? {
-            Some(scalar) => T::from_scalar(&scalar),
+            Some(scalar) => T::from_scalar_owned(scalar),
             None => Err(AdbError::PathNotFound(self.base.clone())),
         }
     }

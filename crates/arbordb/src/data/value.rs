@@ -23,6 +23,14 @@ pub trait AValue: Sized {
 
     /// Reconstructs this value from a stored scalar.
     fn from_scalar(scalar: &Scalar) -> AdbResult<Self>;
+
+    /// Reconstructs this value from an **owned** scalar, consuming it. The read path
+    /// always owns the [`Scalar`] it just decoded, so a heap-backed type (a string,
+    /// a byte string, a big number) can move its payload out instead of cloning it —
+    /// no second allocation. The default forwards to [`from_scalar`](Self::from_scalar).
+    fn from_scalar_owned(scalar: Scalar) -> AdbResult<Self> {
+        Self::from_scalar(&scalar)
+    }
 }
 
 impl AValue for Scalar {
@@ -32,6 +40,10 @@ impl AValue for Scalar {
 
     fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
         Ok(scalar.clone())
+    }
+
+    fn from_scalar_owned(scalar: Scalar) -> AdbResult<Self> {
+        Ok(scalar)
     }
 }
 
@@ -45,6 +57,19 @@ macro_rules! scalar_value {
             fn from_scalar(scalar: &Scalar) -> AdbResult<Self> {
                 match scalar {
                     Scalar::$variant(v) => Ok(v.clone()),
+                    other => Err(AdbError::TypeMismatch {
+                        expected: $name,
+                        found:    other.type_str(),
+                    }),
+                }
+            }
+
+            // Move the payload out of the owned scalar — a real win for the
+            // heap-backed variants (`Str`, `Bytes`, the big numbers), and no worse
+            // than the clone for the `Copy` ones.
+            fn from_scalar_owned(scalar: Scalar) -> AdbResult<Self> {
+                match scalar {
+                    Scalar::$variant(v) => Ok(v),
                     other => Err(AdbError::TypeMismatch {
                         expected: $name,
                         found:    other.type_str(),
@@ -152,6 +177,13 @@ impl<T: AValue> AValue for Option<T> {
             other => Ok(Some(T::from_scalar(other)?)),
         }
     }
+
+    fn from_scalar_owned(scalar: Scalar) -> AdbResult<Self> {
+        match scalar {
+            Scalar::Null => Ok(None),
+            other => Ok(Some(T::from_scalar_owned(other)?)),
+        }
+    }
 }
 
 // Every scalar type is also `AData`: it stores as a single leaf, so a scalar field
@@ -169,7 +201,7 @@ macro_rules! scalar_adata {
 
             fn load<R: Reader>(reader: &R, at: &VPath) -> AdbResult<Self> {
                 match reader.scalar_at(at)? {
-                    Some(scalar) => <$t>::from_scalar(&scalar),
+                    Some(scalar) => <$t>::from_scalar_owned(scalar),
                     None => Err(AdbError::PathNotFound(at.clone())),
                 }
             }
