@@ -3,6 +3,7 @@
 use super::{
     definition::AData,
     leaf::{Leaf, LeafMut},
+    NodeEncoder,
     Scalar,
 };
 
@@ -204,6 +205,10 @@ macro_rules! scalar_adata {
                     Some(scalar) => <$t>::from_scalar_owned(scalar),
                     None => Err(AdbError::PathNotFound(at.clone())),
                 }
+            }
+
+            fn encode_node(&self, enc: &mut NodeEncoder) -> AdbResult<u32> {
+                Ok(enc.leaf(&self.to_scalar()))
             }
         }
     };

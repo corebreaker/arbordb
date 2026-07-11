@@ -45,6 +45,65 @@ fn derived_struct_round_trips() {
 }
 
 #[test]
+fn direct_encoder_matches_the_value_path_for_a_derived_struct() {
+    use arbordb::{data::Scalar, Value};
+    use std::collections::BTreeMap;
+
+    // Fields declared OUT of sorted-name order, with an `Option` and a `Vec`, to stress
+    // the direct encoder's field sort and its container composition against the
+    // `Value`-based path.
+    #[derive(AData)]
+    struct Rec {
+        zebra:   i64,
+        alpha:   String,
+        maybe:   Option<u32>,
+        numbers: Vec<i64>,
+    }
+
+    let rec = Rec {
+        zebra:   7,
+        alpha:   String::from("hi"),
+        maybe:   Some(9),
+        numbers: vec![1, 2, 3],
+    };
+
+    // The same value as the `Value`-based path would assemble it.
+    let mut fields = BTreeMap::new();
+    fields.insert(String::from("zebra"), Value::Leaf(Scalar::I64(7)));
+    fields.insert(String::from("alpha"), Value::Leaf(Scalar::Str(String::from("hi"))));
+    fields.insert(String::from("maybe"), Value::Leaf(Scalar::U32(9)));
+    fields.insert(
+        String::from("numbers"),
+        Value::List(vec![
+            Value::Leaf(Scalar::I64(1)),
+            Value::Leaf(Scalar::I64(2)),
+            Value::Leaf(Scalar::I64(3)),
+        ]),
+    );
+    let expected = Value::Node(fields);
+
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Rec>("direct", &rec).unwrap(); // the typed direct encoder
+        w.store_value("via_value", &expected).unwrap(); // the Value-based path
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // Both paths decode to the same tree — the direct encoder is a faithful replacement.
+    assert_eq!(r.load_value("direct").unwrap(), r.load_value("via_value").unwrap());
+    assert_eq!(r.load_value("direct").unwrap(), Some(expected));
+
+    // Each field is reachable by name / index (binary search → correctly sorted).
+    assert_eq!(r.get_as::<String>("direct", "alpha").unwrap(), Some(String::from("hi")));
+    assert_eq!(r.get_as::<i64>("direct", "numbers[2]").unwrap(), Some(3));
+}
+
+#[test]
 fn derived_accessors_read_and_edit() {
     let db = ArborDb::create_in_memory().unwrap();
     let table = db.open_table("t").unwrap();
@@ -95,6 +154,216 @@ fn descriptor_lists_the_fields() {
     assert_eq!(ArborPersonDesc::TYPE_NAME, "Person");
     assert_eq!(ArborPersonDesc::FIELDS, &["name", "age", "home"]);
     assert_eq!(ArborPointDesc::FIELDS, &["x", "y"]);
+}
+
+#[test]
+fn multiple_edits_through_one_accessor_accumulate_and_persist() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Person>(
+            "p",
+            &Person {
+                name: String::from("Bob"),
+                age:  40,
+                home: Point {
+                    x: 5, y: 6
+                },
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    // Several edits to the same value in ONE transaction. The write-back cache
+    // accumulates them — a same-width `age`/`x` patched in place, a width-changing
+    // `name` re-encoded — and writes the value once at commit.
+    {
+        let w = table.write().unwrap();
+        {
+            let person: ArborPersonMut<'_> = w.fetch_mut("p").unwrap().unwrap();
+            person.age_mut().set(&41).unwrap();
+            person.name_mut().set(&String::from("Roberta")).unwrap();
+            person.home_mut().x_mut().set(&50).unwrap();
+
+            // Reads through the accessor see the accumulated edits mid-transaction.
+            assert_eq!(person.age_mut().get().unwrap(), 41);
+            assert_eq!(person.name_mut().get().unwrap(), "Roberta");
+            assert_eq!(person.home_mut().x_mut().get().unwrap(), 50);
+        }
+
+        // A read over this transaction's own state (the `load`/`entry_blob` path, not
+        // the accessor's) also sees the buffered edits.
+        assert_eq!(
+            w.load::<Person>("p").unwrap(),
+            Some(Person {
+                name: String::from("Roberta"),
+                age:  41,
+                home: Point {
+                    x: 50, y: 6
+                },
+            })
+        );
+
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+    assert_eq!(
+        r.load::<Person>("p").unwrap(),
+        Some(Person {
+            name: String::from("Roberta"),
+            age:  41,
+            home: Point {
+                x: 50, y: 6
+            },
+        })
+    );
+}
+
+fn bob() -> Person {
+    Person {
+        name: String::from("Bob"),
+        age:  40,
+        home: Point {
+            x: 5, y: 6
+        },
+    }
+}
+
+#[test]
+fn a_full_restore_supersedes_a_buffered_edit() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Person>("p", &bob()).unwrap();
+        w.commit().unwrap();
+    }
+
+    {
+        let w = table.write().unwrap();
+
+        // Buffer an edit of `p`...
+        w.fetch_mut::<ArborPersonMut>("p")
+            .unwrap()
+            .unwrap()
+            .age_mut()
+            .set(&99)
+            .unwrap();
+
+        // ...then re-store the whole value: a direct write-through supersedes the
+        // buffered edit, so a read sees the re-stored value, not the buffered `age`.
+        let zed = Person {
+            name: String::from("Zed"),
+            age:  7,
+            home: Point {
+                x: 1, y: 2
+            },
+        };
+        w.store::<Person>("p", &zed).unwrap();
+
+        assert_eq!(w.load::<Person>("p").unwrap(), Some(zed.clone()));
+        w.commit().unwrap();
+
+        assert_eq!(table.read().unwrap().load::<Person>("p").unwrap(), Some(zed));
+    }
+}
+
+#[test]
+fn rm_forgets_a_buffered_edit_without_resurrecting_it() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Person>("p", &bob()).unwrap();
+        w.commit().unwrap();
+    }
+
+    {
+        let w = table.write().unwrap();
+
+        // Buffer an edit, then remove the file in the same transaction.
+        w.fetch_mut::<ArborPersonMut>("p")
+            .unwrap()
+            .unwrap()
+            .age_mut()
+            .set(&99)
+            .unwrap();
+        assert!(w.rm("p").unwrap());
+        w.commit().unwrap();
+    }
+
+    // The commit-time flush does not resurrect the forgotten buffered edit.
+    assert_eq!(table.read().unwrap().load::<Person>("p").unwrap(), None);
+}
+
+// A protected database seals each stored value's integrity tag. With the write-back
+// cache, a burst of edits to one value in a transaction must seal it exactly once, over
+// the final bytes — so the readback (which verifies the MAC) must succeed.
+#[cfg(feature = "permissions")]
+#[test]
+fn multiple_protected_edits_seal_once_over_the_final_value() {
+    let master = ArborDb::create_in_memory().unwrap().change_password("pw").unwrap();
+    let table = master.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<Person>(
+            "p",
+            &Person {
+                name: String::from("Bob"),
+                age:  40,
+                home: Point {
+                    x: 5, y: 6
+                },
+            },
+        )
+        .unwrap();
+        w.commit().unwrap();
+    }
+
+    {
+        let w = table.write().unwrap();
+        {
+            let person: ArborPersonMut<'_> = w.fetch_mut("p").unwrap().unwrap();
+            person.age_mut().set(&41).unwrap();
+            person.name_mut().set(&String::from("Roberta")).unwrap();
+        }
+
+        // A read within the transaction verifies nothing — the buffered value is our
+        // own trusted state, sealed only at commit — and sees the accumulated edits.
+        assert_eq!(
+            w.load::<Person>("p").unwrap(),
+            Some(Person {
+                name: String::from("Roberta"),
+                age:  41,
+                home: Point {
+                    x: 5, y: 6
+                },
+            })
+        );
+
+        w.commit().unwrap();
+    }
+
+    // A fresh read transaction re-verifies the value's (once-sealed) integrity tag; a
+    // seal over stale or intermediate bytes would fail here.
+    let r = table.read().unwrap();
+    assert_eq!(
+        r.load::<Person>("p").unwrap(),
+        Some(Person {
+            name: String::from("Roberta"),
+            age:  41,
+            home: Point {
+                x: 5, y: 6
+            },
+        })
+    );
 }
 
 #[derive(AData, Debug, Clone, PartialEq)]

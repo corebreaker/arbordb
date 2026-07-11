@@ -3,6 +3,7 @@
 
 mod bytes;
 mod definition;
+mod encode;
 mod leaf;
 mod map;
 mod opt;
@@ -22,6 +23,7 @@ mod bignum;
 pub use self::{
     bytes::Bytes,
     definition::AData,
+    encode::NodeEncoder,
     leaf::{Leaf, LeafMut},
     map::{Map, MapMut},
     opt::{Opt, OptMut},
@@ -30,3 +32,5 @@ pub use self::{
     seq::{Seq, SeqMut},
     value::AValue,
 };
+
+pub(crate) use self::encode::encode_data;

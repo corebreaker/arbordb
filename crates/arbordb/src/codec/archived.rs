@@ -46,7 +46,7 @@ const NODE: u8 = 2;
 /// Serialises `value` into a self-contained value blob.
 pub(crate) fn encode(value: &Value) -> Vec<u8> {
     let mut buf = begin_blob();
-    let root = encode_node(value, &mut buf);
+    let root = push_value(value, &mut buf);
     patch_root(&mut buf, root);
 
     buf
@@ -58,12 +58,13 @@ pub(crate) fn decode(blob: &[u8]) -> AdbResult<Value> {
 }
 
 /// Appends `value`'s subtree to `buf` (children first) and returns the absolute
-/// offset of the vnode's own header byte.
-fn encode_node(value: &Value, buf: &mut Vec<u8>) -> u32 {
+/// offset of the vnode's own header byte. Shared by [`encode`] and by the typed
+/// direct encoder's default path ([`AData::encode_node`](crate::data::AData::encode_node)).
+pub(crate) fn push_value(value: &Value, buf: &mut Vec<u8>) -> u32 {
     match value {
         Value::Leaf(scalar) => push_leaf(buf, scalar),
         Value::List(items) => {
-            let child_offsets: Vec<u32> = items.iter().map(|item| encode_node(item, buf)).collect();
+            let child_offsets: Vec<u32> = items.iter().map(|item| push_value(item, buf)).collect();
 
             push_list(buf, &child_offsets)
         }
@@ -71,7 +72,7 @@ fn encode_node(value: &Value, buf: &mut Vec<u8>) -> u32 {
             // A `BTreeMap` iterates name-sorted, exactly what `push_object` requires.
             let mut entries: Vec<(&str, u32)> = Vec::with_capacity(map.len());
             for (name, child) in map {
-                let child_off = encode_node(child, buf);
+                let child_off = push_value(child, buf);
                 entries.push((name.as_str(), child_off));
             }
 

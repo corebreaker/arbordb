@@ -6,13 +6,9 @@
 //! while letting each public op compose them.
 
 mod ctx;
+mod write_buffer;
 
 pub(super) mod table;
 
-#[cfg(not(feature = "permissions"))]
-mod dir_cache;
-
 pub(super) use ctx::Context;
-
-#[cfg(not(feature = "permissions"))]
-pub(super) use dir_cache::DirBuffer;
+pub(super) use write_buffer::WriteBuffer;

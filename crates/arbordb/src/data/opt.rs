@@ -4,6 +4,7 @@
 use super::{
     refs::{AIdentifiable, AMut, ARef},
     AData,
+    NodeEncoder,
     Scalar,
 };
 
@@ -23,6 +24,14 @@ impl<T: AData> AData for Option<T> {
         match self {
             None => writer.put_scalar(at, Scalar::Null),
             Some(value) => value.store(writer, at),
+        }
+    }
+
+    fn encode_node(&self, enc: &mut NodeEncoder) -> AdbResult<u32> {
+        // `None` is a present `Null` leaf; `Some(v)` takes `v`'s own shape.
+        match self {
+            None => Ok(enc.leaf(&Scalar::Null)),
+            Some(value) => value.encode_node(enc),
         }
     }
 

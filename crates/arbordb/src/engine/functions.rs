@@ -11,7 +11,6 @@ use crate::{
     codec::ArchivedDir,
     constants::{FORMAT_VERSION, INDEX_TABLE_NAME, META_FORMAT_VERSION_KEY, METADATA_TABLE_NAME},
     error::{AdbError, AdbResult},
-    path::APath,
     AKey,
 };
 
@@ -111,20 +110,4 @@ where
     }
 
     ArchivedDir::new(payload)?.get(name)
-}
-
-/// Resolves `path` to its a-node key by walking directories from [`AKey::ROOT`], or
-/// `None` if any segment along the way is missing.
-pub(crate) fn resolve<R>(table: &R, path: &APath) -> AdbResult<Option<AKey>>
-where
-    R: ReadableTable<u128, EntryBytes>, {
-    let mut akey = AKey::ROOT;
-    for name in path.names() {
-        match child_of(table, akey, name.as_str())? {
-            Some(child) => akey = child,
-            None => return Ok(None),
-        }
-    }
-
-    Ok(Some(akey))
 }

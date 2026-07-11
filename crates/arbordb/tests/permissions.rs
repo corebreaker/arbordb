@@ -256,6 +256,106 @@ fn owner_may_write_but_another_user_only_reads() {
 }
 
 #[test]
+fn a_non_master_bulk_loads_under_a_fresh_directory_in_one_transaction() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+    }
+
+    // Alice, in ONE transaction, stores many files under a directory she creates in
+    // that same transaction. Under the write-back cache that directory's blob is
+    // buffered (written and sealed once at commit) — but its ACL is stamped eagerly,
+    // so each later store's traversal check sees that she owns it and may create
+    // children there. Without the eager ACL the second store would be denied (a
+    // directory with no ACL is reachable only by an administrator), so this exercises
+    // the correctness the master-only bench cannot.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+
+        let w = t.write().unwrap();
+        for i in 0..50i64 {
+            w.store_value(format!("alice-dir/f{i}"), &leaf(i)).unwrap();
+        }
+        w.commit().unwrap();
+
+        // A fresh read transaction re-walks and re-verifies every sealed directory and
+        // file blob written at the commit-time flush — a bad seal would error here.
+        let r = t.read().unwrap();
+        for i in 0..50i64 {
+            assert_eq!(r.load_value(format!("alice-dir/f{i}")).unwrap(), Some(leaf(i)));
+        }
+        assert_eq!(r.owner("alice-dir").unwrap(), Some(String::from("alice")));
+    }
+}
+
+#[test]
+fn a_non_master_reads_its_own_buffered_directory_within_a_transaction() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+    }
+
+    let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+    let t = alice.open_table("data").unwrap();
+    let w = t.write().unwrap();
+
+    // Both files land under one directory created in this same transaction, so `d` is
+    // buffered, not yet in the engine.
+    w.store_value("d/x", &leaf(1)).unwrap();
+    w.store_value("d/y", &leaf(2)).unwrap();
+
+    // Reads over this transaction's own uncommitted state see the buffered directory:
+    // `ls` lists both children (the buffered blob is trusted, not integrity-checked,
+    // since it is sealed only at commit) and a value read returns the just-stored one.
+    let names: Vec<String> = w.ls("d").unwrap().into_iter().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, vec![String::from("x"), String::from("y")]);
+    assert_eq!(w.load_value("d/x").unwrap(), Some(leaf(1)));
+
+    w.commit().unwrap();
+
+    // And after commit, from a fresh (empty-buffer) read transaction that must re-walk
+    // and re-verify the now-sealed directory.
+    let r = t.read().unwrap();
+    assert_eq!(r.load_value("d/y").unwrap(), Some(leaf(2)));
+}
+
+#[test]
+fn a_non_master_copies_a_directory_subtree_under_the_write_back_cache() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+    }
+
+    let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+    let t = alice.open_table("data").unwrap();
+
+    {
+        let w = t.write().unwrap();
+        w.store_value("src/inner/leaf", &leaf(7)).unwrap();
+
+        // Deep-copy the subtree under fresh identities in the SAME transaction: the
+        // copy reads the still-buffered source and writes several buffered destination
+        // directories (each ACL-stamped eagerly, each sealed once at commit).
+        w.cp("src", "dst").unwrap();
+        w.commit().unwrap();
+    }
+
+    // A fresh read transaction re-walks and re-verifies the sealed copies; alice owns
+    // every copied directory.
+    let r = t.read().unwrap();
+    assert_eq!(r.load_value("dst/inner/leaf").unwrap(), Some(leaf(7)));
+    assert_eq!(r.owner("dst").unwrap(), Some(String::from("alice")));
+    assert_eq!(r.owner("dst/inner").unwrap(), Some(String::from("alice")));
+}
+
+#[test]
 fn chown_transfers_ownership() {
     let (_dir, path) = tmp_db();
 

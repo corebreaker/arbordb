@@ -10,7 +10,7 @@ use crate::{
 };
 
 use smol_str::SmolStr;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[cfg(feature = "permissions")]
 use crate::{acl::Rights, inode::Acl, perm};
@@ -122,31 +122,35 @@ pub(in crate::txn) fn put_scalar_into(
 ) -> AdbResult<()> {
     let (akey, entry) = resolve_target(ctx, path, hint)?;
 
-    let mut value = match (akey, entry) {
-        (Some(akey), Some(mut entry)) => {
-            #[cfg(feature = "permissions")]
-            ctx.check(akey, Rights::Modify)?;
+    // An existing file: edit its blob and buffer the result (written and sealed once at
+    // commit through `put_file_edit`), so a burst of edits to one value coalesces into
+    // a single re-encode and — under `permissions` — a single signature.
+    if let (Some(akey), Some(mut entry)) = (akey, entry) {
+        #[cfg(feature = "permissions")]
+        ctx.check(akey, Rights::Modify)?;
 
-            // Fast path: a leaf that keeps its width is patched in place — every
-            // other offset in the blob stays valid, so nothing is re-encoded.
-            if patch_scalar(&mut entry, at, scalar)? {
-                ctx.put_entry(akey, entry.as_slice())?;
-
-                return Ok(());
-            }
-
-            // Slow path: decode the (untouched) blob to re-encode it below.
-            let (kind, payload) = entry_split(&entry)?;
-            match kind {
-                EntryKind::File => decode(payload)?,
-                EntryKind::Dir => {
-                    return Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file")));
-                }
-            }
+        // Fast path: a leaf that keeps its width is patched in place — every other
+        // offset in the blob stays valid, so nothing is re-encoded.
+        if patch_scalar(&mut entry, at, scalar)? {
+            return ctx.put_file_edit(akey, entry);
         }
-        _ => Value::default(),
-    };
 
+        // Slow path: decode the (untouched) blob, edit the value, re-encode.
+        let (kind, payload) = entry_split(&entry)?;
+        let mut value = match kind {
+            EntryKind::File => decode(payload)?,
+            EntryKind::Dir => {
+                return Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file")));
+            }
+        };
+
+        value.set_value(at, Value::Leaf(scalar.clone()));
+
+        return ctx.put_file_edit(akey, file_entry(&encode(&value)));
+    }
+
+    // Nothing there yet: create the file (writing through, so its ACL lands at once).
+    let mut value = Value::default();
     value.set_value(at, Value::Leaf(scalar.clone()));
 
     store_value_into(ctx, path, &value)
@@ -285,8 +289,13 @@ pub(in crate::txn) fn cp_into(ctx: &mut Context, src: &APath, dst: &APath) -> Ad
 /// Writes `map` as directory `akey`'s children — buffered into the write-back cache
 /// when buffering is on, otherwise encoded and written to the engine at once.
 pub(in crate::txn) fn put_dir(ctx: &mut Context, akey: AKey, map: &BTreeMap<SmolStr, AKey>) -> AdbResult<()> {
-    #[cfg(not(feature = "permissions"))]
     if ctx.buffering() {
+        // A buffered directory's blob — and, under `permissions`, its integrity seal —
+        // is written once at the commit-time flush. Stamp a fresh directory's ACL
+        // eagerly, though, so an access check later in this same transaction sees it.
+        #[cfg(feature = "permissions")]
+        ctx.stamp_new_dir_acl(akey)?;
+
         ctx.buffer_dir(akey, map.clone());
 
         return Ok(());
@@ -298,11 +307,33 @@ pub(in crate::txn) fn put_dir(ctx: &mut Context, akey: AKey, map: &BTreeMap<Smol
     Ok(())
 }
 
+/// Flushes the write-back cache: encodes each buffered directory's child-map and writes
+/// both the directories and the edited files through [`Context::put_entry`] — which,
+/// under `permissions`, seals each blob's integrity tags. This is the O(N) tail of a
+/// bulk load and the once-per-value tail of a burst of edits, run at commit (or when
+/// index maintenance forces the engine current mid-transaction).
+pub(in crate::txn) fn flush_buffered(
+    ctx: &mut Context,
+    dirs: HashMap<AKey, BTreeMap<SmolStr, AKey>>,
+    files: HashMap<AKey, Vec<u8>>,
+) -> AdbResult<()> {
+    for (akey, map) in dirs {
+        let entry = dir_entry(&encode_dir(&map));
+        ctx.put_entry(akey, entry.as_slice())?;
+    }
+
+    // A buffered file entry is already the full tagged blob; write (and seal) it as is.
+    for (akey, entry) in files {
+        ctx.put_entry(akey, entry.as_slice())?;
+    }
+
+    Ok(())
+}
+
 /// Adds (or replaces) a `name → child` link in directory `parent`. When buffering,
 /// the parent's cached child-map is mutated in place (O(1)); otherwise the whole
 /// directory is read, edited, and rewritten.
 pub(in crate::txn) fn link_child(ctx: &mut Context, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
-    #[cfg(not(feature = "permissions"))]
     if ctx.buffering() {
         return ctx.dir_link(parent, name, child);
     }
@@ -315,7 +346,6 @@ pub(in crate::txn) fn link_child(ctx: &mut Context, parent: AKey, name: &str, ch
 
 /// Removes the `name` link from directory `parent` (in place when buffering).
 pub(in crate::txn) fn unlink_child(ctx: &mut Context, parent: AKey, name: &str) -> AdbResult<()> {
-    #[cfg(not(feature = "permissions"))]
     if ctx.buffering() {
         return ctx.dir_unlink(parent, name);
     }

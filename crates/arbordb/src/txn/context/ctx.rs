@@ -18,12 +18,11 @@ use super::table::{cascade_delete, collect_owned, unlink_child};
 #[cfg(feature = "permissions")]
 use crate::{
     acl::Rights,
-    inode::{read_acl, read_meta, seal_mac, seal_sig, set_acl, Acl},
+    inode::{read_acl, read_meta, seal_mac, seal_sig, set_acl, set_default_acl, Acl},
     perm::{self, Principal},
 };
 
-#[cfg(not(feature = "permissions"))]
-use super::DirBuffer;
+use super::WriteBuffer;
 
 use redb::ReadableTable;
 use smol_str::SmolStr;
@@ -55,11 +54,13 @@ pub(in super::super) struct Context<'txn, 'a> {
     now: i64,
 
     /// The transaction's write-back cache of dirty directories. Directory reads
-    /// consult it first and directory writes buffer into it (flushed at commit),
-    /// turning a bulk load under one parent from O(N²) into O(N). Absent under
-    /// `permissions`, where directory reads must verify and ACL checks see each write.
-    #[cfg(not(feature = "permissions"))]
-    dirs: &'a DirBuffer,
+    /// consult it first and directory writes buffer into it (flushed, and — under
+    /// `permissions` — sealed, once at commit), turning a bulk load under one parent
+    /// from O(N²) into O(N). Under `permissions` a buffered directory is the
+    /// transaction's own uncommitted state, so it is trusted without an integrity
+    /// re-check; a new directory's ACL is still stamped eagerly (see
+    /// [`table::put_dir`](super::table::put_dir)) so a mid-transaction access check sees it.
+    dirs: &'a WriteBuffer,
 
     /// The identity performing the mutation; drives ACL enforcement.
     #[cfg(feature = "permissions")]
@@ -83,6 +84,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         inodes: &'a mut InodeTable<'txn>,
         table: &'a str,
         principal: &'a Principal,
+        dirs: &'a WriteBuffer,
     ) -> Self {
         Self {
             data,
@@ -91,6 +93,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
             now: timestamp_now(),
             principal,
             verified: RefCell::new(HashSet::new()),
+            dirs,
         }
     }
 
@@ -113,7 +116,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         data: &'a mut DataTable<'txn>,
         inodes: &'a mut InodeTable<'txn>,
         table: &'a str,
-        dirs: &'a DirBuffer,
+        dirs: &'a WriteBuffer,
     ) -> Self {
         Self {
             data,
@@ -127,7 +130,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// Bundles the data table with the directory write-back cache (the metadata table
     /// exists only under the `entry-timestamps` feature).
     #[cfg(not(feature = "entry-timestamps"))]
-    pub(in super::super) fn new(data: &'a mut DataTable<'txn>, dirs: &'a DirBuffer) -> Self {
+    pub(in super::super) fn new(data: &'a mut DataTable<'txn>, dirs: &'a WriteBuffer) -> Self {
         Self {
             data,
             dirs,
@@ -138,6 +141,11 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// three times are set; on overwrite only `modified` moves.
     pub(super) fn put_entry(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
         self.data.insert(u128::from(akey), entry)?;
+
+        // A direct engine write supersedes any buffered edit of this a-node, so a
+        // later buffer-first read does not return the stale buffered bytes. Lock-free
+        // and a no-op when no file is buffered (a fresh bulk load never buffers one).
+        self.dirs.file_forget(akey);
 
         // The blob (and, below, its fresh seal) changed; a later read in this
         // mutation must re-verify rather than trust the pre-write memo.
@@ -172,6 +180,27 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(())
     }
 
+    /// Writes an **existing** file's edited entry bytes. With the write-back cache
+    /// active the bytes are buffered (and written — and, under `permissions`, sealed —
+    /// once at the commit-time flush), so a burst of edits to one value pays a single
+    /// re-encode and signature; without it (an indexed database) the entry is written
+    /// straight through. Only an existing file — whose inode and ACL are already in
+    /// place — edits this way; a fresh `store` writes through so its ACL lands at once.
+    pub(super) fn put_file_edit(&mut self, akey: AKey, entry: Vec<u8>) -> AdbResult<()> {
+        if self.buffering() {
+            // The buffered bytes are read back (buffer-first) as this a-node's state; a
+            // later engine read would trust its pre-edit memo, so drop that mark.
+            #[cfg(feature = "permissions")]
+            self.invalidate_verified(akey);
+
+            self.dirs.file_put(akey, entry);
+
+            return Ok(());
+        }
+
+        self.put_entry(akey, entry.as_slice())
+    }
+
     /// Removes an a-node's entry blob together with its inode.
     pub(super) fn remove_entry(&mut self, akey: AKey) -> AdbResult<()> {
         self.data.remove(u128::from(akey))?;
@@ -183,7 +212,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
         inode::forget(self.inodes, self.table, akey)?;
 
         // Drop any buffered copy so the commit-time flush never resurrects it.
-        #[cfg(not(feature = "permissions"))]
         self.dirs.forget(akey);
 
         Ok(())
@@ -193,6 +221,13 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// principal), so a writer never trusts — nor launders into a fresh tag —
     /// a blob altered outside the library. `None` if the a-node is absent.
     pub(super) fn read_verified(&self, akey: AKey) -> AdbResult<Option<Vec<u8>>> {
+        // A file edited earlier in this transaction lives in the buffer — our own
+        // trusted state (sealed only at the commit-time flush), so return it without
+        // an integrity re-check.
+        if let Some(entry) = self.dirs.file_get(akey) {
+            return Ok(Some(entry));
+        }
+
         let entry = read_entry(&*self.data, akey)?;
 
         #[cfg(feature = "permissions")]
@@ -209,7 +244,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
     pub(super) fn has_entry(&self, akey: AKey) -> AdbResult<bool> {
         // A directory mutated in this transaction lives in the write-back cache, which
         // is authoritative until the commit-time flush.
-        #[cfg(not(feature = "permissions"))]
         if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
             return Ok(true);
         }
@@ -225,6 +259,13 @@ impl<'txn, 'a> Context<'txn, 'a> {
     ///
     /// [`read_verified`]: Self::read_verified
     fn with_entry<R>(&self, akey: AKey, f: impl FnOnce(&[u8]) -> AdbResult<R>) -> AdbResult<Option<R>> {
+        // A file edited in this transaction is authoritative and trusted; read it from
+        // the buffer, past the engine and its integrity check (it is sealed only at the
+        // commit-time flush).
+        if let Some(entry) = self.dirs.file_get(akey) {
+            return f(&entry).map(Some);
+        }
+
         let Some(guard) = self.data.get(u128::from(akey))? else {
             return Ok(None);
         };
@@ -241,7 +282,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// integrity first. `None` if `parent` is absent, is a file, or has no such child.
     pub(super) fn child(&self, parent: AKey, name: &str) -> AdbResult<Option<AKey>> {
         // A directory buffered in this transaction is authoritative; read it there.
-        #[cfg(not(feature = "permissions"))]
         if self.dirs.dirty()
             && let Some(found) = self
                 .dirs
@@ -266,7 +306,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// the a-node is absent.
     pub(super) fn kind(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
         // A buffered a-node is always a directory (only directories buffer).
-        #[cfg(not(feature = "permissions"))]
         if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
             return Ok(Some(EntryKind::Dir));
         }
@@ -278,7 +317,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// (empty if the a-node is absent). Errors if `akey` is a file.
     pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<SmolStr, AKey>> {
         // A directory buffered in this transaction is authoritative.
-        #[cfg(not(feature = "permissions"))]
         if self.dirs.dirty()
             && let Some(children) = self.dirs.read(|dirs| dirs.get(&akey).cloned())
         {
@@ -309,7 +347,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// its (possibly large) blob just to learn it has no children.
     pub(super) fn cascade_children(&self, akey: AKey) -> AdbResult<Option<Vec<AKey>>> {
         // A buffered directory is authoritative: yield its cached children.
-        #[cfg(not(feature = "permissions"))]
         if self.dirs.dirty()
             && let Some(children) = self
                 .dirs
@@ -333,14 +370,12 @@ impl<'txn, 'a> Context<'txn, 'a> {
 
     /// Whether directory writes should buffer in the write-back cache (an index-free
     /// database) rather than re-encode and write the blob on every link.
-    #[cfg(not(feature = "permissions"))]
     pub(super) fn buffering(&self) -> bool {
         self.dirs.active()
     }
 
     /// Buffers `map` as directory `akey`'s whole child-map (a fresh or replaced
     /// directory), to be encoded and written once at commit.
-    #[cfg(not(feature = "permissions"))]
     pub(super) fn buffer_dir(&self, akey: AKey, map: BTreeMap<SmolStr, AKey>) {
         self.dirs.write(|dirs| {
             dirs.insert(akey, map);
@@ -350,7 +385,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// Adds a `name → child` link to directory `parent` in the write-back cache,
     /// seeding it from the engine on first touch. A bulk of links then mutates one
     /// in-memory map (O(1) each) instead of re-encoding the directory blob per link.
-    #[cfg(not(feature = "permissions"))]
     pub(super) fn dir_link(&self, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
         // Load the parent's current children on its first touch this transaction.
         let seed = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&parent)) {
@@ -373,7 +407,6 @@ impl<'txn, 'a> Context<'txn, 'a> {
 
     /// Removes a `name` link from directory `parent` in the write-back cache, seeding
     /// it from the engine on first touch.
-    #[cfg(not(feature = "permissions"))]
     pub(super) fn dir_unlink(&self, parent: AKey, name: &str) -> AdbResult<()> {
         let seed = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&parent)) {
             None
@@ -389,6 +422,22 @@ impl<'txn, 'a> Context<'txn, 'a> {
 
             children.remove(name);
         });
+
+        Ok(())
+    }
+
+    /// Eagerly stamps a freshly created directory's default ACL (owned by the writing
+    /// user) so an access check *later in this same transaction* sees it — the
+    /// directory's blob is buffered and its integrity tags are not sealed until commit,
+    /// but its ACL governs traversal and must be visible at once. The root carries no
+    /// ACL; an unrestricted handle stamps none.
+    #[cfg(feature = "permissions")]
+    pub(super) fn stamp_new_dir_acl(&mut self, akey: AKey) -> AdbResult<()> {
+        if akey != AKey::ROOT
+            && let Principal::User(session) = self.principal
+        {
+            set_default_acl(self.inodes, self.table, akey, session.uid())?;
+        }
 
         Ok(())
     }
