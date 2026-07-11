@@ -106,17 +106,24 @@ impl WriteTxn {
         }
     }
 
-    /// The filesystem kind of `akey`, consulting the write-back cache (a buffered
-    /// vnode is always a directory) before the engine. `None` if absent.
+    /// Resolves `path` and reads the resolved vnode's kind through a **single** data
+    /// table handle — the buffer-aware walk plus a kind probe — so `fetch_mut` opens
+    /// the data table once rather than twice. A buffered vnode is always a directory.
     #[cfg(not(feature = "permissions"))]
-    fn kind_of(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
-        if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
-            return Ok(Some(EntryKind::Dir));
-        }
+    fn resolve_with_kind(&self, path: &APath) -> AdbResult<(Option<AKey>, Option<EntryKind>)> {
+        let data = self.txn.open_table(data_def(&self.table))?;
 
-        let table = self.txn.open_table(data_def(&self.table))?;
+        let Some(akey) = self.resolve_buffered(&data, path)? else {
+            return Ok((None, None));
+        };
 
-        fetch_entry_kind(&table, akey)
+        let kind = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            Some(EntryKind::Dir)
+        } else {
+            fetch_entry_kind(&data, akey)?
+        };
+
+        Ok((Some(akey), kind))
     }
 
     /// Resolves `path` for a read on this transaction, consulting the write-back
@@ -237,12 +244,7 @@ impl WriteTxn {
         // is found here too. (Under `permissions` there is no buffering, and this is
         // the original raw-engine walk.)
         #[cfg(not(feature = "permissions"))]
-        let resolved = self.resolve(&apath)?;
-        #[cfg(not(feature = "permissions"))]
-        let kind = match resolved {
-            Some(akey) => self.kind_of(akey)?,
-            None => None,
-        };
+        let (resolved, kind) = self.resolve_with_kind(&apath)?;
 
         #[cfg(feature = "permissions")]
         let (resolved, kind) = {

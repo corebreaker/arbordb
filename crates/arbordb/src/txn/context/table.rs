@@ -9,6 +9,7 @@ use crate::{
     AKey,
 };
 
+use smol_str::SmolStr;
 use std::collections::BTreeMap;
 
 #[cfg(feature = "permissions")]
@@ -283,7 +284,7 @@ pub(in crate::txn) fn cp_into(ctx: &mut Context, src: &APath, dst: &APath) -> Ad
 
 /// Writes `map` as directory `akey`'s children — buffered into the write-back cache
 /// when buffering is on, otherwise encoded and written to the engine at once.
-pub(in crate::txn) fn put_dir(ctx: &mut Context, akey: AKey, map: &BTreeMap<String, AKey>) -> AdbResult<()> {
+pub(in crate::txn) fn put_dir(ctx: &mut Context, akey: AKey, map: &BTreeMap<SmolStr, AKey>) -> AdbResult<()> {
     #[cfg(not(feature = "permissions"))]
     if ctx.buffering() {
         ctx.buffer_dir(akey, map.clone());
@@ -307,7 +308,7 @@ pub(in crate::txn) fn link_child(ctx: &mut Context, parent: AKey, name: &str, ch
     }
 
     let mut map = ctx.dir_children(parent)?;
-    map.insert(name.to_string(), child);
+    map.insert(SmolStr::from(name), child);
 
     put_dir(ctx, parent, &map)
 }
@@ -484,7 +485,7 @@ pub(in crate::txn) fn collect_owned(
     ctx: &Context,
     dir: AKey,
     uid: u32,
-    out: &mut Vec<(AKey, String)>,
+    out: &mut Vec<(AKey, SmolStr)>,
 ) -> AdbResult<()> {
     for (name, child) in ctx.dir_children(dir)? {
         if ctx.acl(child)?.map(|acl| acl.owner_uid()) == Some(uid) {

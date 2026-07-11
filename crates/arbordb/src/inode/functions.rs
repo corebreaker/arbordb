@@ -184,6 +184,28 @@ where
     Ok((inode.acl(), inode.mac(), inode.sig()))
 }
 
+/// Reads vnode `akey`'s raw inode bytes (an owned copy), or `None` if it has no
+/// inode yet. Feeds the read-side inode cache, which stores the undecoded blob
+/// (principal-independent, so it is safe to share) and decodes it per read — a
+/// decode that allocates nothing for the common default ACL.
+#[cfg(feature = "permissions")]
+pub(crate) fn read_inode_bytes<R>(inodes: &R, table: &str, akey: AKey) -> AdbResult<Option<Vec<u8>>>
+where
+    R: ReadableTable<&'static [u8], &'static [u8]>, {
+    Ok(inodes
+        .get(inode_key(table, akey).as_slice())?
+        .map(|guard| guard.value().to_vec()))
+}
+
+/// Decodes vnode metadata (ACL + both integrity tags) from already-fetched inode
+/// bytes — the cached-read counterpart of [`read_meta`].
+#[cfg(feature = "permissions")]
+pub(crate) fn decode_meta(bytes: &[u8]) -> AdbResult<Meta> {
+    let inode = Inode::decode(bytes)?;
+
+    Ok((inode.acl(), inode.mac(), inode.sig()))
+}
+
 /// Stamps the default ACL on vnode `akey` — `owner`, `group`, and the default
 /// mode — but only when it has none yet, so an overwrite preserves the ACL.
 #[cfg(feature = "permissions")]

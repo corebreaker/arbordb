@@ -24,7 +24,6 @@ use crate::{
     index::{registry::IndexEntry, Pattern},
     path::{APath, IntoArborPath, IntoValuePath, VPath},
     value::Value,
-    vnode::NodeKind,
     AKey,
 };
 
@@ -123,7 +122,7 @@ pub(crate) fn load<T: AData>(src: &dyn Grab, path: impl IntoArborPath) -> AdbRes
     match get_entry_kind(&blob)? {
         EntryKind::File => {
             // Skip the one-byte entry tag; the value payload starts at offset 1.
-            let reader = ArchivedReader::new(blob, 1);
+            let reader = ArchivedReader::new(blob, 1)?;
 
             Ok(Some(T::load(&reader, &VPath::root())?))
         }
@@ -219,7 +218,7 @@ pub(crate) fn fetch<A: ARef<'static>>(src: &dyn Grab, path: impl IntoArborPath) 
 
     match get_entry_kind(&blob)? {
         EntryKind::File => {
-            let reader: Arc<dyn Reader> = Arc::new(ArchivedReader::new(blob, 1));
+            let reader: Arc<dyn Reader> = Arc::new(ArchivedReader::new(blob, 1)?);
 
             Ok(Some(A::open(reader, VPath::root())))
         }
@@ -260,10 +259,7 @@ pub(crate) fn get(src: &dyn Grab, path: impl IntoArborPath, at: impl IntoValuePa
         return Ok(None);
     };
 
-    match node.kind()? {
-        NodeKind::Leaf => Ok(Some(node.scalar()?)),
-        _ => Ok(None),
-    }
+    node.scalar_if_leaf()
 }
 
 /// Reads a typed scalar at `at` inside the file at `path`.
@@ -527,7 +523,7 @@ fn load_entity<T: AData>(src: &dyn Grab, entity: AKey) -> AdbResult<Option<T>> {
 
     match get_entry_kind(&blob)? {
         EntryKind::File => {
-            let reader = ArchivedReader::new(blob, 1);
+            let reader = ArchivedReader::new(blob, 1)?;
 
             Ok(Some(T::load(&reader, &VPath::root())?))
         }

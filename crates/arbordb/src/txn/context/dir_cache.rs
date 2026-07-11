@@ -18,6 +18,7 @@
 //! a scalar edit) pays nothing for the cache.
 
 use crate::AKey;
+use smol_str::SmolStr;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
@@ -26,8 +27,10 @@ use std::{
     },
 };
 
-/// The children of a single directory, buffered for in-place mutation.
-type Children = BTreeMap<String, AKey>;
+/// The children of a single directory, buffered for in-place mutation. A short child
+/// name (the common case) is stored inline by [`SmolStr`], so seeding and mutating a
+/// buffered directory allocates nothing per name.
+type Children = BTreeMap<SmolStr, AKey>;
 
 /// The directories mutated so far in one write transaction, plus the flags that gate
 /// access to them. A [`Mutex`] (not a `RefCell`) keeps the enclosing write

@@ -183,6 +183,23 @@ impl<'a> ArchivedValue<'a> {
         })
     }
 
+    /// Re-wraps `blob` at an already-validated `root` offset, skipping the header
+    /// re-check — for a cursor (an [`ArchivedReader`](crate::access::ArchivedReader))
+    /// that validated the header once at construction and re-views the same blob on
+    /// every field read.
+    pub(crate) fn with_root(blob: &'a [u8], root: u32) -> Self {
+        Self {
+            blob,
+            root,
+        }
+    }
+
+    /// The captured root-vnode offset, so a caller can memoise a validated view and
+    /// rebuild it with [`with_root`](Self::with_root) without re-reading the header.
+    pub(crate) fn root_offset(&self) -> u32 {
+        self.root
+    }
+
     /// The root vnode.
     pub(crate) fn root(&self) -> ArchivedNode<'a> {
         ArchivedNode {
@@ -240,6 +257,23 @@ impl<'a> ArchivedNode<'a> {
             .ok_or_else(|| AdbError::Corrupt("value blob is truncated".into()))?;
 
         Scalar::decode(&mut Reader::new(body))
+    }
+
+    /// This leaf's scalar if it is a leaf, or `None` otherwise — reading the
+    /// discriminant byte **once**, unlike a `kind()` then `scalar()` pair. The hot
+    /// scalar read (`scalar_at`, `get`) goes through this.
+    pub(crate) fn scalar_if_leaf(&self) -> AdbResult<Option<Scalar>> {
+        let off = self.off as usize;
+        if read_u8(self.blob, off)? != LEAF {
+            return Ok(None);
+        }
+
+        let body = self
+            .blob
+            .get(off + 1..)
+            .ok_or_else(|| AdbError::Corrupt("value blob is truncated".into()))?;
+
+        Ok(Some(Scalar::decode(&mut Reader::new(body))?))
     }
 
     /// If this is a leaf, the byte range `(offset, len)` of its encoded scalar within

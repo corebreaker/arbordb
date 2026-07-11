@@ -170,6 +170,7 @@ mod tests {
     use crate::value::Value;
 
     use redb::{Database, backends::InMemoryBackend};
+    use smol_str::SmolStr;
     use std::collections::BTreeMap;
 
     fn user(age: i64) -> Value {
@@ -214,7 +215,7 @@ mod tests {
             data.insert(u128::from(bob), file_entry(&encode(&user(40))).as_slice())
                 .unwrap();
 
-            let root = BTreeMap::from([(String::from("alice"), alice), (String::from("bob"), bob)]);
+            let root = BTreeMap::from([(SmolStr::from("alice"), alice), (SmolStr::from("bob"), bob)]);
             data.insert(u128::from(AKey::ROOT), dir_entry(&encode_dir(&root)).as_slice())
                 .unwrap();
 
@@ -261,7 +262,7 @@ mod tests {
             data.insert(u128::from(bob), file_entry(&encode(&user(30))).as_slice())
                 .unwrap();
 
-            let root = BTreeMap::from([(String::from("alice"), alice), (String::from("bob"), bob)]);
+            let root = BTreeMap::from([(SmolStr::from("alice"), alice), (SmolStr::from("bob"), bob)]);
             data.insert(u128::from(AKey::ROOT), dir_entry(&encode_dir(&root)).as_slice())
                 .unwrap();
 

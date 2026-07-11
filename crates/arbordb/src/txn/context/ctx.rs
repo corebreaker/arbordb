@@ -26,6 +26,7 @@ use crate::{
 use super::DirBuffer;
 
 use redb::ReadableTable;
+use smol_str::SmolStr;
 use std::collections::BTreeMap;
 
 /// The per-transaction data table (borrows the write transaction).
@@ -248,7 +249,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
 
     /// Directory `akey`'s children as an owned map, verifying its integrity first
     /// (empty if the vnode is absent). Errors if `akey` is a file.
-    pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<String, AKey>> {
+    pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<SmolStr, AKey>> {
         // A directory buffered in this transaction is authoritative.
         #[cfg(not(feature = "permissions"))]
         if self.dirs.dirty()
@@ -268,7 +269,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
             Ok(ArchivedDir::new(payload)?
                 .entries()?
                 .into_iter()
-                .map(|(name, child)| (name.to_string(), child))
+                .map(|(name, child)| (SmolStr::from(name), child))
                 .collect())
         })?;
 
@@ -313,7 +314,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// Buffers `map` as directory `akey`'s whole child-map (a fresh or replaced
     /// directory), to be encoded and written once at commit.
     #[cfg(not(feature = "permissions"))]
-    pub(super) fn buffer_dir(&self, akey: AKey, map: BTreeMap<String, AKey>) {
+    pub(super) fn buffer_dir(&self, akey: AKey, map: BTreeMap<SmolStr, AKey>) {
         self.dirs.write(|dirs| {
             dirs.insert(akey, map);
         });
@@ -337,7 +338,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
                 None => dirs.get_mut(&parent).expect("the parent is buffered"),
             };
 
-            children.insert(name.to_string(), child);
+            children.insert(SmolStr::from(name), child);
         });
 
         Ok(())
@@ -483,7 +484,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// (the caller must already be an authorized administrator).
     #[cfg(feature = "permissions")]
     pub(in super::super) fn reap_owned(&mut self, uid: u32) -> AdbResult<()> {
-        let mut victims: Vec<(AKey, String)> = Vec::new();
+        let mut victims: Vec<(AKey, SmolStr)> = Vec::new();
         collect_owned(self, AKey::ROOT, uid, &mut victims)?;
 
         for (parent, name) in victims {

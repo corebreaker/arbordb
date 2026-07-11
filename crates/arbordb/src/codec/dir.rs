@@ -17,13 +17,16 @@ use crate::{
     AKey,
 };
 
+use smol_str::SmolStr;
 use std::{cmp::Ordering, collections::BTreeMap};
 
 /// Bytes per entry: name offset (`u32`) + name length (`u32`) + child key (16).
 const ENTRY: usize = 4 + 4 + 16;
 
-/// Serialises a directory's `Name → AKey` children into a blob.
-pub(crate) fn encode_dir(children: &BTreeMap<String, AKey>) -> Vec<u8> {
+/// Serialises a directory's `Name → AKey` children into a blob. Names are held as
+/// [`SmolStr`], which stores a short child name (the common case) inline, so building
+/// a directory's child-map allocates nothing per name.
+pub(crate) fn encode_dir(children: &BTreeMap<SmolStr, AKey>) -> Vec<u8> {
     let count = children.len();
     let names_start = 4 + count * ENTRY;
 
@@ -130,8 +133,8 @@ impl<'a> ArchivedDir<'a> {
 mod tests {
     use super::*;
 
-    fn dir(pairs: &[(&str, u128)]) -> BTreeMap<String, AKey> {
-        pairs.iter().map(|(n, k)| ((*n).to_string(), AKey::from(*k))).collect()
+    fn dir(pairs: &[(&str, u128)]) -> BTreeMap<SmolStr, AKey> {
+        pairs.iter().map(|(n, k)| (SmolStr::from(*n), AKey::from(*k))).collect()
     }
 
     #[test]
