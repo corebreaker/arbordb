@@ -68,8 +68,9 @@ pub(crate) fn reap_owned_in(txn: &WriteTransaction, table: &str, uid: u32, princ
 pub struct WriteTxn {
     /// The underlying engine write transaction.
     txn:   WriteTransaction,
-    /// The table this transaction writes.
-    table: String,
+    /// The table this transaction writes. An `Arc<str>` so a transaction start clones
+    /// a pointer, not the string bytes.
+    table: Arc<str>,
     /// The database-wide shared state (for the generation bump on commit).
     inner: Arc<DbInner>,
 
@@ -87,7 +88,7 @@ pub struct WriteTxn {
 impl WriteTxn {
     pub(crate) fn new(
         txn: WriteTransaction,
-        table: String,
+        table: Arc<str>,
         inner: Arc<DbInner>,
         #[cfg(feature = "permissions")] principal: Arc<Principal>,
     ) -> Self {

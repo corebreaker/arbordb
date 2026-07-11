@@ -57,7 +57,7 @@ pub struct ReadTxn {
     /// The underlying engine read snapshot.
     txn:        ReadTransaction,
     /// The table this snapshot reads.
-    table:      String,
+    table:      Arc<str>,
     /// The table's shared path/blob cache.
     cache:      Arc<PathCache>,
     /// The generation captured at snapshot start, tagging cache lookups.
@@ -110,7 +110,7 @@ pub struct ReadTxn {
 impl ReadTxn {
     pub(crate) fn new(
         txn: ReadTransaction,
-        table: String,
+        table: Arc<str>,
         cache: Arc<PathCache>,
         generation: u64,
         #[cfg(feature = "entry-timestamps")] inner: Arc<DbInner>,

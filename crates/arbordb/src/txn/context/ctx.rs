@@ -29,6 +29,9 @@ use redb::ReadableTable;
 use smol_str::SmolStr;
 use std::collections::BTreeMap;
 
+#[cfg(feature = "permissions")]
+use std::{cell::RefCell, collections::HashSet};
+
 /// The per-transaction data table (borrows the write transaction).
 pub(in super::super) type DataTable<'txn> = redb::Table<'txn, u128, EntryBytes>;
 
@@ -61,6 +64,14 @@ pub(in super::super) struct Context<'txn, 'a> {
     /// The identity performing the mutation; drives ACL enforcement.
     #[cfg(feature = "permissions")]
     principal: &'a Principal,
+
+    /// vnodes already integrity-verified in this mutation, so a directory touched
+    /// twice (traversal then a child/kind probe) is MAC-verified once. Invalidated
+    /// whenever a vnode is (re)written or removed. A `RefCell` because the read
+    /// helpers take `&self`; the `Context` is a per-mutation stack local, never
+    /// shared across threads.
+    #[cfg(feature = "permissions")]
+    verified: RefCell<HashSet<AKey>>,
 }
 
 impl<'txn, 'a> Context<'txn, 'a> {
@@ -79,12 +90,20 @@ impl<'txn, 'a> Context<'txn, 'a> {
             table,
             now: timestamp_now(),
             principal,
+            verified: RefCell::new(HashSet::new()),
         }
     }
 
     #[cfg(feature = "permissions")]
     pub(super) fn principal(&self) -> &'a Principal {
         self.principal
+    }
+
+    /// Forgets any memoized "already verified" mark for `akey` — called when its blob
+    /// or ACL changes, so a later read in the same mutation re-verifies the new bytes.
+    #[cfg(feature = "permissions")]
+    fn invalidate_verified(&self, akey: AKey) {
+        self.verified.borrow_mut().remove(&akey);
     }
 
     /// Bundles the data table with the per-vnode metadata table and the directory
@@ -120,6 +139,11 @@ impl<'txn, 'a> Context<'txn, 'a> {
     pub(super) fn put_entry(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
         self.data.insert(u128::from(akey), entry)?;
 
+        // The blob (and, below, its fresh seal) changed; a later read in this
+        // mutation must re-verify rather than trust the pre-write memo.
+        #[cfg(feature = "permissions")]
+        self.invalidate_verified(akey);
+
         // Timestamps-only build: record the write time in the inode.
         #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
         inode::touch(self.inodes, self.table, akey, self.now)?;
@@ -151,6 +175,9 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// Removes a vnode's entry blob together with its inode.
     pub(super) fn remove_entry(&mut self, akey: AKey) -> AdbResult<()> {
         self.data.remove(u128::from(akey))?;
+
+        #[cfg(feature = "permissions")]
+        self.invalidate_verified(akey);
 
         #[cfg(feature = "entry-timestamps")]
         inode::forget(self.inodes, self.table, akey)?;
@@ -375,13 +402,25 @@ impl<'txn, 'a> Context<'txn, 'a> {
             return Ok(());
         };
 
+        // Skip a repeat verification of the same vnode within this mutation. The memo
+        // is cleared whenever the vnode is written (see `invalidate_verified`), so it
+        // never masks a change this transaction makes, and an external tamper is still
+        // caught on the first read (a fresh transaction starts with an empty memo).
+        if self.verified.borrow().contains(&akey) {
+            return Ok(());
+        }
+
         // The ACL and MAC come from one inode decode (the tag binds both).
         let (acl, mac, _sig) = read_meta(&*self.inodes, self.table, akey)?;
         let acl = acl.map(|acl| acl.encode()).unwrap_or_default();
         let expected = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
 
         match mac {
-            Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
+            Some(mac) if perm::integrity::ct_eq(&mac, &expected) => {
+                self.verified.borrow_mut().insert(akey);
+
+                Ok(())
+            }
             _ => Err(AdbError::Tampered(format!(
                 "integrity check failed for a vnode in table '{}'",
                 self.table
@@ -454,6 +493,9 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// Replaces `akey`'s ACL.
     #[cfg(feature = "permissions")]
     pub(super) fn write_acl(&mut self, akey: AKey, acl: Acl) -> AdbResult<()> {
+        // The ACL (which the integrity tag binds) changed; a later read re-verifies.
+        self.invalidate_verified(akey);
+
         set_acl(self.inodes, self.table, akey, acl)
     }
 

@@ -22,8 +22,9 @@ use crate::perm::Principal;
 pub struct Table {
     /// The database-wide shared state.
     inner: Arc<DbInner>,
-    /// This table's name.
-    name:  String,
+    /// This table's name. An `Arc<str>` so each transaction start clones a pointer,
+    /// not the string bytes.
+    name:  Arc<str>,
     /// This table's shared path/blob cache.
     cache: Arc<PathCache>,
 
@@ -36,7 +37,7 @@ pub struct Table {
 impl Table {
     pub(crate) fn new(
         inner: Arc<DbInner>,
-        name: String,
+        name: Arc<str>,
         cache: Arc<PathCache>,
         #[cfg(feature = "permissions")] principal: Arc<Principal>,
     ) -> Self {

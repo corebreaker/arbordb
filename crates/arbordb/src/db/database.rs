@@ -143,7 +143,7 @@ impl ArborDb {
 
         Ok(Table::new(
             Arc::clone(&self.inner),
-            name.to_string(),
+            Arc::from(name),
             cache,
             #[cfg(feature = "permissions")]
             Arc::clone(&self.principal),
