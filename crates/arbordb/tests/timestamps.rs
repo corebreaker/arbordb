@@ -1,4 +1,4 @@
-//! Integration tests for the `entry-timestamps` feature: per-vnode created /
+//! Integration tests for the `entry-timestamps` feature: per-a-node created /
 //! modified / accessed datetimes held in the reserved `$inodes` table.
 
 #![cfg(feature = "entry-timestamps")]
@@ -50,7 +50,7 @@ fn create_sets_all_three_times_together() {
         .unwrap()
         .expect("a stored file has times");
 
-    // A freshly created vnode stamps all three from the same clock reading.
+    // A freshly created a-node stamps all three from the same clock reading.
     assert_eq!(times.created(), times.modified());
     assert_eq!(times.created(), times.accessed());
 }
@@ -149,7 +149,7 @@ fn mv_preserves_the_moved_node_times() {
     }
     let after = t.read().unwrap().times("dst/y").unwrap().unwrap();
 
-    // A move relinks the same vnode — its identity and its timestamps are unchanged.
+    // A move relinks the same a-node — its identity and its timestamps are unchanged.
     assert_eq!(after.created(), before.created());
     assert_eq!(after.modified(), before.modified());
 }

@@ -194,6 +194,36 @@ fn permissions(c: &mut Criterion) {
 
         group.finish();
     }
+
+    // Recompose a whole entity from a FRESH read transaction each iteration — the
+    // per-snapshot memo starts empty every time, so this exercises the *shared*
+    // (generation-keyed) blob and inode-bytes caches, not the per-txn memo. It is the
+    // "one read per transaction" pattern the comparison harness uses.
+    {
+        let mut group = c.benchmark_group("perm_load_fresh_txn");
+        group.throughput(Throughput::Elements(1));
+        let slot = RING / 2;
+
+        group.bench_function("unprotected", |b| {
+            b.iter(|| {
+                let r = plain.table.read().expect("read txn");
+                let u: Option<User> = r.load(black_box(&plain.paths[slot])).expect("load");
+
+                black_box(u)
+            })
+        });
+
+        group.bench_function("protected", |b| {
+            b.iter(|| {
+                let r = protected.table.read().expect("read txn");
+                let u: Option<User> = r.load(black_box(&protected.paths[slot])).expect("load");
+
+                black_box(u)
+            })
+        });
+
+        group.finish();
+    }
 }
 
 criterion_group!(benches, permissions);

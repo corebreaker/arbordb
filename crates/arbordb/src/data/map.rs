@@ -3,6 +3,7 @@
 use super::{
     refs::{AIdentifiable, AMut, ARef},
     AData,
+    NodeEncoder,
 };
 
 use crate::{
@@ -24,6 +25,18 @@ impl<T: AData> AData for BTreeMap<String, T> {
         }
 
         Ok(())
+    }
+
+    fn encode_node(&self, enc: &mut NodeEncoder) -> AdbResult<u32> {
+        // A `BTreeMap` iterates name-sorted, exactly what `object` requires; emit each
+        // value (children first), recording its offset, then the object vnode.
+        let mut entries = Vec::with_capacity(self.len());
+        for (name, value) in self {
+            let off = value.encode_node(enc)?;
+            entries.push((name.as_str(), off));
+        }
+
+        Ok(enc.object(&entries))
     }
 
     fn load<R: Reader>(reader: &R, at: &VPath) -> AdbResult<Self> {

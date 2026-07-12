@@ -5,7 +5,7 @@
 
 use arbordb::{
     acl::{AclClass, Rights},
-    data::{AValue, Scalar},
+    data::{AValue, LeafMut, Scalar},
     perm::PublicKey,
     AdbError,
     ArborDb,
@@ -256,6 +256,106 @@ fn owner_may_write_but_another_user_only_reads() {
 }
 
 #[test]
+fn a_non_master_bulk_loads_under_a_fresh_directory_in_one_transaction() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+    }
+
+    // Alice, in ONE transaction, stores many files under a directory she creates in
+    // that same transaction. Under the write-back cache that directory's blob is
+    // buffered (written and sealed once at commit) — but its ACL is stamped eagerly,
+    // so each later store's traversal check sees that she owns it and may create
+    // children there. Without the eager ACL the second store would be denied (a
+    // directory with no ACL is reachable only by an administrator), so this exercises
+    // the correctness the master-only bench cannot.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+
+        let w = t.write().unwrap();
+        for i in 0..50i64 {
+            w.store_value(format!("alice-dir/f{i}"), &leaf(i)).unwrap();
+        }
+        w.commit().unwrap();
+
+        // A fresh read transaction re-walks and re-verifies every sealed directory and
+        // file blob written at the commit-time flush — a bad seal would error here.
+        let r = t.read().unwrap();
+        for i in 0..50i64 {
+            assert_eq!(r.load_value(format!("alice-dir/f{i}")).unwrap(), Some(leaf(i)));
+        }
+        assert_eq!(r.owner("alice-dir").unwrap(), Some(String::from("alice")));
+    }
+}
+
+#[test]
+fn a_non_master_reads_its_own_buffered_directory_within_a_transaction() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+    }
+
+    let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+    let t = alice.open_table("data").unwrap();
+    let w = t.write().unwrap();
+
+    // Both files land under one directory created in this same transaction, so `d` is
+    // buffered, not yet in the engine.
+    w.store_value("d/x", &leaf(1)).unwrap();
+    w.store_value("d/y", &leaf(2)).unwrap();
+
+    // Reads over this transaction's own uncommitted state see the buffered directory:
+    // `ls` lists both children (the buffered blob is trusted, not integrity-checked,
+    // since it is sealed only at commit) and a value read returns the just-stored one.
+    let names: Vec<String> = w.ls("d").unwrap().into_iter().map(|e| e.name().to_string()).collect();
+    assert_eq!(names, vec![String::from("x"), String::from("y")]);
+    assert_eq!(w.load_value("d/x").unwrap(), Some(leaf(1)));
+
+    w.commit().unwrap();
+
+    // And after commit, from a fresh (empty-buffer) read transaction that must re-walk
+    // and re-verify the now-sealed directory.
+    let r = t.read().unwrap();
+    assert_eq!(r.load_value("d/y").unwrap(), Some(leaf(2)));
+}
+
+#[test]
+fn a_non_master_copies_a_directory_subtree_under_the_write_back_cache() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+    }
+
+    let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+    let t = alice.open_table("data").unwrap();
+
+    {
+        let w = t.write().unwrap();
+        w.store_value("src/inner/leaf", &leaf(7)).unwrap();
+
+        // Deep-copy the subtree under fresh identities in the SAME transaction: the
+        // copy reads the still-buffered source and writes several buffered destination
+        // directories (each ACL-stamped eagerly, each sealed once at commit).
+        w.cp("src", "dst").unwrap();
+        w.commit().unwrap();
+    }
+
+    // A fresh read transaction re-walks and re-verifies the sealed copies; alice owns
+    // every copied directory.
+    let r = t.read().unwrap();
+    assert_eq!(r.load_value("dst/inner/leaf").unwrap(), Some(leaf(7)));
+    assert_eq!(r.owner("dst").unwrap(), Some(String::from("alice")));
+    assert_eq!(r.owner("dst/inner").unwrap(), Some(String::from("alice")));
+}
+
+#[test]
 fn chown_transfers_ownership() {
     let (_dir, path) = tmp_db();
 
@@ -297,7 +397,64 @@ fn chown_transfers_ownership() {
 }
 
 #[test]
-fn add_and_del_group_manage_a_vnodes_groups() {
+fn an_edit_then_chmod_in_one_transaction_seals_the_edited_bytes() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+        db.add_user("bob", "b", false).unwrap();
+    }
+
+    // Alice creates a file, then — in one later transaction — edits its value in place
+    // (buffered by the write-back cache) and changes its ACL. The chmod re-seals the
+    // integrity tag, which must cover the buffered edit, not the stale on-disk bytes.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+
+        {
+            let w = t.write().unwrap();
+            w.store_value("f", &leaf(1)).unwrap();
+            w.commit().unwrap();
+        }
+
+        {
+            let w = t.write().unwrap();
+            {
+                // A same-width scalar overwrite buffers the edited entry (not re-sealed yet).
+                let f: LeafMut<'_, i64> = w.fetch_mut("f").unwrap().unwrap();
+                f.set(&2).unwrap();
+            } // the accessor borrows the txn, so drop it before the chmod and commit
+
+            // The chmod re-seals `f`'s integrity tag over its current (buffered) bytes.
+            w.set_acl("f", AclClass::Other, Rights::None).unwrap();
+            w.commit().unwrap();
+        }
+    }
+
+    // Reopened (buffer and verified-memo both empty), the on-disk seal verifies over the
+    // edited bytes: Alice reads back the edit rather than hitting a `Tampered` error.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let r = t.read().unwrap();
+
+        assert_eq!(r.load::<i64>("f").unwrap(), Some(2));
+    }
+
+    // And the chmod took effect too: Bob (neither owner nor in a permitted group) is denied.
+    {
+        let bob = ArborDb::open_with_authentication(&path, "bob", "b").unwrap();
+        let t = bob.open_table("data").unwrap();
+        let r = t.read().unwrap();
+
+        assert!(matches!(r.load::<i64>("f"), Err(AdbError::PermissionDenied(_))));
+    }
+}
+
+#[test]
+fn add_and_del_group_manage_a_nodes_groups() {
     let (_dir, path) = tmp_db();
 
     {
@@ -334,7 +491,7 @@ fn add_and_del_group_manage_a_vnodes_groups() {
         assert!(matches!(w.add_group("f", "staff"), Err(AdbError::PermissionDenied(_))));
     }
 
-    // Alice removes the group again; the vnode belongs to nothing afterwards.
+    // Alice removes the group again; the a-node belongs to nothing afterwards.
     {
         let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
         let t = alice.open_table("data").unwrap();
@@ -358,7 +515,7 @@ fn deleting_needs_the_delete_grade_not_merely_modify() {
         let w = t.write().unwrap();
         w.store_value("f", &leaf(1)).unwrap();
 
-        // Grant `other` Modify: enough to overwrite the value, not to delete the vnode.
+        // Grant `other` Modify: enough to overwrite the value, not to delete the a-node.
         w.set_acl("f", AclClass::Other, Rights::Modify).unwrap();
         w.commit().unwrap();
     }
@@ -426,7 +583,7 @@ fn set_acl_restricts_access_and_get_acl_reflects_it() {
 }
 
 #[test]
-fn kind_and_exists_enforce_access_on_the_target_vnode() {
+fn kind_and_exists_enforce_access_on_the_target_a_node() {
     let (_dir, path) = tmp_db();
 
     // Master stores a file and revokes `other` on it entirely.
@@ -456,7 +613,7 @@ fn kind_and_exists_enforce_access_on_the_target_vnode() {
 }
 
 #[test]
-fn kind_verifies_the_target_vnodes_integrity() {
+fn kind_verifies_the_target_a_nodes_integrity() {
     use redb::{Database, ReadableTable, TableDefinition};
 
     let (_dir, path) = tmp_db();
@@ -494,7 +651,7 @@ fn kind_verifies_the_target_vnodes_integrity() {
         wtx.commit().unwrap();
     }
 
-    // `kind` now verifies the target vnode's own tag, so it catches the tampering
+    // `kind` now verifies the target a-node's own tag, so it catches the tampering
     // exactly as `load_value` does, rather than reporting the kind of altered bytes.
     let master = ArborDb::open_with_authentication(&path, "master", "pw").unwrap();
     let t = master.open_table("docs").unwrap();

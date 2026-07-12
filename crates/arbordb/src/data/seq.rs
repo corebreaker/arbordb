@@ -3,6 +3,7 @@
 use super::{
     refs::{AIdentifiable, AMut, ARef},
     AData,
+    NodeEncoder,
 };
 
 use crate::{
@@ -24,6 +25,16 @@ impl<T: AData> AData for Vec<T> {
         }
 
         Ok(())
+    }
+
+    fn encode_node(&self, enc: &mut NodeEncoder) -> AdbResult<u32> {
+        // Children first: emit each element, collecting its offset, then the list vnode.
+        let mut offsets = Vec::with_capacity(self.len());
+        for item in self {
+            offsets.push(item.encode_node(enc)?);
+        }
+
+        Ok(enc.list(&offsets))
     }
 
     fn load<R: Reader>(reader: &R, at: &VPath) -> AdbResult<Self> {

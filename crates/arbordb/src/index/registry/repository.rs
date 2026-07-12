@@ -147,6 +147,21 @@ impl RegistryRepository {
         Ok(false)
     }
 
+    /// Whether the registry holds any index at all, across every table — reading
+    /// only the entry count, never a record. Used at open to prime the write path's
+    /// "has any index" fast-path flag, so an index-free database skips the registry
+    /// read on every mutation.
+    pub(crate) fn any<T: ReadableTable<&'static str, &'static [u8]>>(meta: &T) -> AdbResult<bool> {
+        let Some(guard) = meta.get(META_INDEX_REGISTRY_KEY)? else {
+            return Ok(false);
+        };
+
+        let mut r = Reader::new(guard.value());
+        let _next_id = r.u32()?;
+
+        Ok(r.u32()? > 0)
+    }
+
     /// Removes the index named `name` on `table`, returning the entry that was
     /// removed (so its physical entries can be purged) or `None` when no such index
     /// exists. The `next_id` allocator is deliberately left untouched — ids are

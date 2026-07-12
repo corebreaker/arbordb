@@ -1,8 +1,12 @@
 //! The [`AData`] composite trait.
 
-use super::refs::{AMut, ARef};
+use super::{
+    encode::NodeEncoder,
+    refs::{AMut, ARef},
+};
+
 use crate::{
-    access::{Reader, Writer},
+    access::{MemWriter, Reader, Writer},
     error::AdbResult,
     path::VPath,
 };
@@ -25,4 +29,21 @@ pub trait AData: Sized {
 
     /// Reconstructs a value from the subtree rooted at `at`.
     fn load<R: Reader>(reader: &R, at: &VPath) -> AdbResult<Self>;
+
+    /// Emits `self` as one vnode into `enc`, children first, returning its offset —
+    /// the direct encode path behind `WriteTxn::store`, which bypasses the
+    /// intermediate [`Value`](crate::Value) tree.
+    ///
+    /// The default builds a `Value` through [`store`](Self::store) and encodes that,
+    /// so every implementor is correct with no extra work; the scalars, containers,
+    /// and simple derived structs override it to emit straight into the blob (a plain
+    /// `#[derive(AData)]` struct with a `flatten` or `store_with` field keeps the
+    /// default). An override MUST produce the byte-for-byte blob the default would.
+    #[doc(hidden)]
+    fn encode_node(&self, enc: &mut NodeEncoder) -> AdbResult<u32> {
+        let writer = MemWriter::new();
+        self.store(&writer, &VPath::root())?;
+
+        Ok(enc.value(&writer.into_value()))
+    }
 }

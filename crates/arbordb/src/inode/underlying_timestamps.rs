@@ -1,4 +1,4 @@
-//! [`UnderlyingTimestamps`] — the on-disk form of a vnode's three timestamps
+//! [`UnderlyingTimestamps`] — the on-disk form of an a-node's three timestamps
 //! (Unix-epoch milliseconds), and its conversion to the public
 //! [`NodeTimestamps`](super::datetime::NodeTimestamps).
 
@@ -10,7 +10,7 @@ use crate::{
 
 use chrono::{DateTime, Utc};
 
-/// A vnode's three timestamps in on-disk form (Unix-epoch milliseconds).
+/// An a-node's three timestamps in on-disk form (Unix-epoch milliseconds).
 #[derive(Clone, Copy)]
 pub(super) struct UnderlyingTimestamps {
     /// Creation time, Unix-epoch milliseconds.

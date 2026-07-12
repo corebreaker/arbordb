@@ -378,7 +378,7 @@ pub(crate) fn authenticate(db: &Database, user: &str, password: &str) -> AdbResu
 /// Promotes a non-protected `db` to a protected one: mints a fresh integrity key
 /// and Ed25519 signing keypair (storing the public key in the clear), creates the
 /// master and guest users and the master and super groups, records `permissions` as
-/// required, back-fills a tag on every pre-existing vnode, and returns the master
+/// required, back-fills a tag on every pre-existing a-node, and returns the master
 /// session.
 pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Session> {
     let key = crypto::random_key()?;
@@ -386,7 +386,7 @@ pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Sess
     let pubkey = crypto::public_key(&seed);
     let (salt, nonce, wrapped) = wrap_secrets(password, &key, &seed)?;
 
-    // Snapshot the existing user tables so their vnodes can be back-filled with a
+    // Snapshot the existing user tables so their a-nodes can be back-filled with a
     // default ACL and an integrity tag below (data written before protection).
     let tables: Vec<String> = {
         let read = db.begin_read()?;
@@ -453,8 +453,9 @@ pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Sess
     }
 
     // Back-fill: stamp a master-owned default ACL and seal an integrity tag on every
-    // pre-existing vnode, so authenticated reads verify and non-root data has an owner.
+    // pre-existing a-node, so authenticated reads verify and non-root data has an owner.
     {
+        let signer = crypto::Signer::new(&seed);
         let mut inodes = txn.open_table(INODES_TABLE)?;
         for table in &tables {
             let rows: Vec<(AKey, Vec<u8>)> = {
@@ -487,7 +488,7 @@ pub(crate) fn promote_to_master(db: &Database, password: &str) -> AdbResult<Sess
                     &mut inodes,
                     table,
                     akey,
-                    integrity::sign_value(&seed, table, akey, &entry, &acl),
+                    integrity::sign_value(&signer, table, akey, &entry, &acl),
                 )?;
             }
         }
@@ -880,7 +881,7 @@ pub(crate) fn group_members(db: &Database, group: &str) -> AdbResult<Vec<String>
 }
 
 /// Removes group `name`: unassigns it from every user and strips its gid from every
-/// vnode ACL. The built-in master and super groups cannot be removed.
+/// a-node ACL. The built-in master and super groups cannot be removed.
 pub(crate) fn remove_group(db: &Database, key: &[u8], name: &str) -> AdbResult<()> {
     let txn = db.begin_write()?;
 

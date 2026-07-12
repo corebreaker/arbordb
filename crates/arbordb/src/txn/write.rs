@@ -8,11 +8,11 @@ use super::{
 };
 
 use crate::{
-    access::{MemWriter, MutCursor, Writer},
+    access::{MutCursor, Writer},
     codec::decode,
     data::{AData, AMut, ARef, AValue, Scalar},
     db::DbInner,
-    engine::{data_def, entry_split, fetch_entry_kind, read_entry, resolve, Entry, EntryKind, INDEX_TABLE, META_TABLE},
+    engine::{data_def, entry_split, fetch_entry_kind, read_entry, Entry, EntryKind, INDEX_TABLE, META_TABLE},
     error::{AdbError, AdbResult},
     index::{
         maintenance,
@@ -39,12 +39,16 @@ use crate::{
     acl::{AclClass, Rights},
     codec::ArchivedDir,
     engine::EntryBytes,
-    inode::{read_acl, read_mac, Acl},
+    inode::{read_acl, read_meta, Acl},
     perm::{self, Principal},
 };
 
 #[cfg(feature = "permissions")]
 use redb::ReadableTable;
+
+use super::context::WriteBuffer;
+
+use crate::{codec::encode_dir, engine::dir_entry};
 
 /// Deletes every value owned by `uid` in `table`, within `txn`, bypassing ACL
 /// checks (the caller must already be an authorized administrator). Used by user
@@ -53,7 +57,10 @@ use redb::ReadableTable;
 pub(crate) fn reap_owned_in(txn: &WriteTransaction, table: &str, uid: u32, principal: &Principal) -> AdbResult<()> {
     let mut data = txn.open_table(data_def(table))?;
     let mut inodes = txn.open_table(INODES_TABLE)?;
-    let mut ctx = Context::new(&mut data, &mut inodes, table, principal);
+    // Reaping writes straight through the engine (buffering off), so each unlink and
+    // re-seal lands at once.
+    let dirs = WriteBuffer::new(false);
+    let mut ctx = Context::new(&mut data, &mut inodes, table, principal, &dirs);
 
     ctx.reap_owned(uid)
 }
@@ -62,10 +69,18 @@ pub(crate) fn reap_owned_in(txn: &WriteTransaction, table: &str, uid: u32, princ
 pub struct WriteTxn {
     /// The underlying engine write transaction.
     txn:   WriteTransaction,
-    /// The table this transaction writes.
-    table: String,
+    /// The table this transaction writes. An `Arc<str>` so a transaction start clones
+    /// a pointer, not the string bytes.
+    table: Arc<str>,
     /// The database-wide shared state (for the generation bump on commit).
     inner: Arc<DbInner>,
+
+    /// The write-back cache of dirty directories, flushed (and, under `permissions`,
+    /// sealed) at commit. Buffering is on only for an index-free database (so index
+    /// maintenance always reads current state); it turns a bulk load under one parent
+    /// into O(N) — and, under `permissions`, signs each touched directory once at
+    /// commit instead of on every child link.
+    dirs: WriteBuffer,
 
     /// The identity performing the writes; drives ACL enforcement.
     #[cfg(feature = "permissions")]
@@ -75,27 +90,86 @@ pub struct WriteTxn {
 impl WriteTxn {
     pub(crate) fn new(
         txn: WriteTransaction,
-        table: String,
+        table: Arc<str>,
         inner: Arc<DbInner>,
         #[cfg(feature = "permissions")] principal: Arc<Principal>,
     ) -> Self {
+        // Buffer directory writes only when no index needs the engine kept current.
+        let dirs = WriteBuffer::new(!inner.has_any_index());
+
         Self {
             txn,
             table,
             inner,
+            dirs,
             #[cfg(feature = "permissions")]
             principal,
         }
+    }
+
+    /// Resolves `path` and reads the resolved a-node's kind through a **single** data
+    /// table handle — the buffer-aware walk plus a kind probe — so `fetch_mut` opens
+    /// the data table once rather than twice. A buffered a-node is always a directory.
+    ///
+    /// The walk performs no access checks; under `permissions` it is used only to find
+    /// a file's identity and kind, and the enforced re-resolution on the write itself
+    /// (see [`put_scalar_into`](super::context::table::put_scalar_into)) is what checks
+    /// the ACLs.
+    fn resolve_with_kind(&self, path: &APath) -> AdbResult<(Option<AKey>, Option<EntryKind>)> {
+        let data = self.txn.open_table(data_def(&self.table))?;
+
+        let Some(akey) = self.resolve_buffered(&data, path)? else {
+            return Ok((None, None));
+        };
+
+        let kind = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            Some(EntryKind::Dir)
+        } else {
+            fetch_entry_kind(&data, akey)?
+        };
+
+        Ok((Some(akey), kind))
+    }
+
+    /// Resolves `path` for a read on this transaction, consulting the write-back
+    /// cache per directory so the walk sees this transaction's own buffered links
+    /// before the (stale-until-flush) engine. Performs no access checks — the enforced
+    /// walk is [`resolve_enforced`](Self::resolve_enforced).
+    fn resolve_buffered<R>(&self, data: &R, path: &APath) -> AdbResult<Option<AKey>>
+    where
+        R: redb::ReadableTable<u128, crate::engine::EntryBytes>, {
+        let mut akey = AKey::ROOT;
+        for name in path.names() {
+            // A buffered parent is authoritative; otherwise walk the engine.
+            let next = if self.dirs.dirty()
+                && let Some(found) = self
+                    .dirs
+                    .read(|dirs| dirs.get(&akey).map(|children| children.get(name.as_str()).copied()))
+            {
+                found
+            } else {
+                crate::engine::child_of(data, akey, name.as_str())?
+            };
+
+            match next {
+                Some(child) => akey = child,
+                None => return Ok(None),
+            }
+        }
+
+        Ok(Some(akey))
     }
 
     /// Stores a typed value as a file at `path`, creating parent directories as
     /// needed and replacing whatever was there. The value is decomposed into an
     /// in-memory tree, then encoded to one blob.
     pub fn store<T: AData>(&self, path: impl IntoArborPath, value: &T) -> AdbResult<()> {
-        let writer = MemWriter::new();
-        value.store(&writer, &VPath::root())?;
+        // Encode straight into the value blob through the typed direct encoder,
+        // bypassing the intermediate `Value` tree and its second walk.
+        let path = path.into_arbor_path()?;
+        let blob = crate::data::encode_data(value)?;
 
-        self.store_value(path, &writer.into_value())
+        self.store_blob_at(&path, &blob)
     }
 
     /// Stores any [`serde::Serialize`] value as a file at `path`, encoding it
@@ -116,7 +190,7 @@ impl WriteTxn {
     }
 
     /// Stores a dynamic [`Value`] as a file at `path`, creating parent directories
-    /// as needed. Replaces whatever was there: a file overwrite keeps the vnode's
+    /// as needed. Replaces whatever was there: a file overwrite keeps the a-node's
     /// identity; a directory is removed with its whole subtree first.
     pub fn store_value(&self, path: impl IntoArborPath, value: &Value) -> AdbResult<()> {
         self.store_value_at(&path.into_arbor_path()?, value)
@@ -134,8 +208,8 @@ impl WriteTxn {
     }
 
     /// Stores an already-encoded value blob at an already-parsed access path — the
-    /// direct Serde write path, which skips the intermediate [`Value`].
-    #[cfg(feature = "serde")]
+    /// shared tail of the typed direct encoder ([`store`](Self::store)) and the direct
+    /// Serde write path, both of which skip the intermediate [`Value`].
     pub(crate) fn store_blob_at(&self, path: &APath, value_blob: &[u8]) -> AdbResult<()> {
         if path.is_root() {
             return Err(AdbError::CannotAccess(String::from("cannot store a file at the root")));
@@ -150,10 +224,31 @@ impl WriteTxn {
     /// to the same width as the one already there, the blob is patched in place — no
     /// decode, no re-encode — otherwise the value is decoded, updated, and re-encoded.
     /// Registered indexes are maintained across either path.
-    pub(crate) fn put_scalar_at(&self, path: &APath, at: &VPath, scalar: Scalar) -> AdbResult<()> {
+    ///
+    /// `hint` is an a-node key the caller already resolved for `path`, paired with the
+    /// transaction's structural-change count at that moment — a mutable accessor from
+    /// [`fetch_mut`](Self::fetch_mut) supplies one so the common in-place patch skips
+    /// re-walking the directory tree; it is trusted only while that count is unchanged,
+    /// so an interleaved relink of `path` drops it (see [`table::put_scalar_into`]).
+    pub(crate) fn put_scalar_at(
+        &self,
+        path: &APath,
+        hint: Option<(AKey, u64)>,
+        at: &VPath,
+        scalar: Scalar,
+    ) -> AdbResult<()> {
         self.reindex_around(std::slice::from_ref(path), |ctx| {
-            table::put_scalar_into(ctx, path, at, &scalar)
+            table::put_scalar_into(ctx, path, hint, at, &scalar)
         })
+    }
+
+    /// The transaction's structural-change count — every `name → child` relink bumps
+    /// it. A mutable accessor from [`fetch_mut`](Self::fetch_mut) captures it when
+    /// opened and passes its key hint to the in-place scalar patch only while the count
+    /// is unchanged, so an interleaved `mv`/`rm`/`store` makes the write re-resolve the
+    /// path instead of trusting a hint the relink may have repointed.
+    pub(crate) fn structure_epoch(&self) -> u64 {
+        self.dirs.structure_epoch()
     }
 
     /// Opens a mutable accessor over the file at `path`, or `None` if absent. A scalar
@@ -163,28 +258,33 @@ impl WriteTxn {
     pub fn fetch_mut<'t, A: AMut<'t>>(&'t self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
         let apath = path.into_arbor_path()?;
 
-        // Presence check without decoding the value — resolve the vnode and read its
-        // kind alone.
-        {
-            let table = self.txn.open_table(data_def(&self.table))?;
-            match resolve(&table, &apath)? {
-                Some(akey) => match fetch_entry_kind(&table, akey)? {
-                    Some(EntryKind::File) => {}
-                    Some(EntryKind::Dir) => {
-                        return Err(AdbError::CannotAccess(format!("'{apath}' is a directory, not a file")));
-                    }
-                    None => return Ok(None),
-                },
-                None => return Ok(None),
-            }
-        }
+        // Presence check without decoding the value — resolve the a-node and read its
+        // kind alone. The resolved key is handed to the cursor as a hint, so an
+        // in-place scalar patch through it need not walk the directory tree again.
+        //
+        // The resolution is cache-aware, so a file stored earlier in this same
+        // transaction — its parent directory still buffered, not yet in the engine —
+        // is found here too. Under `permissions` it performs no access checks; the
+        // enforced re-resolution on the write itself is what checks the ACLs.
+        let (resolved, kind) = self.resolve_with_kind(&apath)?;
 
-        let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath));
+        let akey = match (resolved, kind) {
+            (Some(akey), Some(EntryKind::File)) => akey,
+            (Some(_), Some(EntryKind::Dir)) => {
+                return Err(AdbError::CannotAccess(format!("'{apath}' is a directory, not a file")));
+            }
+            _ => return Ok(None),
+        };
+
+        // Capture the structural-change count now, so a scalar patch through the cursor
+        // trusts its `akey` hint only while no interleaved relink has repointed `apath`.
+        let epoch = self.structure_epoch();
+        let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath, akey, epoch));
 
         Ok(Some(A::open(cursor, VPath::root())))
     }
 
-    /// Verifies vnode `akey`'s integrity tag over `entry` and its current ACL, so a
+    /// Verifies a-node `akey`'s integrity tag over `entry` and its current ACL, so a
     /// writer's own read-back (through [`load_value_at`](Self::load_value_at) and the
     /// mutable accessor) detects a blob altered outside the library rather than
     /// silently returning — or re-sealing over — it. A no-op unless this handle is an
@@ -200,31 +300,42 @@ impl WriteTxn {
         self.verify_with(&inodes, akey, entry)
     }
 
-    /// Verifies `akey`'s keyed MAC over `entry` and its ACL, using an already-open
-    /// `$inodes` handle so a caller mid-walk need not reopen the table (a write
-    /// transaction refuses a second open of the same table). A no-op unless this
-    /// handle is an authenticated user — the only writer that holds the key.
+    /// Checks `akey`'s keyed MAC over `entry`, given its ACL and MAC the caller has
+    /// **already decoded**. A no-op unless this handle is an authenticated user — the
+    /// only writer that holds the key (a guest cannot write).
     #[cfg(feature = "permissions")]
-    fn verify_with<R>(&self, inodes: &R, akey: AKey, entry: &[u8]) -> AdbResult<()>
-    where
-        R: ReadableTable<&'static [u8], &'static [u8]>, {
+    fn check_mac(&self, akey: AKey, entry: &[u8], acl: Option<&Acl>, mac: Option<[u8; 32]>) -> AdbResult<()> {
         let Principal::User(session) = self.principal.as_ref() else {
             return Ok(());
         };
 
-        let acl = read_acl(inodes, &self.table, akey)?
-            .map(|acl| acl.encode())
-            .unwrap_or_default();
-        let stored = read_mac(inodes, &self.table, akey)?;
+        let acl = acl.map(|acl| acl.encode()).unwrap_or_default();
         let expected = perm::integrity::mac_value(session.key(), &self.table, akey, entry, &acl);
 
-        match stored {
+        match mac {
             Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
             _ => Err(AdbError::Tampered(format!(
-                "integrity check failed for a vnode in table '{}'",
+                "integrity check failed for an a-node in table '{}'",
                 self.table
             ))),
         }
+    }
+
+    /// Verifies `akey`'s keyed MAC over `entry`, reading its ACL and MAC from an
+    /// already-open `$inodes` handle in a **single** decode (a write transaction
+    /// refuses a second open of the same table, so the handle is threaded through).
+    /// A no-op unless this handle is an authenticated user.
+    #[cfg(feature = "permissions")]
+    fn verify_with<R>(&self, inodes: &R, akey: AKey, entry: &[u8]) -> AdbResult<()>
+    where
+        R: ReadableTable<&'static [u8], &'static [u8]>, {
+        if !matches!(self.principal.as_ref(), Principal::User(_)) {
+            return Ok(());
+        }
+
+        let (acl, mac, _sig) = read_meta(inodes, &self.table, akey)?;
+
+        self.check_mac(akey, entry, acl.as_ref(), mac)
     }
 
     /// Whether ACL enforcement applies — a protected database written as an
@@ -245,16 +356,35 @@ impl WriteTxn {
 
         let mut akey = AKey::ROOT;
         for name in path.names() {
-            let acl = read_acl(&inodes, &self.table, akey)?;
+            // One inode decode per directory: the ACL authorizes the traversal (whether
+            // or not the directory blob is buffered) and, with the MAC, verifies an
+            // engine-read directory blob just below.
+            let (acl, mac, _sig) = read_meta(&inodes, &self.table, akey)?;
             perm::access::authorize(&self.principal, akey, acl.as_ref(), Rights::Access)?;
+
+            // A directory buffered by this transaction's own writes is authoritative
+            // and trusted: read the child from it, past the engine and its integrity
+            // check (a buffered blob is sealed only at the commit-time flush).
+            if self.dirs.dirty()
+                && let Some(found) = self
+                    .dirs
+                    .read(|dirs| dirs.get(&akey).map(|children| children.get(name.as_str()).copied()))
+            {
+                match found {
+                    Some(child) => akey = child,
+                    None => return Ok(None),
+                }
+
+                continue;
+            }
 
             let Some(entry) = read_entry(data, akey)? else {
                 return Ok(None);
             };
 
-            // A tampered directory blob could redirect a name to another vnode, so
+            // A tampered directory blob could redirect a name to another a-node, so
             // verify each directory descended through.
-            self.verify_with(&inodes, akey, &entry)?;
+            self.check_mac(akey, &entry, acl.as_ref(), mac)?;
 
             let (kind, payload) = entry_split(&entry)?;
             if kind != EntryKind::Dir {
@@ -275,16 +405,27 @@ impl WriteTxn {
     pub(crate) fn load_value_at(&self, path: &APath) -> AdbResult<Option<Value>> {
         let table = self.txn.open_table(data_def(&self.table))?;
 
-        let Some(akey) = resolve(&table, path)? else {
+        // Buffer-aware resolve, so a file under a directory created earlier in this
+        // transaction is found. No access checks — this is the writer's own read; the
+        // enforced walk runs on the write itself.
+        let Some(akey) = self.resolve_buffered(&table, path)? else {
             return Ok(None);
         };
 
-        let Some(entry) = read_entry(&table, akey)? else {
-            return Ok(None);
-        };
+        // A file edited earlier in this transaction lives in the buffer — trusted, and
+        // sealed only at commit; otherwise read and verify the engine entry.
+        let entry = if let Some(buffered) = self.dirs.file_get(akey) {
+            buffered
+        } else {
+            let Some(entry) = read_entry(&table, akey)? else {
+                return Ok(None);
+            };
 
-        #[cfg(feature = "permissions")]
-        self.verify_entry(akey, &entry)?;
+            #[cfg(feature = "permissions")]
+            self.verify_entry(akey, &entry)?;
+
+            entry
+        };
 
         let (kind, payload) = entry_split(&entry)?;
         match kind {
@@ -303,11 +444,11 @@ impl WriteTxn {
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
 
         #[cfg(feature = "permissions")]
-        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
         #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-        let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, &self.dirs);
         #[cfg(not(feature = "entry-timestamps"))]
-        let mut ctx = Context::new(&mut data);
+        let mut ctx = Context::new(&mut data, &self.dirs);
 
         table::ensure_dir(&mut ctx, &path)?;
 
@@ -329,7 +470,7 @@ impl WriteTxn {
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
-        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
 
         table::chown_into(&mut ctx, &path, new_uid)
     }
@@ -344,8 +485,8 @@ impl WriteTxn {
 
     /// Grants `rights` to `class` on the file or directory at `path`. For a
     /// [`Group`](AclClass::Group) this inserts or updates that group's entry — adding
-    /// the vnode to the group if needed — and setting a group to [`Rights::None`]
-    /// removes it. Requires `Modify` on the vnode; the root's ACL cannot be changed.
+    /// the a-node to the group if needed — and setting a group to [`Rights::None`]
+    /// removes it. Requires `Modify` on the a-node; the root's ACL cannot be changed.
     #[cfg(feature = "permissions")]
     pub fn set_acl(&self, path: impl IntoArborPath, class: AclClass, rights: Rights) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
@@ -358,7 +499,7 @@ impl WriteTxn {
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
-        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
 
         table::set_acl_into(&mut ctx, &path, |acl| match class {
             AclClass::User => acl.set_owner_rights(rights),
@@ -370,7 +511,7 @@ impl WriteTxn {
     /// Adds the file or directory at `path` to `group`, granting that group
     /// [`Access`](Rights::Access) unless it already has an entry (whose grade is
     /// then kept). Use [`set_acl`](Self::set_acl) to grant a stronger grade.
-    /// Requires `Modify` on the vnode.
+    /// Requires `Modify` on the a-node.
     #[cfg(feature = "permissions")]
     pub fn add_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
@@ -378,13 +519,13 @@ impl WriteTxn {
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
-        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
 
         table::set_acl_into(&mut ctx, &path, |acl| acl.add_group(gid))
     }
 
     /// Removes the file or directory at `path` from `group` (a no-op if it is not a
-    /// member). Requires `Modify` on the vnode.
+    /// member). Requires `Modify` on the a-node.
     #[cfg(feature = "permissions")]
     pub fn del_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
@@ -392,7 +533,7 @@ impl WriteTxn {
 
         let mut data = self.txn.open_table(data_def(&self.table))?;
         let mut inodes = self.txn.open_table(INODES_TABLE)?;
-        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+        let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
 
         table::set_acl_into(&mut ctx, &path, |acl| acl.remove_group(gid))
     }
@@ -408,8 +549,8 @@ impl WriteTxn {
         self.reindex_around(std::slice::from_ref(&path), |ctx| table::rm_into(ctx, &path))
     }
 
-    /// Moves the vnode at `src` to `dst`, keeping its identity (a relink, not a
-    /// copy — so `mv` is O(1) and any accessor holding the vnode's `AKey` stays
+    /// Moves the a-node at `src` to `dst`, keeping its identity (a relink, not a
+    /// copy — so `mv` is O(1) and any accessor holding the a-node's `AKey` stays
     /// valid). Creates `dst`'s parent directories and replaces an existing `dst`.
     /// Errors if `dst` is `src` itself or a descendant of it.
     pub fn mv(&self, src: impl IntoArborPath, dst: impl IntoArborPath) -> AdbResult<()> {
@@ -418,7 +559,7 @@ impl WriteTxn {
 
         if dst.names().starts_with(src.names()) {
             return Err(AdbError::CannotAccess(String::from(
-                "cannot move a vnode onto itself or into a descendant",
+                "cannot move an a-node onto itself or into a descendant",
             )));
         }
 
@@ -444,7 +585,7 @@ impl WriteTxn {
 
         if dst.names().starts_with(src.names()) {
             return Err(AdbError::CannotAccess(String::from(
-                "cannot copy a vnode onto itself or into a descendant",
+                "cannot copy an a-node onto itself or into a descendant",
             )));
         }
 
@@ -472,7 +613,14 @@ impl WriteTxn {
         scopes: &[APath],
         apply: impl FnOnce(&mut Context<'_, '_>) -> AdbResult<T>,
     ) -> AdbResult<T> {
-        let indexes = self.indexes()?;
+        // An index-free database (the common case) skips the registry read entirely —
+        // no `$metadata` open, no registry decode — on every mutation.
+        let indexes = if self.inner.has_any_index() {
+            self.indexes()?
+        } else {
+            Vec::new()
+        };
+
         let mut data = self.txn.open_table(data_def(&self.table))?;
 
         #[cfg(feature = "entry-timestamps")]
@@ -480,13 +628,31 @@ impl WriteTxn {
 
         if indexes.is_empty() {
             #[cfg(feature = "permissions")]
-            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
             #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-            let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, &self.dirs);
             #[cfg(not(feature = "entry-timestamps"))]
-            let mut ctx = Context::new(&mut data);
+            let mut ctx = Context::new(&mut data, &self.dirs);
 
             return apply(&mut ctx);
+        }
+
+        // Index maintenance below reads the engine directly, so the engine must
+        // reflect the current directory structure: flush any buffered directories
+        // (from earlier writes in this transaction) and stop buffering for the rest
+        // of it. A no-op when buffering is already off (the usual indexed case).
+        {
+            let (dirs, files) = self.dirs.take_and_disable();
+            if !dirs.is_empty() || !files.is_empty() {
+                #[cfg(feature = "permissions")]
+                let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
+                #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
+                let mut ctx = Context::new(&mut data, &mut inodes, &self.table, &self.dirs);
+                #[cfg(not(feature = "entry-timestamps"))]
+                let mut ctx = Context::new(&mut data, &self.dirs);
+
+                table::flush_buffered(&mut ctx, dirs, files)?;
+            }
         }
 
         let mut index = self.txn.open_table(INDEX_TABLE)?;
@@ -499,11 +665,11 @@ impl WriteTxn {
         // maintenance keeps its shared borrow of the data table before and after.
         let result = {
             #[cfg(feature = "permissions")]
-            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref());
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, self.principal.as_ref(), &self.dirs);
             #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
-            let mut ctx = Context::new(&mut data, &mut inodes, &self.table);
+            let mut ctx = Context::new(&mut data, &mut inodes, &self.table, &self.dirs);
             #[cfg(not(feature = "entry-timestamps"))]
-            let mut ctx = Context::new(&mut data);
+            let mut ctx = Context::new(&mut data, &self.dirs);
 
             apply(&mut ctx)?
         };
@@ -582,8 +748,8 @@ impl WriteTxn {
         grab::ls(self, path)
     }
 
-    /// The created / modified / accessed timestamps of the vnode at `path`, or
-    /// `None` if the vnode is absent or has no recorded metadata yet.
+    /// The created / modified / accessed timestamps of the a-node at `path`, or
+    /// `None` if the a-node is absent or has no recorded metadata yet.
     #[cfg(feature = "entry-timestamps")]
     pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
         grab::times(self, path)
@@ -597,7 +763,7 @@ impl WriteTxn {
     }
 
     /// The name of the owner of the file or directory at `path`, or `None` if the
-    /// vnode is absent or has no ACL.
+    /// a-node is absent or has no ACL.
     #[cfg(feature = "permissions")]
     pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
         grab::owner(self, path)
@@ -627,9 +793,34 @@ impl WriteTxn {
     pub fn commit(self) -> AdbResult<()> {
         let WriteTxn {
             txn,
+            table,
             inner,
-            ..
+            dirs,
+            #[cfg(feature = "permissions")]
+            principal,
         } = self;
+
+        // Flush the write-back cache: every directory mutated in this transaction is
+        // encoded, written, and — under `permissions` — sealed once here, rather than
+        // on each child link.
+        {
+            let (buffered_dirs, buffered_files) = dirs.take();
+            if !buffered_dirs.is_empty() || !buffered_files.is_empty() {
+                let mut data = txn.open_table(data_def(&table))?;
+
+                #[cfg(feature = "entry-timestamps")]
+                let mut inodes = txn.open_table(INODES_TABLE)?;
+
+                #[cfg(feature = "permissions")]
+                let mut ctx = Context::new(&mut data, &mut inodes, &table, principal.as_ref(), &dirs);
+                #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
+                let mut ctx = Context::new(&mut data, &mut inodes, &table, &dirs);
+                #[cfg(not(feature = "entry-timestamps"))]
+                let mut ctx = Context::new(&mut data, &dirs);
+
+                table::flush_buffered(&mut ctx, buffered_dirs, buffered_files)?;
+            }
+        }
 
         // Persist any buffered read access times in this same transaction.
         #[cfg(feature = "entry-timestamps")]
@@ -660,15 +851,34 @@ impl Grab for WriteTxn {
     fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
         let data = self.txn.open_table(data_def(&self.table))?;
 
+        // Under `permissions`, an enforced handle walks with a per-directory ACL check.
         #[cfg(feature = "permissions")]
         if self.enforced() {
             return self.resolve_enforced(&data, path);
         }
 
-        crate::engine::resolve(&data, path)
+        // A reader on this transaction must see directories buffered by its own
+        // uncommitted writes, so the walk consults the write-back cache per segment.
+        self.resolve_buffered(&data, path)
     }
 
     fn entry_blob(&self, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>> {
+        // A directory buffered in this transaction has no committed blob yet; encode
+        // its cached child-map so a read (a `kind`/`ls` probe) sees the current state.
+        if self.dirs.dirty()
+            && let Some(blob) = self
+                .dirs
+                .read(|dirs| dirs.get(&akey).map(|children| dir_entry(&encode_dir(children))))
+        {
+            return Ok(Some(Arc::new(blob)));
+        }
+
+        // A file edited in this transaction lives in the buffer (trusted, sealed only
+        // at commit), so a read over this transaction's own state sees the edit.
+        if let Some(entry) = self.dirs.file_get(akey) {
+            return Ok(Some(Arc::new(entry)));
+        }
+
         let data = self.txn.open_table(data_def(&self.table))?;
 
         Ok(read_entry(&data, akey)?.map(Arc::new))
@@ -706,6 +916,16 @@ impl Grab for WriteTxn {
 
     #[cfg(feature = "permissions")]
     fn verify(&self, akey: AKey, blob: &[u8]) -> AdbResult<()> {
+        // An entry buffered by this transaction's own writes is trusted state whose
+        // integrity tags are sealed only at the commit-time flush, so do not verify it
+        // (a read of it here — an `ls`/`kind`/value probe — sees the buffered blob).
+        if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            return Ok(());
+        }
+        if self.dirs.file_contains(akey) {
+            return Ok(());
+        }
+
         self.verify_entry(akey, blob)
     }
 
@@ -797,6 +1017,11 @@ mod tests {
             registry::create(&mut meta, "t", &def).unwrap();
         }
 
+        // Creating the index the raw way skips `Table::create_index`, which is what
+        // primes the write path's fast-path flag; set it by hand so the stores below
+        // take the index-maintaining path, as they would through the public API.
+        w.inner.mark_has_index();
+
         // Each store under the pattern adds one entry.
         w.store_value("users/alice", &user(30)).unwrap();
         w.store_value("users/bob", &user(40)).unwrap();
@@ -870,13 +1095,17 @@ mod tests {
                 registry::create(&mut meta, "t", &def).unwrap();
             }
 
+            // See `store_and_rm_maintain_a_registered_index`: the raw registry write
+            // skips the flag `Table::create_index` normally sets, so prime it by hand.
+            w.inner.mark_has_index();
+
             w.store_value("users/alice", &user(30)).unwrap();
             assert_eq!(index_entries(&w), 1);
 
             // An in-place edit of the indexed column keeps exactly one entry: the old
             // key is removed and the new one inserted around the patch.
             let age = VPath::root().child_name("age");
-            w.put_scalar_at(&APath::parse("users/alice").unwrap(), &age, Scalar::I64(31))
+            w.put_scalar_at(&APath::parse("users/alice").unwrap(), None, &age, Scalar::I64(31))
                 .unwrap();
             assert_eq!(index_entries(&w), 1);
 
@@ -886,5 +1115,92 @@ mod tests {
         // The edit persisted.
         let r = table.read().unwrap();
         assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
+    }
+
+    #[test]
+    fn a_correct_scalar_hint_patches_the_hinted_a_node() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+        let alice = APath::parse("users/alice").unwrap();
+        let age = VPath::root().child_name("age");
+
+        {
+            let w = table.write().unwrap();
+            w.store_value("users/alice", &user(30)).unwrap();
+
+            // The key the file actually resolves to — the hint a mutable accessor
+            // would carry. Resolved through the transaction's own (cache-aware) surface
+            // so it sees the just-stored file whose parent directory is still buffered.
+            let akey = Grab::resolve(&w, &alice).unwrap().unwrap();
+            let epoch = w.structure_epoch();
+
+            w.put_scalar_at(&alice, Some((akey, epoch)), &age, Scalar::I64(31))
+                .unwrap();
+            w.commit().unwrap();
+        }
+
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
+    }
+
+    #[test]
+    fn a_stale_scalar_hint_falls_back_to_resolving_the_path() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+        let alice = APath::parse("users/alice").unwrap();
+        let age = VPath::root().child_name("age");
+
+        {
+            let w = table.write().unwrap();
+            w.store_value("users/alice", &user(30)).unwrap();
+
+            // A hint that names no live a-node (as a cursor's key would after the path
+            // was removed) is not trusted: the write resolves the path afresh and still
+            // lands on the real file, exactly as the un-hinted path does.
+            let stale = AKey::generate();
+            w.put_scalar_at(&alice, Some((stale, w.structure_epoch())), &age, Scalar::I64(31))
+                .unwrap();
+            w.commit().unwrap();
+        }
+
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
+    }
+
+    #[test]
+    fn a_relinked_target_invalidates_the_scalar_hint() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+        let src = APath::parse("a/b").unwrap();
+        let root = VPath::root();
+
+        {
+            let w = table.write().unwrap();
+            // A leaf file, the shape a `LeafMut` cursor edits (its scalar patch targets
+            // the root `VPath`).
+            w.store::<i64>("a/b", &30).unwrap();
+
+            // The hint a mutable cursor would carry: the file's key and the
+            // structural-change count at the moment it was resolved.
+            let akey = Grab::resolve(&w, &src).unwrap().unwrap();
+            let epoch = w.structure_epoch();
+
+            // `mv` relinks that key to `c/d`; since an `AKey` is stable across renames
+            // the hinted key is still live, but `a/b` no longer resolves to it. The
+            // bumped structural-change count invalidates the hint, so the write
+            // re-resolves `a/b` afresh — recreating the file there — instead of silently
+            // patching the moved `c/d` entry the hint still names.
+            w.mv("a/b", "c/d").unwrap();
+            w.put_scalar_at(&src, Some((akey, epoch)), &root, Scalar::I64(99))
+                .unwrap();
+
+            w.commit().unwrap();
+        }
+
+        let r = table.read().unwrap();
+        // The moved original is untouched...
+        assert_eq!(r.load::<i64>("c/d").unwrap(), Some(30));
+        // ...and `a/b` was recreated with the new scalar.
+        assert_eq!(r.load::<i64>("a/b").unwrap(), Some(99));
     }
 }

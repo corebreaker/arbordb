@@ -22,8 +22,9 @@ use crate::perm::Principal;
 pub struct Table {
     /// The database-wide shared state.
     inner: Arc<DbInner>,
-    /// This table's name.
-    name:  String,
+    /// This table's name. An `Arc<str>` so each transaction start clones a pointer,
+    /// not the string bytes.
+    name:  Arc<str>,
     /// This table's shared path/blob cache.
     cache: Arc<PathCache>,
 
@@ -36,7 +37,7 @@ pub struct Table {
 impl Table {
     pub(crate) fn new(
         inner: Arc<DbInner>,
-        name: String,
+        name: Arc<str>,
         cache: Arc<PathCache>,
         #[cfg(feature = "permissions")] principal: Arc<Principal>,
     ) -> Self {
@@ -67,7 +68,7 @@ impl Table {
         let generation = self.inner.generation();
         drop(guard);
 
-        Ok(ReadTxn::new(
+        ReadTxn::new(
             txn,
             self.name.clone(),
             Arc::clone(&self.cache),
@@ -76,7 +77,7 @@ impl Table {
             Arc::clone(&self.inner),
             #[cfg(feature = "permissions")]
             Arc::clone(&self.principal),
-        ))
+        )
     }
 
     /// Begins a write transaction (serialized against other writers). The guest
@@ -122,6 +123,7 @@ impl Table {
 
         self.backfill(&txn, new_entry)?;
         txn.commit()?;
+        self.inner.mark_has_index();
 
         Ok(())
     }
@@ -162,6 +164,7 @@ impl Table {
 
         self.backfill(&txn, new_entry)?;
         txn.commit()?;
+        self.inner.mark_has_index();
 
         Ok(())
     }

@@ -20,7 +20,12 @@ use redb::{backends::InMemoryBackend, Database, ReadableDatabase, TableHandle};
 use std::{
     collections::HashMap,
     path::Path,
-    sync::{atomic::AtomicU64, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicBool, AtomicU64},
+        Arc,
+        Mutex,
+        RwLock,
+    },
 };
 
 /// An ArborDb database: one file (or an in-memory store) holding any number of
@@ -55,7 +60,7 @@ impl ArborDb {
     /// Whether the database has a permission system installed — that is, whether it
     /// has been promoted to a protected database by setting a master password
     /// (`change_password` on an unprotected handle, `permissions` feature). A
-    /// protected database enforces authentication and per-vnode ACLs, and can only be
+    /// protected database enforces authentication and per-a-node ACLs, and can only be
     /// opened by a binary built with the `permissions` feature. Always `false` on a
     /// build without that feature.
     pub fn is_protected(&self) -> AdbResult<bool> {
@@ -71,7 +76,7 @@ impl ArborDb {
     /// refused. True for a guest on a protected database; false for an authenticated
     /// user and on an unprotected database (and always false without the `permissions`
     /// feature). A `false` result does not promise a *given* write will succeed — a
-    /// non-guest write is still subject to per-vnode ACLs.
+    /// non-guest write is still subject to per-a-node ACLs.
     pub fn is_readonly(&self) -> bool {
         #[cfg(feature = "permissions")]
         if cfg!(feature = "permissions") {
@@ -85,6 +90,15 @@ impl ArborDb {
     /// database opens as the guest principal; an unprotected one is unrestricted.
     fn wrap(db: Database) -> AdbResult<Self> {
         engine::bootstrap_metadata(&db)?;
+
+        // Prime the write-path "has any index" flag from the registry, so an
+        // index-free database never touches the registry on a mutation.
+        let has_indexes = {
+            let txn = db.begin_read()?;
+            let meta = txn.open_table(engine::META_TABLE)?;
+
+            crate::index::registry::any(&meta)?
+        };
 
         #[cfg(feature = "permissions")]
         let principal = if perm::store::is_protected(&db)? {
@@ -103,6 +117,7 @@ impl ArborDb {
                 AtomicU64::new(0),
                 RwLock::new(()),
                 Mutex::new(HashMap::new()),
+                AtomicBool::new(has_indexes),
             )),
             #[cfg(feature = "permissions")]
             principal,
@@ -128,7 +143,7 @@ impl ArborDb {
 
         Ok(Table::new(
             Arc::clone(&self.inner),
-            name.to_string(),
+            Arc::from(name),
             cache,
             #[cfg(feature = "permissions")]
             Arc::clone(&self.principal),
@@ -156,9 +171,9 @@ impl ArborDb {
         Ok(names)
     }
 
-    /// Persists buffered vnode access times to the `$inodes` table.
+    /// Persists buffered a-node access times to the `$inodes` table.
     ///
-    /// Reads record a vnode's access time in memory; it is otherwise written only on
+    /// Reads record an a-node's access time in memory; it is otherwise written only on
     /// the next committed write. Call this after a read-only burst to make the
     /// access times durable. A no-op when nothing is buffered.
     #[cfg(feature = "entry-timestamps")]
@@ -213,7 +228,7 @@ impl ArborDb {
 
         Ok(Self {
             inner:     self.inner,
-            principal: Arc::new(Principal::User(session)),
+            principal: Arc::new(Principal::User(Box::new(session))),
         })
     }
 
@@ -237,7 +252,7 @@ impl ArborDb {
 
                 return Ok(Self {
                     inner:     Arc::clone(&self.inner),
-                    principal: Arc::new(Principal::User(session)),
+                    principal: Arc::new(Principal::User(Box::new(session))),
                 });
             }
             Principal::User(session) => {
@@ -460,7 +475,7 @@ impl ArborDb {
         perm::store::group_members(self.inner.db(), group)
     }
 
-    /// Removes a group: unassigns it from every user and strips it from every vnode
+    /// Removes a group: unassigns it from every user and strips it from every a-node
     /// ACL. The built-in master and super groups cannot be removed. Administrators only.
     pub fn remove_group(&self, name: &str) -> AdbResult<()> {
         let key = self.admin_key()?;

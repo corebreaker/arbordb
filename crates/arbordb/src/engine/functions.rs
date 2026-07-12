@@ -11,13 +11,12 @@ use crate::{
     codec::ArchivedDir,
     constants::{FORMAT_VERSION, INDEX_TABLE_NAME, META_FORMAT_VERSION_KEY, METADATA_TABLE_NAME},
     error::{AdbError, AdbResult},
-    path::APath,
     AKey,
 };
 
 use redb::{Database, ReadableTable, TableDefinition};
 
-/// The value type of a data table: a vnode's entry blob. redb hands back a slice
+/// The value type of a data table: an a-node's entry blob. redb hands back a slice
 /// borrowing the page, which is exactly the zero-copy read path.
 pub(crate) type EntryBytes = &'static [u8];
 
@@ -75,19 +74,21 @@ pub(crate) fn bootstrap_metadata(db: &Database) -> AdbResult<()> {
     Ok(())
 }
 
-/// Reads a vnode's raw entry blob (an owned copy), or `None` if absent.
+/// Reads an a-node's raw entry blob (an owned copy), or `None` if absent.
 pub(crate) fn read_entry<R>(table: &R, akey: AKey) -> AdbResult<Option<Vec<u8>>>
 where
     R: ReadableTable<u128, EntryBytes>, {
     Ok(table.get(u128::from(akey))?.map(|guard| guard.value().to_vec()))
 }
 
-/// The filesystem kind of vnode `akey`, or `None` if absent.
+/// The filesystem kind of a-node `akey`, or `None` if absent.
 pub(crate) fn fetch_entry_kind<R>(table: &R, akey: AKey) -> AdbResult<Option<EntryKind>>
 where
     R: ReadableTable<u128, EntryBytes>, {
-    match read_entry(table, akey)? {
-        Some(entry) => Ok(Some(get_entry_kind(&entry)?)),
+    // Read the kind tag straight from the borrowed page — never copy a whole
+    // (possibly large) entry into an owned buffer just to read its leading byte.
+    match table.get(u128::from(akey))? {
+        Some(guard) => Ok(Some(get_entry_kind(guard.value())?)),
         None => Ok(None),
     }
 }
@@ -97,30 +98,16 @@ where
 pub(crate) fn child_of<R>(table: &R, parent: AKey, name: &str) -> AdbResult<Option<AKey>>
 where
     R: ReadableTable<u128, EntryBytes>, {
-    let Some(entry) = read_entry(table, parent)? else {
+    // Navigate the directory blob in place: read it borrowed, extract the one child
+    // key, drop the guard — never copy a whole directory to read a single entry.
+    let Some(guard) = table.get(u128::from(parent))? else {
         return Ok(None);
     };
 
-    let (kind, payload) = entry_split(&entry)?;
+    let (kind, payload) = entry_split(guard.value())?;
     if kind != EntryKind::Dir {
         return Ok(None);
     }
 
     ArchivedDir::new(payload)?.get(name)
-}
-
-/// Resolves `path` to its vnode key by walking directories from [`AKey::ROOT`], or
-/// `None` if any segment along the way is missing.
-pub(crate) fn resolve<R>(table: &R, path: &APath) -> AdbResult<Option<AKey>>
-where
-    R: ReadableTable<u128, EntryBytes>, {
-    let mut akey = AKey::ROOT;
-    for name in path.names() {
-        match child_of(table, akey, name.as_str())? {
-            Some(child) => akey = child,
-            None => return Ok(None),
-        }
-    }
-
-    Ok(Some(akey))
 }

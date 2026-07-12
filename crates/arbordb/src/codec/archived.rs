@@ -46,7 +46,7 @@ const NODE: u8 = 2;
 /// Serialises `value` into a self-contained value blob.
 pub(crate) fn encode(value: &Value) -> Vec<u8> {
     let mut buf = begin_blob();
-    let root = encode_node(value, &mut buf);
+    let root = push_value(value, &mut buf);
     patch_root(&mut buf, root);
 
     buf
@@ -58,12 +58,13 @@ pub(crate) fn decode(blob: &[u8]) -> AdbResult<Value> {
 }
 
 /// Appends `value`'s subtree to `buf` (children first) and returns the absolute
-/// offset of the vnode's own header byte.
-fn encode_node(value: &Value, buf: &mut Vec<u8>) -> u32 {
+/// offset of the vnode's own header byte. Shared by [`encode`] and by the typed
+/// direct encoder's default path ([`AData::encode_node`](crate::data::AData::encode_node)).
+pub(crate) fn push_value(value: &Value, buf: &mut Vec<u8>) -> u32 {
     match value {
         Value::Leaf(scalar) => push_leaf(buf, scalar),
         Value::List(items) => {
-            let child_offsets: Vec<u32> = items.iter().map(|item| encode_node(item, buf)).collect();
+            let child_offsets: Vec<u32> = items.iter().map(|item| push_value(item, buf)).collect();
 
             push_list(buf, &child_offsets)
         }
@@ -71,7 +72,7 @@ fn encode_node(value: &Value, buf: &mut Vec<u8>) -> u32 {
             // A `BTreeMap` iterates name-sorted, exactly what `push_object` requires.
             let mut entries: Vec<(&str, u32)> = Vec::with_capacity(map.len());
             for (name, child) in map {
-                let child_off = encode_node(child, buf);
+                let child_off = push_value(child, buf);
                 entries.push((name.as_str(), child_off));
             }
 
@@ -183,6 +184,23 @@ impl<'a> ArchivedValue<'a> {
         })
     }
 
+    /// Re-wraps `blob` at an already-validated `root` offset, skipping the header
+    /// re-check — for a cursor (an [`ArchivedReader`](crate::access::ArchivedReader))
+    /// that validated the header once at construction and re-views the same blob on
+    /// every field read.
+    pub(crate) fn with_root(blob: &'a [u8], root: u32) -> Self {
+        Self {
+            blob,
+            root,
+        }
+    }
+
+    /// The captured root-vnode offset, so a caller can memoise a validated view and
+    /// rebuild it with [`with_root`](Self::with_root) without re-reading the header.
+    pub(crate) fn root_offset(&self) -> u32 {
+        self.root
+    }
+
     /// The root vnode.
     pub(crate) fn root(&self) -> ArchivedNode<'a> {
         ArchivedNode {
@@ -240,6 +258,23 @@ impl<'a> ArchivedNode<'a> {
             .ok_or_else(|| AdbError::Corrupt("value blob is truncated".into()))?;
 
         Scalar::decode(&mut Reader::new(body))
+    }
+
+    /// This leaf's scalar if it is a leaf, or `None` otherwise — reading the
+    /// discriminant byte **once**, unlike a `kind()` then `scalar()` pair. The hot
+    /// scalar read (`scalar_at`, `get`) goes through this.
+    pub(crate) fn scalar_if_leaf(&self) -> AdbResult<Option<Scalar>> {
+        let off = self.off as usize;
+        if read_u8(self.blob, off)? != LEAF {
+            return Ok(None);
+        }
+
+        let body = self
+            .blob
+            .get(off + 1..)
+            .ok_or_else(|| AdbError::Corrupt("value blob is truncated".into()))?;
+
+        Ok(Some(Scalar::decode(&mut Reader::new(body))?))
     }
 
     /// If this is a leaf, the byte range `(offset, len)` of its encoded scalar within
@@ -307,13 +342,17 @@ impl<'a> ArchivedNode<'a> {
         let count = read_u32(self.blob, off + 1)? as usize;
         let table = off + 5;
 
+        let needle = name.as_bytes();
         let (mut lo, mut hi) = (0usize, count);
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let entry = table + mid * 12;
-            let entry_name = self.entry_name(entry)?;
+            // Compare the raw name bytes: the table is byte-sorted and names were
+            // validated as UTF-8 at write time, so skipping the per-comparison
+            // `from_utf8` check is both correct and faster.
+            let entry_name = self.entry_name_bytes(entry)?;
 
-            match entry_name.as_bytes().cmp(name.as_bytes()) {
+            match entry_name.cmp(needle) {
                 Ordering::Less => lo = mid + 1,
                 Ordering::Greater => hi = mid,
                 Ordering::Equal => {
@@ -360,11 +399,18 @@ impl<'a> ArchivedNode<'a> {
         Ok(out)
     }
 
-    /// The field name of the object entry whose 12-byte record starts at `entry`.
-    fn entry_name(&self, entry: usize) -> AdbResult<&'a str> {
+    /// The raw name bytes of the object entry whose 12-byte record starts at `entry`.
+    /// Used by the binary search, which orders by bytes and needs no UTF-8 check.
+    fn entry_name_bytes(&self, entry: usize) -> AdbResult<&'a [u8]> {
         let name_off = read_u32(self.blob, entry)? as usize;
         let name_len = read_u32(self.blob, entry + 4)? as usize;
-        let bytes = slice(self.blob, name_off, name_len)?;
+
+        slice(self.blob, name_off, name_len)
+    }
+
+    /// The field name of the object entry whose 12-byte record starts at `entry`.
+    fn entry_name(&self, entry: usize) -> AdbResult<&'a str> {
+        let bytes = self.entry_name_bytes(entry)?;
 
         std::str::from_utf8(bytes).map_err(|_| AdbError::Corrupt("invalid utf-8 in a field name".into()))
     }

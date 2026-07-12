@@ -1,6 +1,6 @@
 use super::ctx::Context;
 use crate::{
-    codec::{decode, encode, encode_dir, ArchivedDir, ArchivedValue},
+    codec::{decode, encode, encode_dir, ArchivedValue},
     data::Scalar,
     engine::{dir_entry, file_entry, entry_split, EntryKind},
     error::{AdbError, AdbResult},
@@ -9,7 +9,8 @@ use crate::{
     AKey,
 };
 
-use std::collections::BTreeMap;
+use smol_str::SmolStr;
+use std::collections::{BTreeMap, HashMap};
 
 #[cfg(feature = "permissions")]
 use crate::{acl::Rights, inode::Acl, perm};
@@ -68,42 +69,101 @@ pub(in crate::txn) fn store_value_into(ctx: &mut Context, path: &APath, value: &
     store_blob_into(ctx, path, &encode(value))
 }
 
-/// Sets the scalar at `at` inside the file at `path`. When the new scalar keeps the
-/// current leaf's byte width the blob is patched in place — no decode, no
-/// re-encode; otherwise the value is decoded, updated, and re-encoded. Creates the
-/// file (and its parents) when it does not exist yet.
-pub(in crate::txn) fn put_scalar_into(ctx: &mut Context, path: &APath, at: &VPath, scalar: &Scalar) -> AdbResult<()> {
+/// Resolves `path` and reads its (verified) entry — the walk-the-tree path shared by
+/// [`resolve_target`] both as its default and as the fallback when a stale hint no
+/// longer names a live a-node.
+fn resolve_and_read(ctx: &Context, path: &APath) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
     let akey = ctx.resolve(path)?;
     let entry = match akey {
         Some(akey) => ctx.read_verified(akey)?,
         None => None,
     };
 
-    let mut value = match (akey, entry) {
-        (Some(akey), Some(mut entry)) => {
-            #[cfg(feature = "permissions")]
-            ctx.check(akey, Rights::Modify)?;
+    Ok((akey, entry))
+}
 
-            // Fast path: a leaf that keeps its width is patched in place — every
-            // other offset in the blob stays valid, so nothing is re-encoded.
-            if patch_scalar(&mut entry, at, scalar)? {
-                ctx.put_entry(akey, entry.as_slice())?;
+/// Resolves the target file for a scalar write, honouring a caller's key `hint`
+/// where that is sound.
+///
+/// The `hint` is an a-node key a mutable accessor resolved for `path`, paired with the
+/// transaction's structural-change count at that moment. Without access control it is
+/// trusted only while that count is unchanged: a path resolves through `name → child`
+/// links alone, so an unchanged count means `path` still resolves to the hinted a-node
+/// and the directory tree need not be re-walked. An interleaved `mv`/`rm`/`store` bumps
+/// the count — since an `AKey` is stable across renames a moved a-node stays live, but
+/// `path` no longer resolves to it — so the hint is dropped and the path re-resolved
+/// afresh (recreating the file if `path` is now gone), never silently patching an
+/// a-node the hint's identity was relinked to elsewhere.
+///
+/// Under `permissions`, `ctx.resolve` performs the per-directory `Access` checks a
+/// scalar edit still requires, so the hint is ignored there and the path is always
+/// resolved afresh.
+pub(super) fn resolve_target(
+    ctx: &Context,
+    path: &APath,
+    hint: Option<(AKey, u64)>,
+) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
+    #[cfg(not(feature = "permissions"))]
+    if let Some((key, epoch)) = hint
+        && epoch == ctx.structure_epoch()
+        && let Some(entry) = ctx.read_verified(key)?
+    {
+        return Ok((Some(key), Some(entry)));
+    }
 
-                return Ok(());
-            }
+    #[cfg(feature = "permissions")]
+    let _ = hint;
 
-            // Slow path: decode the (untouched) blob to re-encode it below.
-            let (kind, payload) = entry_split(&entry)?;
-            match kind {
-                EntryKind::File => decode(payload)?,
-                EntryKind::Dir => {
-                    return Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file")));
-                }
-            }
+    resolve_and_read(ctx, path)
+}
+
+/// Sets the scalar at `at` inside the file at `path`. When the new scalar keeps the
+/// current leaf's byte width the blob is patched in place — no decode, no
+/// re-encode; otherwise the value is decoded, updated, and re-encoded. Creates the
+/// file (and its parents) when it does not exist yet.
+///
+/// `hint` is an a-node key the caller already resolved for `path` (a mutable accessor
+/// that just walked it), paired with the transaction's structural-change count at that
+/// moment, passed on to [`resolve_target`] to skip re-walking the directory tree while
+/// that count is unchanged.
+pub(in crate::txn) fn put_scalar_into(
+    ctx: &mut Context,
+    path: &APath,
+    hint: Option<(AKey, u64)>,
+    at: &VPath,
+    scalar: &Scalar,
+) -> AdbResult<()> {
+    let (akey, entry) = resolve_target(ctx, path, hint)?;
+
+    // An existing file: edit its blob and buffer the result (written and sealed once at
+    // commit through `put_file_edit`), so a burst of edits to one value coalesces into
+    // a single re-encode and — under `permissions` — a single signature.
+    if let (Some(akey), Some(mut entry)) = (akey, entry) {
+        #[cfg(feature = "permissions")]
+        ctx.check(akey, Rights::Modify)?;
+
+        // Fast path: a leaf that keeps its width is patched in place — every other
+        // offset in the blob stays valid, so nothing is re-encoded.
+        if patch_scalar(&mut entry, at, scalar)? {
+            return ctx.put_file_edit(akey, entry);
         }
-        _ => Value::default(),
-    };
 
+        // Slow path: decode the (untouched) blob, edit the value, re-encode.
+        let (kind, payload) = entry_split(&entry)?;
+        let mut value = match kind {
+            EntryKind::File => decode(payload)?,
+            EntryKind::Dir => {
+                return Err(AdbError::CannotAccess(format!("'{path}' is a directory, not a file")));
+            }
+        };
+
+        value.set_value(at, Value::Leaf(scalar.clone()));
+
+        return ctx.put_file_edit(akey, file_entry(&encode(&value)));
+    }
+
+    // Nothing there yet: create the file (writing through, so its ACL lands at once).
+    let mut value = Value::default();
     value.set_value(at, Value::Leaf(scalar.clone()));
 
     store_value_into(ctx, path, &value)
@@ -143,7 +203,7 @@ pub(in crate::txn) fn patch_scalar(entry: &mut [u8], at: &VPath, scalar: &Scalar
     Ok(true)
 }
 
-/// Removes the vnode at `path` (a non-root path) and its subtree. Returns whether
+/// Removes the a-node at `path` (a non-root path) and its subtree. Returns whether
 /// anything was removed.
 pub(in crate::txn) fn rm_into(ctx: &mut Context, path: &APath) -> AdbResult<bool> {
     let (parent_path, name) = path.split_last().expect("a non-root path has a parent and a name");
@@ -155,11 +215,13 @@ pub(in crate::txn) fn rm_into(ctx: &mut Context, path: &APath) -> AdbResult<bool
     #[cfg(feature = "permissions")]
     ctx.check(parent, Rights::Access)?;
 
+    // A borrowed child lookup — `None` (nothing to remove) when `parent` is absent,
+    // a file, or has no such child, so `rm` stays idempotent on a missing path.
     let Some(akey) = ctx.child(parent, name)? else {
         return Ok(false);
     };
 
-    // Deleting a vnode needs `Delete` on it (and, for a directory, on every
+    // Deleting an a-node needs `Delete` on it (and, for a directory, on every
     // descendant the cascade removes). Holding it also authorizes unlinking the
     // name from the parent.
     #[cfg(feature = "permissions")]
@@ -171,7 +233,7 @@ pub(in crate::txn) fn rm_into(ctx: &mut Context, path: &APath) -> AdbResult<bool
     Ok(true)
 }
 
-/// Relinks the vnode at `src` to `dst`, keeping its identity.
+/// Relinks the a-node at `src` to `dst`, keeping its identity.
 pub(in crate::txn) fn mv_into(ctx: &mut Context, src: &APath, dst: &APath) -> AdbResult<()> {
     let (src_parent_path, src_name) = src.split_last().expect("a non-root path has a parent and a name");
     let (dst_parent_path, dst_name) = dst.split_last().expect("a non-root path has a parent and a name");
@@ -237,24 +299,78 @@ pub(in crate::txn) fn cp_into(ctx: &mut Context, src: &APath, dst: &APath) -> Ad
     Ok(())
 }
 
-/// Writes `map` as directory `akey`'s children.
-pub(in crate::txn) fn put_dir(ctx: &mut Context, akey: AKey, map: &BTreeMap<String, AKey>) -> AdbResult<()> {
+/// Writes `map` as directory `akey`'s children — buffered into the write-back cache
+/// when buffering is on, otherwise encoded and written to the engine at once.
+pub(in crate::txn) fn put_dir(ctx: &mut Context, akey: AKey, map: &BTreeMap<SmolStr, AKey>) -> AdbResult<()> {
+    if ctx.buffering() {
+        // A buffered directory's blob — and, under `permissions`, its integrity seal —
+        // is written once at the commit-time flush. Stamp a fresh directory's ACL
+        // eagerly, though, so an access check later in this same transaction sees it.
+        #[cfg(feature = "permissions")]
+        ctx.stamp_new_dir_acl(akey)?;
+
+        ctx.buffer_dir(akey, map.clone());
+
+        return Ok(());
+    }
+
     let entry = dir_entry(&encode_dir(map));
     ctx.put_entry(akey, entry.as_slice())?;
 
     Ok(())
 }
 
-/// Adds (or replaces) a `name → child` link in directory `parent`.
+/// Flushes the write-back cache: encodes each buffered directory's child-map and writes
+/// both the directories and the edited files through [`Context::put_entry`] — which,
+/// under `permissions`, seals each blob's integrity tags. This is the O(N) tail of a
+/// bulk load and the once-per-value tail of a burst of edits, run at commit (or when
+/// index maintenance forces the engine current mid-transaction).
+pub(in crate::txn) fn flush_buffered(
+    ctx: &mut Context,
+    dirs: HashMap<AKey, BTreeMap<SmolStr, AKey>>,
+    files: HashMap<AKey, Vec<u8>>,
+) -> AdbResult<()> {
+    for (akey, map) in dirs {
+        let entry = dir_entry(&encode_dir(&map));
+        ctx.put_entry(akey, entry.as_slice())?;
+    }
+
+    // A buffered file entry is already the full tagged blob; write (and seal) it as is.
+    for (akey, entry) in files {
+        ctx.put_entry(akey, entry.as_slice())?;
+    }
+
+    Ok(())
+}
+
+/// Adds (or replaces) a `name → child` link in directory `parent`. When buffering,
+/// the parent's cached child-map is mutated in place (O(1)); otherwise the whole
+/// directory is read, edited, and rewritten.
 pub(in crate::txn) fn link_child(ctx: &mut Context, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
+    // A relink repoints which a-node a path resolves to, so bump the structural-change
+    // count that invalidates a mutable cursor's stale key hint (see `resolve_target`).
+    ctx.bump_structure();
+
+    if ctx.buffering() {
+        return ctx.dir_link(parent, name, child);
+    }
+
     let mut map = ctx.dir_children(parent)?;
-    map.insert(name.to_string(), child);
+    map.insert(SmolStr::from(name), child);
 
     put_dir(ctx, parent, &map)
 }
 
-/// Removes the `name` link from directory `parent`.
+/// Removes the `name` link from directory `parent` (in place when buffering).
 pub(in crate::txn) fn unlink_child(ctx: &mut Context, parent: AKey, name: &str) -> AdbResult<()> {
+    // A relink repoints which a-node a path resolves to, so bump the structural-change
+    // count that invalidates a mutable cursor's stale key hint (see `resolve_target`).
+    ctx.bump_structure();
+
+    if ctx.buffering() {
+        return ctx.dir_unlink(parent, name);
+    }
+
     let mut map = ctx.dir_children(parent)?;
     map.remove(name);
 
@@ -263,7 +379,9 @@ pub(in crate::txn) fn unlink_child(ctx: &mut Context, parent: AKey, name: &str) 
 
 /// Ensures the root directory exists.
 pub(in crate::txn) fn ensure_root(ctx: &mut Context) -> AdbResult<()> {
-    if ctx.read_verified(AKey::ROOT)?.is_none() {
+    // A bare presence probe — the root's contents are read (and verified) by the
+    // directory walk that follows, so materializing its blob here would be wasted.
+    if !ctx.has_entry(AKey::ROOT)? {
         put_dir(ctx, AKey::ROOT, &BTreeMap::new())?;
     }
 
@@ -302,21 +420,12 @@ pub(in crate::txn) fn ensure_dir(ctx: &mut Context, path: &APath) -> AdbResult<A
     Ok(akey)
 }
 
-/// Removes vnode `akey` and, if it is a directory, its whole subtree.
+/// Removes a-node `akey` and, if it is a directory, its whole subtree.
 pub(in crate::txn) fn cascade_delete(ctx: &mut Context, akey: AKey) -> AdbResult<()> {
-    let children = match ctx.read_verified(akey)? {
-        Some(entry) => {
-            let (kind, payload) = entry_split(&entry)?;
-            match kind {
-                EntryKind::Dir => ArchivedDir::new(payload)?
-                    .entries()?
-                    .into_iter()
-                    .map(|(_, child)| child)
-                    .collect::<Vec<_>>(),
-                EntryKind::File => Vec::new(),
-            }
-        }
-        None => return Ok(()),
+    // Read the a-node borrowed once: a file yields no children (no owned copy of its
+    // blob), a directory yields the subtree to recurse into.
+    let Some(children) = ctx.cascade_children(akey)? else {
+        return Ok(());
     };
 
     for child in children {
@@ -328,31 +437,31 @@ pub(in crate::txn) fn cascade_delete(ctx: &mut Context, akey: AKey) -> AdbResult
     Ok(())
 }
 
-/// Deep-copies vnode `akey` (a file's blob verbatim, a directory recursively) under
+/// Deep-copies a-node `akey` (a file's blob verbatim, a directory recursively) under
 /// a freshly generated key, returning that key.
 pub(in crate::txn) fn deep_copy(ctx: &mut Context, akey: AKey) -> AdbResult<AKey> {
     #[cfg(feature = "permissions")]
     ctx.check(akey, Rights::Access)?;
 
-    let entry = ctx
-        .read_verified(akey)?
-        .ok_or_else(|| AdbError::Corrupt("copying a missing vnode".into()))?;
-    let (kind, payload) = entry_split(&entry)?;
     let fresh = AKey::generate();
 
-    match kind {
+    // `kind` and `dir_children` consult the write-back cache, so a directory this
+    // transaction has already modified is copied in its current (buffered) state, not
+    // the stale engine one. A file's blob is always in the engine (files write through).
+    match ctx
+        .kind(akey)?
+        .ok_or_else(|| AdbError::Corrupt("copying a missing a-node".into()))?
+    {
         EntryKind::File => {
+            let entry = ctx
+                .read_verified(akey)?
+                .ok_or_else(|| AdbError::Corrupt("copying a missing a-node".into()))?;
+
             ctx.put_entry(fresh, entry.as_slice())?;
         }
         EntryKind::Dir => {
-            let children: Vec<(String, AKey)> = ArchivedDir::new(payload)?
-                .entries()?
-                .into_iter()
-                .map(|(name, child)| (name.to_string(), child))
-                .collect();
-
             let mut copied = BTreeMap::new();
-            for (name, child) in children {
+            for (name, child) in ctx.dir_children(akey)? {
                 copied.insert(name, deep_copy(ctx, child)?);
             }
 
@@ -363,7 +472,7 @@ pub(in crate::txn) fn deep_copy(ctx: &mut Context, akey: AKey) -> AdbResult<AKey
     Ok(fresh)
 }
 
-/// Changes the owner of the vnode at `path` to `new_uid`.
+/// Changes the owner of the a-node at `path` to `new_uid`.
 #[cfg(feature = "permissions")]
 pub(in crate::txn) fn chown_into(ctx: &mut Context, path: &APath, new_uid: u32) -> AdbResult<()> {
     let akey = ctx
@@ -381,7 +490,7 @@ pub(in crate::txn) fn chown_into(ctx: &mut Context, path: &APath, new_uid: u32) 
 
     let mut acl = ctx
         .acl(akey)?
-        .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
+        .ok_or_else(|| AdbError::CannotAccess(String::from("this a-node has no ACL")))?;
 
     perm::access::authorize_chown(ctx.principal(), &acl)?;
     acl.set_owner_uid(new_uid);
@@ -390,8 +499,8 @@ pub(in crate::txn) fn chown_into(ctx: &mut Context, path: &APath, new_uid: u32) 
     ctx.reseal_integrity(akey)
 }
 
-/// Mutates the ACL of the vnode at `path` through `apply`, then re-seals its
-/// integrity tags. Requires `Modify` on the vnode; the root ACL is immutable.
+/// Mutates the ACL of the a-node at `path` through `apply`, then re-seals its
+/// integrity tags. Requires `Modify` on the a-node; the root ACL is immutable.
 /// This is the one path behind `set_acl` / `add_group` / `del_group`.
 #[cfg(feature = "permissions")]
 pub(in crate::txn) fn set_acl_into(ctx: &mut Context, path: &APath, apply: impl FnOnce(&mut Acl)) -> AdbResult<()> {
@@ -410,7 +519,7 @@ pub(in crate::txn) fn set_acl_into(ctx: &mut Context, path: &APath, apply: impl 
 
     let mut acl = ctx
         .acl(akey)?
-        .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
+        .ok_or_else(|| AdbError::CannotAccess(String::from("this a-node has no ACL")))?;
 
     perm::access::authorize(ctx.principal(), akey, Some(&acl), Rights::Modify)?;
     apply(&mut acl);
@@ -419,15 +528,15 @@ pub(in crate::txn) fn set_acl_into(ctx: &mut Context, path: &APath, apply: impl 
     ctx.reseal_integrity(akey)
 }
 
-/// Recursively collects the `(parent, name)` of every top-most vnode owned by
+/// Recursively collects the `(parent, name)` of every top-most a-node owned by
 /// `uid` under directory `dir`. An owned directory is collected whole (and not
-/// descended into); a non-owned directory is descended to find owned vnodes.
+/// descended into); a non-owned directory is descended to find owned a-nodes.
 #[cfg(feature = "permissions")]
 pub(in crate::txn) fn collect_owned(
     ctx: &Context,
     dir: AKey,
     uid: u32,
-    out: &mut Vec<(AKey, String)>,
+    out: &mut Vec<(AKey, SmolStr)>,
 ) -> AdbResult<()> {
     for (name, child) in ctx.dir_children(dir)? {
         if ctx.acl(child)?.map(|acl| acl.owner_uid()) == Some(uid) {

@@ -111,6 +111,63 @@ pub(crate) fn a_data_impl(
         }
     });
 
+    // A direct `encode_node` override (the typed direct encoder, bypassing the `Value`
+    // tree) is possible when every stored field emits straight through
+    // `AData::encode_node`: none is flattened (which merges another value's fields into
+    // this object, needing a runtime merge) nor uses a custom `store_with` (which is a
+    // `Writer`-based store, not a blob emission). Those cases keep the trait's
+    // `Value`-based default, which is always correct — just not the fast path.
+    let encode_node = {
+        let storable: Vec<&Field> = fields.iter().filter(|field| field.attrs().in_shape()).collect();
+        let simple = storable
+            .iter()
+            .all(|field| !field.attrs().is_flatten() && field.attrs().store_fn().is_none());
+
+        if simple {
+            // Emit the fields in stored-name order (the order a `BTreeMap` — and so the
+            // `Value` default — would), children first, then the object vnode. A
+            // `skip_store_if` field is pushed conditionally; the remaining entries stay
+            // sorted, which `object` requires.
+            let mut sorted = storable;
+            sorted.sort_by(|a, b| a.name().cmp(b.name()));
+
+            let count = sorted.len();
+            let pushes = sorted.iter().map(|field| {
+                let ident = field.ident();
+                let stored = field.name();
+
+                let emit = quote! {
+                    let __off = ::arbordb::data::AData::encode_node(&self.#ident, __enc)?;
+                    __entries.push((#stored, __off));
+                };
+
+                match field.attrs().skip_store_if() {
+                    Some(predicate) => quote! {
+                        if !#predicate(&self.#ident) {
+                            #emit
+                        }
+                    },
+                    None => emit,
+                }
+            });
+
+            quote! {
+                fn encode_node(
+                    &self,
+                    __enc: &mut ::arbordb::data::NodeEncoder,
+                ) -> ::arbordb::AdbResult<u32> {
+                    let mut __entries: ::std::vec::Vec<(&str, u32)> =
+                        ::std::vec::Vec::with_capacity(#count);
+                    #(#pushes)*
+
+                    ::core::result::Result::Ok(__enc.object(&__entries))
+                }
+            }
+        } else {
+            quote! {}
+        }
+    };
+
     let impl_generics = generics.adata_impl();
     let ty_generics = generics.adata_ty();
     let where_clause = generics.adata_where();
@@ -141,6 +198,8 @@ pub(crate) fn a_data_impl(
                     #(#loads)*
                 })
             }
+
+            #encode_node
         }
     }
 }

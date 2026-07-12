@@ -18,23 +18,30 @@ use super::table::{cascade_delete, collect_owned, unlink_child};
 #[cfg(feature = "permissions")]
 use crate::{
     acl::Rights,
-    inode::{read_acl, read_mac, seal_mac, seal_sig, set_acl, set_default_acl, Acl},
+    inode::{read_acl, read_meta, seal_mac, seal_sig, set_acl, set_default_acl, Acl},
     perm::{self, Principal},
 };
 
+use super::WriteBuffer;
+
+use redb::ReadableTable;
+use smol_str::SmolStr;
 use std::collections::BTreeMap;
+
+#[cfg(feature = "permissions")]
+use std::{cell::RefCell, collections::HashSet};
 
 /// The per-transaction data table (borrows the write transaction).
 pub(in super::super) type DataTable<'txn> = redb::Table<'txn, u128, EntryBytes>;
 
 /// The tables a mutation writes through. Bundling the data table with the
-/// (optional) per-vnode metadata table lets every vnode write keep that vnode's
+/// (optional) per-a-node metadata table lets every a-node write keep that a-node's
 /// `$inodes` entry — its timestamps — in step within the same transaction.
 pub(in super::super) struct Context<'txn, 'a> {
-    /// The data table this mutation writes vnode entries through.
+    /// The data table this mutation writes a-node entries through.
     data: &'a mut DataTable<'txn>,
 
-    /// The per-vnode metadata table, kept in step with `data`.
+    /// The per-a-node metadata table, kept in step with `data`.
     #[cfg(feature = "entry-timestamps")]
     inodes: &'a mut InodeTable<'txn>,
 
@@ -42,24 +49,42 @@ pub(in super::super) struct Context<'txn, 'a> {
     #[cfg(feature = "entry-timestamps")]
     table: &'a str,
 
-    /// One timestamp shared by every vnode this mutation touches.
+    /// One timestamp shared by every a-node this mutation touches.
     #[cfg(feature = "entry-timestamps")]
     now: i64,
+
+    /// The transaction's write-back cache of dirty directories. Directory reads
+    /// consult it first and directory writes buffer into it (flushed, and — under
+    /// `permissions` — sealed, once at commit), turning a bulk load under one parent
+    /// from O(N²) into O(N). Under `permissions` a buffered directory is the
+    /// transaction's own uncommitted state, so it is trusted without an integrity
+    /// re-check; a new directory's ACL is still stamped eagerly (see
+    /// [`table::put_dir`](super::table::put_dir)) so a mid-transaction access check sees it.
+    dirs: &'a WriteBuffer,
 
     /// The identity performing the mutation; drives ACL enforcement.
     #[cfg(feature = "permissions")]
     principal: &'a Principal,
+
+    /// a-nodes already integrity-verified in this mutation, so a directory touched
+    /// twice (traversal then a child/kind probe) is MAC-verified once. Invalidated
+    /// whenever an a-node is (re)written or removed. A `RefCell` because the read
+    /// helpers take `&self`; the `Context` is a per-mutation stack local, never
+    /// shared across threads.
+    #[cfg(feature = "permissions")]
+    verified: RefCell<HashSet<AKey>>,
 }
 
 impl<'txn, 'a> Context<'txn, 'a> {
-    /// Bundles the data table with the per-vnode metadata table and one
-    /// timestamp shared by every vnode this mutation touches.
+    /// Bundles the data table with the per-a-node metadata table and one
+    /// timestamp shared by every a-node this mutation touches.
     #[cfg(feature = "permissions")]
     pub(in super::super) fn new(
         data: &'a mut DataTable<'txn>,
         inodes: &'a mut InodeTable<'txn>,
         table: &'a str,
         principal: &'a Principal,
+        dirs: &'a WriteBuffer,
     ) -> Self {
         Self {
             data,
@@ -67,6 +92,8 @@ impl<'txn, 'a> Context<'txn, 'a> {
             table,
             now: timestamp_now(),
             principal,
+            verified: RefCell::new(HashSet::new()),
+            dirs,
         }
     }
 
@@ -75,62 +102,132 @@ impl<'txn, 'a> Context<'txn, 'a> {
         self.principal
     }
 
-    /// Bundles the data table with the per-vnode metadata table (this build has
-    /// timestamps but no permission system, so there is no principal).
+    /// Forgets any memoized "already verified" mark for `akey` — called when its blob
+    /// or ACL changes, so a later read in the same mutation re-verifies the new bytes.
+    #[cfg(feature = "permissions")]
+    fn invalidate_verified(&self, akey: AKey) {
+        self.verified.borrow_mut().remove(&akey);
+    }
+
+    /// Bundles the data table with the per-a-node metadata table and the directory
+    /// write-back cache (this build has timestamps but no permission system).
     #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
     pub(in super::super) fn new(
         data: &'a mut DataTable<'txn>,
         inodes: &'a mut InodeTable<'txn>,
         table: &'a str,
+        dirs: &'a WriteBuffer,
     ) -> Self {
         Self {
             data,
             inodes,
             table,
             now: timestamp_now(),
+            dirs,
         }
     }
 
-    /// Bundles the data table alone (the metadata table exists only under the
-    /// `entry-timestamps` feature).
+    /// Bundles the data table with the directory write-back cache (the metadata table
+    /// exists only under the `entry-timestamps` feature).
     #[cfg(not(feature = "entry-timestamps"))]
-    pub(in super::super) fn new(data: &'a mut DataTable<'txn>) -> Self {
+    pub(in super::super) fn new(data: &'a mut DataTable<'txn>, dirs: &'a WriteBuffer) -> Self {
         Self {
             data,
+            dirs,
         }
     }
 
-    /// Writes a vnode's entry blob and refreshes its inode — on creation all
+    /// Writes an a-node's entry blob and refreshes its inode — on creation all
     /// three times are set; on overwrite only `modified` moves.
     pub(super) fn put_entry(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
         self.data.insert(u128::from(akey), entry)?;
 
-        #[cfg(feature = "entry-timestamps")]
+        // A direct engine write supersedes any buffered edit of this a-node, so a
+        // later buffer-first read does not return the stale buffered bytes. Lock-free
+        // and a no-op when no file is buffered (a fresh bulk load never buffers one).
+        self.dirs.file_forget(akey);
+
+        // The blob (and, below, its fresh seal) changed; a later read in this
+        // mutation must re-verify rather than trust the pre-write memo.
+        #[cfg(feature = "permissions")]
+        self.invalidate_verified(akey);
+
+        // Timestamps-only build: record the write time in the inode.
+        #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
         inode::touch(self.inodes, self.table, akey, self.now)?;
 
+        // Protected build: an authenticated user stamps the timestamps, the default
+        // ACL, and both integrity tags in one read-modify-write of the inode; an
+        // unrestricted handle (an unprotected database) only records the write time.
         #[cfg(feature = "permissions")]
-        {
-            self.stamp_default_acl(akey)?;
-            self.seal_integrity(akey, entry)?;
+        match self.principal {
+            Principal::User(session) => {
+                let table = self.table;
+                let now = self.now;
+                // The root carries no ACL; every other fresh a-node is owned by the writer.
+                let owner = (akey != AKey::ROOT).then_some(session.uid());
+
+                inode::stamp_and_seal(self.inodes, table, akey, now, owner, |acl| {
+                    (
+                        perm::integrity::mac_value(session.key(), table, akey, entry, acl),
+                        perm::integrity::sign_value(session.signer(), table, akey, entry, acl),
+                    )
+                })?;
+            }
+            _ => inode::touch(self.inodes, self.table, akey, self.now)?,
         }
 
         Ok(())
     }
 
-    /// Removes a vnode's entry blob together with its inode.
+    /// Writes an **existing** file's edited entry bytes. With the write-back cache
+    /// active the bytes are buffered (and written — and, under `permissions`, sealed —
+    /// once at the commit-time flush), so a burst of edits to one value pays a single
+    /// re-encode and signature; without it (an indexed database) the entry is written
+    /// straight through. Only an existing file — whose inode and ACL are already in
+    /// place — edits this way; a fresh `store` writes through so its ACL lands at once.
+    pub(super) fn put_file_edit(&mut self, akey: AKey, entry: Vec<u8>) -> AdbResult<()> {
+        if self.buffering() {
+            // The buffered bytes are read back (buffer-first) as this a-node's state; a
+            // later engine read would trust its pre-edit memo, so drop that mark.
+            #[cfg(feature = "permissions")]
+            self.invalidate_verified(akey);
+
+            self.dirs.file_put(akey, entry);
+
+            return Ok(());
+        }
+
+        self.put_entry(akey, entry.as_slice())
+    }
+
+    /// Removes an a-node's entry blob together with its inode.
     pub(super) fn remove_entry(&mut self, akey: AKey) -> AdbResult<()> {
         self.data.remove(u128::from(akey))?;
 
+        #[cfg(feature = "permissions")]
+        self.invalidate_verified(akey);
+
         #[cfg(feature = "entry-timestamps")]
         inode::forget(self.inodes, self.table, akey)?;
+
+        // Drop any buffered copy so the commit-time flush never resurrects it.
+        self.dirs.forget(akey);
 
         Ok(())
     }
 
     /// Reads `akey`'s entry, first verifying its integrity tag (for a keyed
     /// principal), so a writer never trusts — nor launders into a fresh tag —
-    /// a blob altered outside the library. `None` if the vnode is absent.
+    /// a blob altered outside the library. `None` if the a-node is absent.
     pub(super) fn read_verified(&self, akey: AKey) -> AdbResult<Option<Vec<u8>>> {
+        // A file edited earlier in this transaction lives in the buffer — our own
+        // trusted state (sealed only at the commit-time flush), so return it without
+        // an integrity re-check.
+        if let Some(entry) = self.dirs.file_get(akey) {
+            return Ok(Some(entry));
+        }
+
         let entry = read_entry(&*self.data, akey)?;
 
         #[cfg(feature = "permissions")]
@@ -141,49 +238,224 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(entry)
     }
 
+    /// Whether a-node `akey` exists — a bare presence probe that neither copies the
+    /// entry nor verifies it (any actual read of its bytes still verifies). Lets a
+    /// caller that only needs "is it there?" skip materializing a whole blob.
+    pub(super) fn has_entry(&self, akey: AKey) -> AdbResult<bool> {
+        // A directory mutated in this transaction lives in the write-back cache, which
+        // is authoritative until the commit-time flush.
+        if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            return Ok(true);
+        }
+
+        Ok(self.data.get(u128::from(akey))?.is_some())
+    }
+
+    /// Fetches `akey`'s entry, verifies its integrity tag (for a keyed principal),
+    /// and hands the **borrowed** entry bytes to `f`. Unlike [`read_verified`], it
+    /// never copies the blob into an owned buffer — a read-only navigation (a child
+    /// lookup, a kind probe, a directory listing) reads what it needs straight out
+    /// of the engine page and drops the guard. `None` if the a-node is absent.
+    ///
+    /// [`read_verified`]: Self::read_verified
+    fn with_entry<R>(&self, akey: AKey, f: impl FnOnce(&[u8]) -> AdbResult<R>) -> AdbResult<Option<R>> {
+        // A file edited in this transaction is authoritative and trusted; read it from
+        // the buffer, past the engine and its integrity check (it is sealed only at the
+        // commit-time flush).
+        if let Some(entry) = self.dirs.file_get(akey) {
+            return f(&entry).map(Some);
+        }
+
+        let Some(guard) = self.data.get(u128::from(akey))? else {
+            return Ok(None);
+        };
+
+        let entry = guard.value();
+
+        #[cfg(feature = "permissions")]
+        self.verify_integrity(akey, entry)?;
+
+        f(entry).map(Some)
+    }
+
     /// The child of directory `parent` named `name`, verifying `parent`'s
     /// integrity first. `None` if `parent` is absent, is a file, or has no such child.
     pub(super) fn child(&self, parent: AKey, name: &str) -> AdbResult<Option<AKey>> {
-        let Some(entry) = self.read_verified(parent)? else {
-            return Ok(None);
-        };
-
-        let (kind, payload) = entry_split(&entry)?;
-        if kind != EntryKind::Dir {
-            return Ok(None);
+        // A directory buffered in this transaction is authoritative; read it there.
+        if self.dirs.dirty()
+            && let Some(found) = self
+                .dirs
+                .read(|dirs| dirs.get(&parent).map(|children| children.get(name).copied()))
+        {
+            return Ok(found);
         }
 
-        ArchivedDir::new(payload)?.get(name)
+        Ok(self
+            .with_entry(parent, |entry| {
+                let (kind, payload) = entry_split(entry)?;
+                if kind != EntryKind::Dir {
+                    return Ok(None);
+                }
+
+                ArchivedDir::new(payload)?.get(name)
+            })?
+            .flatten())
     }
 
     /// The filesystem kind of `akey`, verifying its integrity first. `None` if
-    /// the vnode is absent.
+    /// the a-node is absent.
     pub(super) fn kind(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
-        match self.read_verified(akey)? {
-            Some(entry) => Ok(Some(entry_split(&entry)?.0)),
-            None => Ok(None),
+        // A buffered a-node is always a directory (only directories buffer).
+        if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
+            return Ok(Some(EntryKind::Dir));
         }
+
+        self.with_entry(akey, |entry| Ok(entry_split(entry)?.0))
     }
 
     /// Directory `akey`'s children as an owned map, verifying its integrity first
-    /// (empty if the vnode is absent). Errors if `akey` is a file.
-    pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<String, AKey>> {
-        let Some(entry) = self.read_verified(akey)? else {
-            return Ok(BTreeMap::new());
-        };
-
-        let (kind, payload) = entry_split(&entry)?;
-        if kind != EntryKind::Dir {
-            return Err(AdbError::CannotAccess(String::from(
-                "a path component is a file, not a directory",
-            )));
+    /// (empty if the a-node is absent). Errors if `akey` is a file.
+    pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<SmolStr, AKey>> {
+        // A directory buffered in this transaction is authoritative.
+        if self.dirs.dirty()
+            && let Some(children) = self.dirs.read(|dirs| dirs.get(&akey).cloned())
+        {
+            return Ok(children);
         }
 
-        Ok(ArchivedDir::new(payload)?
-            .entries()?
-            .into_iter()
-            .map(|(name, child)| (name.to_string(), child))
-            .collect())
+        let children = self.with_entry(akey, |entry| {
+            let (kind, payload) = entry_split(entry)?;
+            if kind != EntryKind::Dir {
+                return Err(AdbError::CannotAccess(String::from(
+                    "a path component is a file, not a directory",
+                )));
+            }
+
+            Ok(ArchivedDir::new(payload)?
+                .entries()?
+                .into_iter()
+                .map(|(name, child)| (SmolStr::from(name), child))
+                .collect())
+        })?;
+
+        Ok(children.unwrap_or_default())
+    }
+
+    /// The child keys to recurse into when cascade-deleting `akey`, read borrowed
+    /// (and verified) in one shot: `None` if the a-node is absent, an empty vec for a
+    /// file, and its children for a directory. Deleting a file therefore never copies
+    /// its (possibly large) blob just to learn it has no children.
+    pub(super) fn cascade_children(&self, akey: AKey) -> AdbResult<Option<Vec<AKey>>> {
+        // A buffered directory is authoritative: yield its cached children.
+        if self.dirs.dirty()
+            && let Some(children) = self
+                .dirs
+                .read(|dirs| dirs.get(&akey).map(|m| m.values().copied().collect::<Vec<_>>()))
+        {
+            return Ok(Some(children));
+        }
+
+        self.with_entry(akey, |entry| {
+            let (kind, payload) = entry_split(entry)?;
+            match kind {
+                EntryKind::File => Ok(Vec::new()),
+                EntryKind::Dir => Ok(ArchivedDir::new(payload)?
+                    .entries()?
+                    .into_iter()
+                    .map(|(_, child)| child)
+                    .collect()),
+            }
+        })
+    }
+
+    /// Whether directory writes should buffer in the write-back cache (an index-free
+    /// database) rather than re-encode and write the blob on every link.
+    pub(super) fn buffering(&self) -> bool {
+        self.dirs.active()
+    }
+
+    /// The transaction's structural-change count (see [`WriteBuffer::structure_epoch`]).
+    /// A mutable cursor's key hint is trusted only while it is unchanged, so an
+    /// interleaved relink invalidates the hint (see [`resolve_target`]).
+    ///
+    /// [`resolve_target`]: super::table::resolve_target
+    #[cfg(not(feature = "permissions"))]
+    pub(super) fn structure_epoch(&self) -> u64 {
+        self.dirs.structure_epoch()
+    }
+
+    /// Bumps the structural-change count after a `name → child` relink, invalidating
+    /// any cursor hint captured before it.
+    pub(super) fn bump_structure(&self) {
+        self.dirs.bump_structure();
+    }
+
+    /// Buffers `map` as directory `akey`'s whole child-map (a fresh or replaced
+    /// directory), to be encoded and written once at commit.
+    pub(super) fn buffer_dir(&self, akey: AKey, map: BTreeMap<SmolStr, AKey>) {
+        self.dirs.write(|dirs| {
+            dirs.insert(akey, map);
+        });
+    }
+
+    /// Adds a `name → child` link to directory `parent` in the write-back cache,
+    /// seeding it from the engine on first touch. A bulk of links then mutates one
+    /// in-memory map (O(1) each) instead of re-encoding the directory blob per link.
+    pub(super) fn dir_link(&self, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
+        // Load the parent's current children on its first touch this transaction.
+        let seed = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&parent)) {
+            None
+        } else {
+            Some(self.dir_children(parent)?)
+        };
+
+        self.dirs.write(|dirs| {
+            let children = match seed {
+                Some(loaded) => dirs.entry(parent).or_insert(loaded),
+                None => dirs.get_mut(&parent).expect("the parent is buffered"),
+            };
+
+            children.insert(SmolStr::from(name), child);
+        });
+
+        Ok(())
+    }
+
+    /// Removes a `name` link from directory `parent` in the write-back cache, seeding
+    /// it from the engine on first touch.
+    pub(super) fn dir_unlink(&self, parent: AKey, name: &str) -> AdbResult<()> {
+        let seed = if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&parent)) {
+            None
+        } else {
+            Some(self.dir_children(parent)?)
+        };
+
+        self.dirs.write(|dirs| {
+            let children = match seed {
+                Some(loaded) => dirs.entry(parent).or_insert(loaded),
+                None => dirs.get_mut(&parent).expect("the parent is buffered"),
+            };
+
+            children.remove(name);
+        });
+
+        Ok(())
+    }
+
+    /// Eagerly stamps a freshly created directory's default ACL (owned by the writing
+    /// user) so an access check *later in this same transaction* sees it — the
+    /// directory's blob is buffered and its integrity tags are not sealed until commit,
+    /// but its ACL governs traversal and must be visible at once. The root carries no
+    /// ACL; an unrestricted handle stamps none.
+    #[cfg(feature = "permissions")]
+    pub(super) fn stamp_new_dir_acl(&mut self, akey: AKey) -> AdbResult<()> {
+        if akey != AKey::ROOT
+            && let Principal::User(session) = self.principal
+        {
+            set_default_acl(self.inodes, self.table, akey, session.uid())?;
+        }
+
+        Ok(())
     }
 
     /// Verifies `akey`'s integrity tag over `entry` and its current ACL, erroring
@@ -195,22 +467,33 @@ impl<'txn, 'a> Context<'txn, 'a> {
             return Ok(());
         };
 
-        let acl = read_acl(&*self.inodes, self.table, akey)?
-            .map(|acl| acl.encode())
-            .unwrap_or_default();
-        let stored = read_mac(&*self.inodes, self.table, akey)?;
+        // Skip a repeat verification of the same a-node within this mutation. The memo
+        // is cleared whenever the a-node is written (see `invalidate_verified`), so it
+        // never masks a change this transaction makes, and an external tamper is still
+        // caught on the first read (a fresh transaction starts with an empty memo).
+        if self.verified.borrow().contains(&akey) {
+            return Ok(());
+        }
+
+        // The ACL and MAC come from one inode decode (the tag binds both).
+        let (acl, mac, _sig) = read_meta(&*self.inodes, self.table, akey)?;
+        let acl = acl.map(|acl| acl.encode()).unwrap_or_default();
         let expected = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
 
-        match stored {
-            Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
+        match mac {
+            Some(mac) if perm::integrity::ct_eq(&mac, &expected) => {
+                self.verified.borrow_mut().insert(akey);
+
+                Ok(())
+            }
             _ => Err(AdbError::Tampered(format!(
-                "integrity check failed for a vnode in table '{}'",
+                "integrity check failed for an a-node in table '{}'",
                 self.table
             ))),
         }
     }
 
-    /// Reads `akey`'s ACL — a missing one (e.g. a vnode predating protection)
+    /// Reads `akey`'s ACL — a missing one (e.g. an a-node predating protection)
     /// defaults to master-owned — and checks the principal holds the `needed` grade.
     #[cfg(feature = "permissions")]
     pub(super) fn check(&self, akey: AKey, needed: Rights) -> AdbResult<()> {
@@ -220,7 +503,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     }
 
     /// Checks the principal may delete `akey` and, if it is a directory, every
-    /// vnode beneath it — a cascade delete removes the whole subtree, so each
+    /// a-node beneath it — a cascade delete removes the whole subtree, so each
     /// node in it must be deletable.
     #[cfg(feature = "permissions")]
     pub(super) fn check_deletable(&self, akey: AKey) -> AdbResult<()> {
@@ -235,7 +518,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(())
     }
 
-    /// Resolves `path` to a vnode key, checking `Access` on every directory
+    /// Resolves `path` to an a-node key, checking `Access` on every directory
     /// traversed. `None` if a component along the way is missing.
     #[cfg(feature = "permissions")]
     pub(super) fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
@@ -251,27 +534,19 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(Some(akey))
     }
 
-    /// Resolves `path` with no access checks (this build has no permission system).
+    /// Resolves `path` with no access checks (this build has no permission system),
+    /// walking through [`child`](Self::child) so buffered directories are honoured.
     #[cfg(not(feature = "permissions"))]
     pub(super) fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {
-        crate::engine::resolve(&*self.data, path)
-    }
-
-    /// Stamps the default ACL (owner = the authenticated user, its first group)
-    /// on a freshly created vnode; a no-op for an unrestricted handle or when an
-    /// ACL is already present, so an overwrite preserves it.
-    #[cfg(feature = "permissions")]
-    fn stamp_default_acl(&mut self, akey: AKey) -> AdbResult<()> {
-        // The root is special and carries no ACL.
-        if akey == AKey::ROOT {
-            return Ok(());
+        let mut akey = AKey::ROOT;
+        for name in path.names() {
+            match self.child(akey, name.as_str())? {
+                Some(child) => akey = child,
+                None => return Ok(None),
+            }
         }
 
-        if let Principal::User(session) = self.principal {
-            set_default_acl(self.inodes, self.table, akey, session.uid())?;
-        }
-
-        Ok(())
+        Ok(Some(akey))
     }
 
     /// Reads `akey`'s ACL, if it has one.
@@ -283,29 +558,10 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// Replaces `akey`'s ACL.
     #[cfg(feature = "permissions")]
     pub(super) fn write_acl(&mut self, akey: AKey, acl: Acl) -> AdbResult<()> {
+        // The ACL (which the integrity tag binds) changed; a later read re-verifies.
+        self.invalidate_verified(akey);
+
         set_acl(self.inodes, self.table, akey, acl)
-    }
-
-    /// Seals `akey`'s integrity tags over its entry bytes and current ACL: the
-    /// keyed MAC an authenticated reader verifies *and* the signature a guest
-    /// verifies. A no-op for an unrestricted handle — a non-protected database has
-    /// no keys, so nothing is sealed. Only an authenticated user reaches here (a
-    /// guest cannot write).
-    #[cfg(feature = "permissions")]
-    fn seal_integrity(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
-        if let Principal::User(session) = self.principal {
-            let acl = read_acl(&*self.inodes, self.table, akey)?
-                .map(|acl| acl.encode())
-                .unwrap_or_default();
-
-            let mac = perm::integrity::mac_value(session.key(), self.table, akey, entry, &acl);
-            seal_mac(self.inodes, self.table, akey, mac)?;
-
-            let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, entry, &acl);
-            seal_sig(self.inodes, self.table, akey, sig)?;
-        }
-
-        Ok(())
     }
 
     /// Re-seals `akey`'s integrity tags after an ACL change: the entry bytes are
@@ -313,8 +569,17 @@ impl<'txn, 'a> Context<'txn, 'a> {
     #[cfg(feature = "permissions")]
     pub(super) fn reseal_integrity(&mut self, akey: AKey) -> AdbResult<()> {
         if let Principal::User(session) = self.principal {
-            let Some(entry) = read_entry(&*self.data, akey)? else {
-                return Ok(());
+            // Read the current entry bytes buffer-first: a file edited earlier in this
+            // transaction lives in the write-back cache, not yet in the engine, and the
+            // seal must cover those pending bytes, not the stale on-disk ones. No
+            // integrity re-check here — the stored tags are exactly what this call is
+            // about to recompute (they no longer match the just-changed ACL).
+            let entry = match self.dirs.file_get(akey) {
+                Some(buffered) => buffered,
+                None => match read_entry(&*self.data, akey)? {
+                    Some(entry) => entry,
+                    None => return Ok(()),
+                },
             };
 
             let acl = read_acl(&*self.inodes, self.table, akey)?
@@ -324,7 +589,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
             let mac = perm::integrity::mac_value(session.key(), self.table, akey, &entry, &acl);
             seal_mac(self.inodes, self.table, akey, mac)?;
 
-            let sig = perm::integrity::sign_value(session.sign_seed(), self.table, akey, &entry, &acl);
+            let sig = perm::integrity::sign_value(session.signer(), self.table, akey, &entry, &acl);
             seal_sig(self.inodes, self.table, akey, sig)?;
         }
 
@@ -335,7 +600,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// (the caller must already be an authorized administrator).
     #[cfg(feature = "permissions")]
     pub(in super::super) fn reap_owned(&mut self, uid: u32) -> AdbResult<()> {
-        let mut victims: Vec<(AKey, String)> = Vec::new();
+        let mut victims: Vec<(AKey, SmolStr)> = Vec::new();
         collect_owned(self, AKey::ROOT, uid, &mut victims)?;
 
         for (parent, name) in victims {

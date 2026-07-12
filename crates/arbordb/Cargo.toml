@@ -61,6 +61,19 @@ required-features = ["entry-timestamps"]
 name = "permissions"
 required-features = ["permissions"]
 
+# A warm-loop probe: is a fresh bulk load under one parent linear on a protected
+# database, and what does protection cost per item? (Diagnostic for the write-back
+# directory cache under `permissions`.)
+[[example]]
+name = "perm_bulk_probe"
+required-features = ["derive", "permissions"]
+
+# A warm-loop probe: does a burst of edits to one value in a transaction coalesce into
+# a single re-encode and signature? (Diagnostic for the write-back file cache.)
+[[example]]
+name = "perm_multi_edit_probe"
+required-features = ["derive", "permissions"]
+
 # All benches use a `#[derive(AData)]` entity, so they need the derive macro; each
 # is a criterion binary (`harness = false`).
 [[bench]]
@@ -114,7 +127,7 @@ parallel = ["dep:rayon"]
 # Serde `Serialize`/`Deserialize` for the crate's public types (currently `PublicKey`).
 serde = ["dep:serde"]
 
-# Per-vnode created/modified/accessed datetime, stored out-of-band in the reserved
+# Per-a-node created/modified/accessed datetime, stored out-of-band in the reserved
 # `$inodes` table. A binary compiled without this feature never opens that table,
 # so it opens a timestamped database and simply ignores the timestamps.
 entry-timestamps = []

@@ -17,5 +17,9 @@ pub(crate) use self::{
     reader::Reader,
 };
 
+// The low-level blob-emission primitives, shared by the value codec, the Serde blob
+// writer, and the typed direct encoder (`AData::encode_node`).
+pub(crate) use self::archived::{begin_blob, patch_root, push_leaf, push_list, push_object, push_value};
+
 #[cfg(feature = "serde")]
-pub(crate) use self::archived::{ArchivedNode, begin_blob, patch_root, push_leaf, push_list, push_object};
+pub(crate) use self::archived::ArchivedNode;

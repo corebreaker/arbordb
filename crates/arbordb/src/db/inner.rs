@@ -9,7 +9,7 @@ use redb::Database;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc,
         Mutex,
         RwLock,
@@ -28,10 +28,15 @@ pub(crate) struct DbInner {
     version_lock: RwLock<()>,
     /// Per-table caches, created lazily on first use.
     caches:       Mutex<HashMap<String, Arc<PathCache>>>,
+    /// Whether any secondary index exists anywhere in the database. Primed at open
+    /// and set on index creation; lets a mutation on an index-free database skip the
+    /// registry read entirely. Only ever set (never cleared), so it is a conservative
+    /// hint — a stale `true` merely takes the slower, still-correct path.
+    has_indexes:  AtomicBool,
 
-    /// Buffered vnode access times awaiting a flush to `$inodes`: reads record here
+    /// Buffered a-node access times awaiting a flush to `$inodes`: reads record here
     /// (cheap, in memory) and a committed write or an explicit flush persists them.
-    /// Keyed by `(table, vnode)`, valued by the latest access time (epoch millis).
+    /// Keyed by `(table, a-node)`, valued by the latest access time (epoch millis).
     #[cfg(feature = "entry-timestamps")]
     access_log: Mutex<HashMap<(String, crate::AKey), i64>>,
 }
@@ -43,12 +48,14 @@ impl DbInner {
         generation: AtomicU64,
         version_lock: RwLock<()>,
         caches: Mutex<HashMap<String, Arc<PathCache>>>,
+        has_indexes: AtomicBool,
     ) -> Self {
         Self {
             db,
             generation,
             version_lock,
             caches,
+            has_indexes,
             #[cfg(feature = "entry-timestamps")]
             access_log: Mutex::new(HashMap::new()),
         }
@@ -67,6 +74,18 @@ impl DbInner {
     /// Advances the generation after a commit, invalidating older cache entries.
     pub(crate) fn bump_generation(&self) {
         self.generation.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Whether any secondary index might exist — a conservative hint the write path
+    /// checks before reading the registry (a `false` is exact: no index exists).
+    pub(crate) fn has_any_index(&self) -> bool {
+        self.has_indexes.load(Ordering::Acquire)
+    }
+
+    /// Records that a secondary index now exists, so later mutations take the
+    /// index-maintaining path.
+    pub(crate) fn mark_has_index(&self) {
+        self.has_indexes.store(true, Ordering::Release);
     }
 
     /// The lock serializing a read's `(snapshot, generation)` capture against a
@@ -89,7 +108,7 @@ impl DbInner {
         Ok(Arc::clone(cache))
     }
 
-    /// Buffers access times for `table`'s nodes, keeping the latest time per vnode.
+    /// Buffers access times for `table`'s nodes, keeping the latest time per a-node.
     /// Called when a read transaction ends; best-effort (a poisoned lock drops the
     /// batch rather than propagating, since access times are advisory).
     #[cfg(feature = "entry-timestamps")]

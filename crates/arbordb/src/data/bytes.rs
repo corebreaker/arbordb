@@ -7,6 +7,7 @@ use super::{
     leaf::{Leaf, LeafMut},
     AData,
     AValue,
+    NodeEncoder,
     Scalar,
 };
 
@@ -49,6 +50,10 @@ impl AData for Bytes {
             Some(scalar) => Bytes::from_scalar(&scalar),
             None => Err(AdbError::PathNotFound(at.clone())),
         }
+    }
+
+    fn encode_node(&self, enc: &mut NodeEncoder) -> AdbResult<u32> {
+        Ok(enc.leaf(&self.to_scalar()))
     }
 }
 

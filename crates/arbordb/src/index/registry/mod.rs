@@ -11,5 +11,5 @@ mod repository;
 
 pub(crate) use self::{
     entry::IndexEntry,
-    interface::{create, delete, for_table, has, lookup},
+    interface::{any, create, delete, for_table, has, lookup},
 };

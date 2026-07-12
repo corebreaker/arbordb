@@ -1,4 +1,4 @@
-//! User authentication and per-vnode access control with the `permissions` feature.
+//! User authentication and per-a-node access control with the `permissions` feature.
 //!
 //! A fresh database is unprotected. Promoting it (via `change_password`) mints a
 //! master user, a per-user keyring, and a database integrity key; from then on
@@ -69,7 +69,7 @@ fn main() -> AdbResult<()> {
     }
 
     // The master (or any reader that may see it) can inspect the resolved ACL and the
-    // vnode's timestamps (the `permissions` feature implies `entry-timestamps`).
+    // a-node's timestamps (the `permissions` feature implies `entry-timestamps`).
     let r = master.open_table("docs")?.read()?;
     println!(
         "vault/secret: owner={:?}, groups={:?}, other={:?}",

@@ -6,7 +6,7 @@
 //! one level — and the empty pattern matches the table root (one entity).
 //!
 //! Given the access path a mutation touched, [`Pattern::affected_entities`]
-//! returns exactly the matching entities on that path's root-to-vnode line — the
+//! returns exactly the matching entities on that path's root-to-a-node line — the
 //! only ones whose indexed columns the mutation could have changed. The walk is
 //! pruned to that line, so it visits only nodes the mutation could affect.
 
@@ -73,7 +73,7 @@ impl Pattern {
     }
 
     /// The keys of the entities this pattern matches that lie on the same
-    /// root-to-vnode line as `scope` (the path a mutation touched).
+    /// root-to-a-node line as `scope` (the path a mutation touched).
     pub(crate) fn affected_entities<R>(&self, data: &R, scope: &APath) -> AdbResult<Vec<AKey>>
     where
         R: ReadableTable<u128, EntryBytes>, {

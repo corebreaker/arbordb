@@ -8,7 +8,7 @@ mod functions;
 
 pub(crate) use self::{
     entry::{dir_entry, file_entry, get_entry_kind, entry_split},
-    functions::{bootstrap_metadata, child_of, data_def, fetch_entry_kind, read_entry, resolve, EntryBytes},
+    functions::{bootstrap_metadata, child_of, data_def, fetch_entry_kind, read_entry, EntryBytes},
 };
 
 pub(crate) use self::functions::{INDEX_TABLE, META_TABLE};

@@ -24,7 +24,6 @@ use crate::{
     index::{registry::IndexEntry, Pattern},
     path::{APath, IntoArborPath, IntoValuePath, VPath},
     value::Value,
-    vnode::NodeKind,
     AKey,
 };
 
@@ -46,12 +45,12 @@ use crate::inode::NodeTimestamps;
 /// The trait is object-safe on purpose, so [`IndexQuery`] can hold a `&dyn ReadOps`
 /// and every read method can be one generic-free free function.
 pub(crate) trait Grab {
-    /// Resolves an access path to a vnode key. The table root always resolves (to
+    /// Resolves an access path to an a-node key. The table root always resolves (to
     /// [`AKey::ROOT`]) even before it is materialized; any other missing component
     /// is `None`.
     fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>>;
 
-    /// The entry blob for `akey`, or `None` if the vnode is absent.
+    /// The entry blob for `akey`, or `None` if the a-node is absent.
     fn entry_blob(&self, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>>;
 
     /// Looks up a registered index by name (empty registry ⇒ `None`).
@@ -123,7 +122,7 @@ pub(crate) fn load<T: AData>(src: &dyn Grab, path: impl IntoArborPath) -> AdbRes
     match get_entry_kind(&blob)? {
         EntryKind::File => {
             // Skip the one-byte entry tag; the value payload starts at offset 1.
-            let reader = ArchivedReader::new(blob, 1);
+            let reader = ArchivedReader::new(blob, 1)?;
 
             Ok(Some(T::load(&reader, &VPath::root())?))
         }
@@ -219,7 +218,7 @@ pub(crate) fn fetch<A: ARef<'static>>(src: &dyn Grab, path: impl IntoArborPath) 
 
     match get_entry_kind(&blob)? {
         EntryKind::File => {
-            let reader: Arc<dyn Reader> = Arc::new(ArchivedReader::new(blob, 1));
+            let reader: Arc<dyn Reader> = Arc::new(ArchivedReader::new(blob, 1)?);
 
             Ok(Some(A::open(reader, VPath::root())))
         }
@@ -260,10 +259,7 @@ pub(crate) fn get(src: &dyn Grab, path: impl IntoArborPath, at: impl IntoValuePa
         return Ok(None);
     };
 
-    match node.kind()? {
-        NodeKind::Leaf => Ok(Some(node.scalar()?)),
-        _ => Ok(None),
-    }
+    node.scalar_if_leaf()
 }
 
 /// Reads a typed scalar at `at` inside the file at `path`.
@@ -273,18 +269,18 @@ pub(crate) fn get_as<V: AValue>(
     at: impl IntoValuePath,
 ) -> AdbResult<Option<V>> {
     match get(src, path, at)? {
-        Some(scalar) => Ok(Some(V::from_scalar(&scalar)?)),
+        Some(scalar) => Ok(Some(V::from_scalar_owned(scalar)?)),
         None => Ok(None),
     }
 }
 
 /// The filesystem kind (file or directory) at `path`, or `None` if absent.
 ///
-/// Under the `permissions` feature this is a full read of the target vnode, not a
-/// cheap stat: it requires `Rights::Access` on the vnode *itself* (not merely the
+/// Under the `permissions` feature this is a full read of the target a-node, not a
+/// cheap stat: it requires `Rights::Access` on the a-node *itself* (not merely the
 /// traversal right on its ancestors, which `resolve` already checks) and verifies
-/// the vnode's own integrity tag. So it can neither probe the existence or kind of a
-/// vnode the caller may not read, nor report a tampered kind tag — matching the
+/// the a-node's own integrity tag. So it can neither probe the existence or kind of an
+/// a-node the caller may not read, nor report a tampered kind tag — matching the
 /// guarantees of `load`/`fetch`/`get`.
 pub(crate) fn kind(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
     let path = path.into_arbor_path()?;
@@ -309,7 +305,7 @@ pub(crate) fn kind(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Option
 /// Whether a file or directory exists at `path`.
 ///
 /// Shares `kind`'s access rules: under `permissions` this reports `Err` rather than
-/// `Ok(false)` for a vnode the caller lacks `Rights::Access` on, so existence cannot
+/// `Ok(false)` for an a-node the caller lacks `Rights::Access` on, so existence cannot
 /// be probed past an ACL that denies access (same behavior as a `load` on it).
 pub(crate) fn exists(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<bool> {
     Ok(kind(src, path)?.is_some())
@@ -323,7 +319,7 @@ pub(crate) fn exists(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<bool
 /// child's own entry *without* re-authorizing or verifying the child — a listing
 /// deliberately avoids paying a full ACL + MAC check per entry. A child kind reported
 /// here therefore does not carry the tamper/authorization guarantee that a direct
-/// `load`/`fetch`/`get`/`kind` on that child does: those run the per-vnode checks and
+/// `load`/`fetch`/`get`/`kind` on that child does: those run the per-a-node checks and
 /// will catch a tampered child entry this listing does not.
 pub(crate) fn ls(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Vec<Entry>> {
     let path = path.into_arbor_path()?;
@@ -355,7 +351,7 @@ pub(crate) fn ls(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Vec<Entr
     for (name, child) in dir.entries()? {
         let child_blob = src
             .entry_blob(child)?
-            .ok_or_else(|| AdbError::Corrupt("a directory entry points at a missing vnode".into()))?;
+            .ok_or_else(|| AdbError::Corrupt("a directory entry points at a missing a-node".into()))?;
 
         out.push(Entry::new(name.to_string(), get_entry_kind(&child_blob)?));
     }
@@ -363,8 +359,8 @@ pub(crate) fn ls(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Vec<Entr
     Ok(out)
 }
 
-/// The created / modified / accessed timestamps of the vnode at `path`, or `None`
-/// if the vnode is absent or has no recorded metadata yet.
+/// The created / modified / accessed timestamps of the a-node at `path`, or `None`
+/// if the a-node is absent or has no recorded metadata yet.
 #[cfg(feature = "entry-timestamps")]
 pub(crate) fn times(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
     let path = path.into_arbor_path()?;
@@ -401,7 +397,7 @@ pub(crate) fn get_acl(src: &dyn Grab, path: impl IntoArborPath, class: AclClass)
 }
 
 /// The name of the owner of the file or directory at `path`, or `None` if the
-/// vnode is absent or has no ACL. Falls back to the numeric id if the owning user
+/// a-node is absent or has no ACL. Falls back to the numeric id if the owning user
 /// is no longer in the store.
 #[cfg(feature = "permissions")]
 pub(crate) fn owner(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Option<String>> {
@@ -423,7 +419,7 @@ pub(crate) fn owner(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Optio
 }
 
 /// The names of the groups the file or directory at `path` belongs to, sorted;
-/// empty when the vnode is absent, has no ACL, or is in no group.
+/// empty when the a-node is absent, has no ACL, or is in no group.
 #[cfg(feature = "permissions")]
 pub(crate) fn groups(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Vec<String>> {
     let path = path.into_arbor_path()?;
@@ -527,7 +523,7 @@ fn load_entity<T: AData>(src: &dyn Grab, entity: AKey) -> AdbResult<Option<T>> {
 
     match get_entry_kind(&blob)? {
         EntryKind::File => {
-            let reader = ArchivedReader::new(blob, 1);
+            let reader = ArchivedReader::new(blob, 1)?;
 
             Ok(Some(T::load(&reader, &VPath::root())?))
         }

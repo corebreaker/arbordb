@@ -4,11 +4,11 @@
 //! each grade including every weaker one. It is what
 //! [`WriteTxn::set_acl`](crate::txn::WriteTxn::set_acl) grants and what
 //! [`ReadTxn::get_acl`](crate::txn::ReadTxn::get_acl) reports. [`AclClass`](crate::acl::AclClass) selects
-//! *which* class of a vnode's ACL — its owner, one of its groups, or everyone else —
+//! *which* class of an a-node's ACL — its owner, one of its groups, or everyone else —
 //! an operation reads or sets. There is no longer a separate `walk` right: a
 //! directory is traversable by anyone who holds `Access` on it.
 
-/// A graded access right on a vnode.
+/// A graded access right on an a-node.
 ///
 /// The grades are cumulative — each includes every weaker one — so an ordering
 /// comparison answers "does this grade allow that one?": `Delete` > `Modify` >
@@ -16,9 +16,9 @@
 ///
 /// - [`Access`](Rights::Access) — read a file's value, list a directory, and traverse a directory to reach a
 ///   descendant.
-/// - [`Modify`](Rights::Modify) — everything `Access` grants, plus overwrite a file's value or a vnode's ACL, and add /
-///   remove / rename a directory's children.
-/// - [`Delete`](Rights::Delete) — everything `Modify` grants, plus delete the vnode itself.
+/// - [`Modify`](Rights::Modify) — everything `Access` grants, plus overwrite a file's value or an a-node's ACL, and add
+///   / remove / rename a directory's children.
+/// - [`Delete`](Rights::Delete) — everything `Modify` grants, plus delete the a-node itself.
 ///
 /// On disk each grade is a 3-bit cumulative mask (`Access` = 1, `Modify` = 3,
 /// `Delete` = 7), so a stronger grade's bits cover every weaker grade's.
@@ -32,10 +32,10 @@ pub enum Rights {
     Access,
 
     /// Everything [`Access`](Rights::Access) grants, plus overwrite a file's value
-    /// or a vnode's ACL, and add / remove / rename a directory's children.
+    /// or an a-node's ACL, and add / remove / rename a directory's children.
     Modify,
 
-    /// Everything [`Modify`](Rights::Modify) grants, plus delete the vnode.
+    /// Everything [`Modify`](Rights::Modify) grants, plus delete the a-node.
     Delete,
 }
 
@@ -72,20 +72,20 @@ impl Rights {
     }
 }
 
-/// Selects one class of a vnode's access-control list.
+/// Selects one class of an a-node's access-control list.
 ///
-/// A vnode grants rights to its owner, to the members of any number of named
+/// An a-node grants rights to its owner, to the members of any number of named
 /// groups, and to everyone else. [`get_acl`](crate::txn::ReadTxn::get_acl) reads,
 /// and [`set_acl`](crate::txn::WriteTxn::set_acl) sets, the [`Rights`] of the class
 /// named here.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AclClass {
-    /// The vnode's owner.
+    /// The a-node's owner.
     User,
 
     /// The members of the group with this name.
     Group(String),
 
-    /// Everyone who is neither the owner nor a member of one of the vnode's groups.
+    /// Everyone who is neither the owner nor a member of one of the a-node's groups.
     Other,
 }

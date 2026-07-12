@@ -78,12 +78,12 @@ impl<'a> RootedRead<'a> {
         self.txn.get_as(self.absolute(path)?, at)
     }
 
-    /// The kind of vnode at `path` (relative to the root), if any.
+    /// The kind of a-node at `path` (relative to the root), if any.
     pub fn kind(&self, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
         self.txn.kind(self.absolute(path)?)
     }
 
-    /// Whether a vnode exists at `path` (relative to the root).
+    /// Whether an a-node exists at `path` (relative to the root).
     pub fn exists(&self, path: impl IntoArborPath) -> AdbResult<bool> {
         self.txn.exists(self.absolute(path)?)
     }
@@ -105,27 +105,27 @@ impl<'a> RootedRead<'a> {
         self.query(index).prefixed(values).run()
     }
 
-    /// The created / modified / accessed timestamps of the vnode at `path`
+    /// The created / modified / accessed timestamps of the a-node at `path`
     /// (relative to the root), or `None` if it is absent or has no recorded metadata.
     #[cfg(feature = "entry-timestamps")]
     pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
         self.txn.times(self.absolute(path)?)
     }
 
-    /// The [`Rights`] the vnode at `path` (relative to the root) grants `class`.
+    /// The [`Rights`] the a-node at `path` (relative to the root) grants `class`.
     #[cfg(feature = "permissions")]
     pub fn get_acl(&self, path: impl IntoArborPath, class: AclClass) -> AdbResult<Rights> {
         self.txn.get_acl(self.absolute(path)?, class)
     }
 
-    /// The name of the owner of the vnode at `path` (relative to the root), or
+    /// The name of the owner of the a-node at `path` (relative to the root), or
     /// `None` if it is absent or has no ACL.
     #[cfg(feature = "permissions")]
     pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
         self.txn.owner(self.absolute(path)?)
     }
 
-    /// The names of the groups the vnode at `path` (relative to the root) belongs
+    /// The names of the groups the a-node at `path` (relative to the root) belongs
     /// to, sorted.
     #[cfg(feature = "permissions")]
     pub fn groups(&self, path: impl IntoArborPath) -> AdbResult<Vec<String>> {

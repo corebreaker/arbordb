@@ -1,10 +1,10 @@
 //! The reserved `$inodes` table handle and the section tags that identify each
-//! kind of per-vnode metadata inside an inode blob.
+//! kind of per-a-node metadata inside an inode blob.
 
 use crate::constants::INODES_TABLE_NAME;
 use redb::TableDefinition;
 
-/// The reserved per-vnode metadata table: composite `(table, AKey)` key → a
+/// The reserved per-a-node metadata table: composite `(table, AKey)` key → a
 /// section-tagged blob.
 pub(crate) const INODES_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new(INODES_TABLE_NAME);
 
@@ -17,7 +17,7 @@ pub(super) const SECTION_TIMESTAMPS: u8 = 0;
 pub(super) const SECTION_ACL: u8 = 1;
 
 /// The integrity section (`permissions` feature): a 32-byte keyed BLAKE3 tag over
-/// the vnode's entry blob and its ACL, verified on authenticated reads.
+/// the a-node's entry blob and its ACL, verified on authenticated reads.
 #[cfg(feature = "permissions")]
 pub(super) const SECTION_MAC: u8 = 2;
 

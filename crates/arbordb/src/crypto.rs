@@ -17,7 +17,10 @@ use chacha20poly1305::{
     XChaCha20Poly1305,
     XNonce,
 };
-use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+
+// The `Signer` trait is brought in anonymously (`as _`) so its `sign` method
+// resolves, without its name colliding with this module's own `Signer` struct.
+use ed25519_dalek::{Signature, Signer as _, SigningKey, VerifyingKey};
 
 /// Length of the database integrity key `K`.
 pub(crate) const KEY_LEN: usize = 32;
@@ -63,9 +66,36 @@ pub(crate) fn public_key(seed: &[u8; SEED_LEN]) -> [u8; PUBKEY_LEN] {
     SigningKey::from_bytes(seed).verifying_key().to_bytes()
 }
 
-/// Signs `msg` with the private signing `seed`, returning the detached signature.
-pub(crate) fn sign(seed: &[u8; SEED_LEN], msg: &[u8]) -> [u8; SIG_LEN] {
-    SigningKey::from_bytes(seed).sign(msg).to_bytes()
+/// A reusable Ed25519 signer that holds the **expanded** signing key.
+///
+/// Building the key from a seed derives the public key (an elliptic-curve scalar
+/// multiplication) — the costly half of signing. A session signs a value on every
+/// protected write, so it expands the key once and reuses it, rather than
+/// reconstructing it from the seed on each signature.
+///
+/// The expanded key then lives as long as the owning session. The tradeoff is a
+/// slightly larger long-lived secret footprint (the expanded key alongside the seed)
+/// bought for the per-signature speed-up — but not a wider *exposure*: a session
+/// already keeps its signing seed unencrypted for its whole life (to re-wrap the
+/// secret bundle into another keyring), and the expanded key is trivially derivable
+/// from that seed, so it discloses no secret the session did not already hold.
+pub(crate) struct Signer {
+    /// The expanded signing key, derived once from the seed.
+    key: SigningKey,
+}
+
+impl Signer {
+    /// Expands the signing key from `seed`, so later signatures reuse it.
+    pub(crate) fn new(seed: &[u8; SEED_LEN]) -> Self {
+        Self {
+            key: SigningKey::from_bytes(seed),
+        }
+    }
+
+    /// Signs `msg`, returning the detached signature. Reuses the expanded key.
+    pub(crate) fn sign(&self, msg: &[u8]) -> [u8; SIG_LEN] {
+        self.key.sign(msg).to_bytes()
+    }
 }
 
 /// Whether `sig` is a valid signature of `msg` under `pubkey`. A malformed public
@@ -173,7 +203,7 @@ mod tests {
     fn signatures_verify_under_the_matching_public_key_only() {
         let seed = random_seed().unwrap();
         let pubkey = public_key(&seed);
-        let sig = sign(&seed, b"a signed message");
+        let sig = Signer::new(&seed).sign(b"a signed message");
 
         // The genuine signature verifies; a different message or key does not.
         assert!(verify(&pubkey, b"a signed message", &sig));

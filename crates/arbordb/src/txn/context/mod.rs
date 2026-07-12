@@ -6,7 +6,9 @@
 //! while letting each public op compose them.
 
 mod ctx;
+mod write_buffer;
 
 pub(super) mod table;
 
 pub(super) use ctx::Context;
+pub(super) use write_buffer::WriteBuffer;

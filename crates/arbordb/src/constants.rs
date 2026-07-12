@@ -7,7 +7,7 @@ pub(crate) const METADATA_TABLE_NAME: &str = "$metadata";
 /// table holds every index's entries, keyed by the globally-unique index id.
 pub(crate) const INDEX_TABLE_NAME: &str = "$index";
 
-/// The reserved per-vnode metadata table name (created/modified/accessed times and,
+/// The reserved per-a-node metadata table name (created/modified/accessed times and,
 /// with `permissions`, ACLs). Keyed by a `(table, AKey)` composite.
 #[cfg(any(feature = "entry-timestamps", feature = "permissions"))]
 pub(crate) const INODES_TABLE_NAME: &str = "$inodes";
