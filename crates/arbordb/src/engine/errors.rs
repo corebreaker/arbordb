@@ -4,7 +4,7 @@
 //! API — every engine error surfaces as an opaque [`AdbError::Engine`].
 
 use crate::error::AdbError;
-use redb::{CommitError, DatabaseError, StorageError, TableError, TransactionError};
+use redb::{CommitError, DatabaseError, SetDurabilityError, StorageError, TableError, TransactionError};
 
 macro_rules! from_engine_error {
     ($($err:ty),+ $(,)?) => {
@@ -18,4 +18,11 @@ macro_rules! from_engine_error {
     };
 }
 
-from_engine_error!(DatabaseError, TransactionError, TableError, StorageError, CommitError);
+from_engine_error!(
+    DatabaseError,
+    TransactionError,
+    TableError,
+    StorageError,
+    CommitError,
+    SetDurabilityError
+);

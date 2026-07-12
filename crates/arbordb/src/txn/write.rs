@@ -12,6 +12,7 @@ use crate::{
     codec::decode,
     data::{AData, AMut, ARef, AValue, Scalar},
     db::DbInner,
+    durability::Durability,
     engine::{data_def, entry_split, fetch_entry_kind, read_entry, Entry, EntryKind, INDEX_TABLE, META_TABLE},
     error::{AdbError, AdbResult},
     index::{
@@ -82,6 +83,10 @@ pub struct WriteTxn {
     /// commit instead of on every child link.
     dirs: WriteBuffer,
 
+    /// This transaction's durability level, applied to the engine commit. Defaults
+    /// to [`Durability::Immediate`]; set it with [`with_durability`](Self::with_durability).
+    durability: Durability,
+
     /// The identity performing the writes; drives ACL enforcement.
     #[cfg(feature = "permissions")]
     principal: Arc<Principal>,
@@ -102,9 +107,20 @@ impl WriteTxn {
             table,
             inner,
             dirs,
+            durability: Durability::Immediate,
             #[cfg(feature = "permissions")]
             principal,
         }
+    }
+
+    /// Sets this transaction's [`Durability`], returned for chaining:
+    /// `table.write()?.with_durability(Durability::None)`. The default is
+    /// [`Durability::Immediate`] (full crash-durability); relaxing it trades the
+    /// crash-survival of the most recent commits for a faster [`commit`](Self::commit).
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
+
+        self
     }
 
     /// Resolves `path` and reads the resolved a-node's kind through a **single** data
@@ -792,10 +808,11 @@ impl WriteTxn {
     /// database generation (so cached resolutions from earlier snapshots retire).
     pub fn commit(self) -> AdbResult<()> {
         let WriteTxn {
-            txn,
+            mut txn,
             table,
             inner,
             dirs,
+            durability,
             #[cfg(feature = "permissions")]
             principal,
         } = self;
@@ -833,6 +850,10 @@ impl WriteTxn {
                 }
             }
         }
+
+        // Apply this transaction's durability to the engine commit (the default is
+        // full/`Immediate`; a relaxed level trades recent-commit crash-safety for speed).
+        txn.set_durability(durability.to_engine())?;
 
         let guard = inner
             .version_lock()
@@ -1202,5 +1223,40 @@ mod tests {
         assert_eq!(r.load::<i64>("c/d").unwrap(), Some(30));
         // ...and `a/b` was recreated with the new scalar.
         assert_eq!(r.load::<i64>("a/b").unwrap(), Some(99));
+    }
+
+    #[test]
+    fn durability_levels_commit_visibly() {
+        // Both levels commit successfully and are visible to later reads in the same
+        // process; the level governs only crash-survival, never in-process visibility.
+        for durability in [Durability::None, Durability::Immediate] {
+            let db = ArborDb::create_in_memory().unwrap();
+            let table = db.open_table("t").unwrap();
+
+            let w = table.write().unwrap().with_durability(durability);
+            w.store_value("users/alice", &user(30)).unwrap();
+            w.commit().unwrap();
+
+            let r = table.read().unwrap();
+            assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(30));
+        }
+    }
+
+    #[test]
+    fn none_durability_commits_on_a_file_backend() {
+        // The relaxed level applies on a real file backend (not just in-memory): the
+        // commit succeeds and its write is readable back on the same handle.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.adb");
+
+        let db = ArborDb::create(&path).unwrap();
+        let table = db.open_table("t").unwrap();
+
+        let w = table.write().unwrap().with_durability(Durability::None);
+        w.store_value("k", &user(7)).unwrap();
+        w.commit().unwrap();
+
+        let r = table.read().unwrap();
+        assert_eq!(r.get_as::<i64>("k", "age").unwrap(), Some(7));
     }
 }

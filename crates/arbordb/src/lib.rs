@@ -65,6 +65,7 @@ mod cache;
 mod codec;
 mod constants;
 mod db;
+mod durability;
 mod engine;
 mod error;
 mod key;
@@ -106,6 +107,7 @@ pub mod entry {
 pub use self::{
     data::AData,
     db::ArborDb,
+    durability::Durability,
     error::{AdbError, AdbResult},
     key::AKey,
     vnode::NodeKind,
