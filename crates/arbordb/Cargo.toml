@@ -114,7 +114,7 @@ parallel = ["dep:rayon"]
 # Serde `Serialize`/`Deserialize` for the crate's public types (currently `PublicKey`).
 serde = ["dep:serde"]
 
-# Per-vnode created/modified/accessed datetime, stored out-of-band in the reserved
+# Per-a-node created/modified/accessed datetime, stored out-of-band in the reserved
 # `$inodes` table. A binary compiled without this feature never opens that table,
 # so it opens a timestamped database and simply ignores the timestamps.
 entry-timestamps = []

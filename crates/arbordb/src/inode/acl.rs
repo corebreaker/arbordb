@@ -1,21 +1,21 @@
-//! A vnode's access-control list: its owning user, the [`Rights`] it grants that
+//! An a-node's access-control list: its owning user, the [`Rights`] it grants that
 //! owner, the rights it grants the members of each of its groups, and the rights it
 //! grants everyone else.
 //!
 //! Rights are graded (`None` ⊂ `Access` ⊂ `Modify` ⊂ `Delete`; see [`Rights`]).
-//! A vnode belongs to zero or more groups — the keys of its group map — and a caller
+//! An a-node belongs to zero or more groups — the keys of its group map — and a caller
 //! in several of them gets the strongest grade any of those groups is granted.
 //! Group ids are kept in a [`BTreeMap`], so the encoding is deterministic: the value
 //! integrity tags bind the encoded ACL, and a nondeterministic order would break them.
-//! Changing an ACL needs `Modify` on the vnode — there is no separate admin right.
+//! Changing an ACL needs `Modify` on the a-node — there is no separate admin right.
 
 use crate::{acl::Rights, codec::Reader, error::AdbResult};
 use std::collections::BTreeMap;
 
-/// A group identifier, as stored in a vnode's ACL and the group store.
+/// A group identifier, as stored in an a-node's ACL and the group store.
 pub(crate) type GroupId = u32;
 
-/// A vnode's access-control list. Every vnode has an owning user; it may grant
+/// An a-node's access-control list. Every a-node has an owning user; it may grant
 /// rights to any number of groups (a caller in several gets the strongest), and to
 /// everyone else.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -26,7 +26,7 @@ pub(crate) struct Acl {
     /// The rights granted to the owner.
     owner: Rights,
 
-    /// The rights granted to each group the vnode belongs to, keyed by group id.
+    /// The rights granted to each group the a-node belongs to, keyed by group id.
     group: BTreeMap<GroupId, Rights>,
 
     /// The rights granted to everyone else.
@@ -34,7 +34,7 @@ pub(crate) struct Acl {
 }
 
 impl Acl {
-    /// The default ACL for a freshly created vnode owned by `owner_uid`: the owner
+    /// The default ACL for a freshly created a-node owned by `owner_uid`: the owner
     /// may delete it, everyone else may access (read + traverse) it, and it belongs
     /// to no group.
     pub(crate) fn default_for(owner_uid: u32) -> Self {
@@ -76,7 +76,7 @@ impl Acl {
         self.other = rights;
     }
 
-    /// The rights granted to `gid`, or [`Rights::None`] if the vnode is not in that
+    /// The rights granted to `gid`, or [`Rights::None`] if the a-node is not in that
     /// group.
     pub(crate) fn group_rights(&self, gid: GroupId) -> Rights {
         self.group.get(&gid).copied().unwrap_or(Rights::None)
@@ -98,23 +98,23 @@ impl Acl {
         self.group.entry(gid).or_insert(Rights::Access);
     }
 
-    /// Removes `gid` from the vnode's groups (a no-op if it is absent).
+    /// Removes `gid` from the a-node's groups (a no-op if it is absent).
     pub(crate) fn remove_group(&mut self, gid: GroupId) {
         self.group.remove(&gid);
     }
 
-    /// Whether the vnode belongs to `gid`.
+    /// Whether the a-node belongs to `gid`.
     pub(crate) fn has_group(&self, gid: GroupId) -> bool {
         self.group.contains_key(&gid)
     }
 
-    /// The ids of the groups the vnode belongs to, in ascending order.
+    /// The ids of the groups the a-node belongs to, in ascending order.
     pub(crate) fn group_ids(&self) -> impl Iterator<Item = GroupId> + '_ {
         self.group.keys().copied()
     }
 
     /// The effective grade for a caller with id `uid` who is in groups `gids`: the
-    /// owner's rights if they own the vnode, otherwise the strongest grade of any
+    /// owner's rights if they own the a-node, otherwise the strongest grade of any
     /// group they share with it, otherwise everyone-else's rights.
     pub(crate) fn effective_rights(&self, uid: u32, gids: &[u32]) -> Rights {
         if uid == self.owner_uid {

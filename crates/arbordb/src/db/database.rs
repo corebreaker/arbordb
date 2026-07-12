@@ -60,7 +60,7 @@ impl ArborDb {
     /// Whether the database has a permission system installed — that is, whether it
     /// has been promoted to a protected database by setting a master password
     /// (`change_password` on an unprotected handle, `permissions` feature). A
-    /// protected database enforces authentication and per-vnode ACLs, and can only be
+    /// protected database enforces authentication and per-a-node ACLs, and can only be
     /// opened by a binary built with the `permissions` feature. Always `false` on a
     /// build without that feature.
     pub fn is_protected(&self) -> AdbResult<bool> {
@@ -76,7 +76,7 @@ impl ArborDb {
     /// refused. True for a guest on a protected database; false for an authenticated
     /// user and on an unprotected database (and always false without the `permissions`
     /// feature). A `false` result does not promise a *given* write will succeed — a
-    /// non-guest write is still subject to per-vnode ACLs.
+    /// non-guest write is still subject to per-a-node ACLs.
     pub fn is_readonly(&self) -> bool {
         #[cfg(feature = "permissions")]
         if cfg!(feature = "permissions") {
@@ -171,9 +171,9 @@ impl ArborDb {
         Ok(names)
     }
 
-    /// Persists buffered vnode access times to the `$inodes` table.
+    /// Persists buffered a-node access times to the `$inodes` table.
     ///
-    /// Reads record a vnode's access time in memory; it is otherwise written only on
+    /// Reads record an a-node's access time in memory; it is otherwise written only on
     /// the next committed write. Call this after a read-only burst to make the
     /// access times durable. A no-op when nothing is buffered.
     #[cfg(feature = "entry-timestamps")]
@@ -475,7 +475,7 @@ impl ArborDb {
         perm::store::group_members(self.inner.db(), group)
     }
 
-    /// Removes a group: unassigns it from every user and strips it from every vnode
+    /// Removes a group: unassigns it from every user and strips it from every a-node
     /// ACL. The built-in master and super groups cannot be removed. Administrators only.
     pub fn remove_group(&self, name: &str) -> AdbResult<()> {
         let key = self.admin_key()?;

@@ -1,6 +1,6 @@
 # ArborDb
 
-A typed, transactional, indexed document store for Rust, layered over an embedded key-value engine.
+A pure-Rust, typed, transactional, indexed document store, layered over an embedded key-value engine.
 
 ArborDb stores each structured value — a tree of objects, 
 lists and scalar leaves — as **one zero-copy blob** in a single engine entry,
@@ -25,7 +25,7 @@ rather than shredding every scalar into its own keyed node.
   unaligned reader) navigates to a field and reads it in place — no decode of the whole value, no alignment requirement.
 - **A virtual filesystem.** A table is a tree of **directories** and **files**.
   Filesystem operations — `ls` / `mv` / `cp` / `mkdir` / `rm` — sit alongside `store` / `load` / `get`.
-- **Stable identity.** Every node carries an opaque 16-byte `AKey` that survives renames and moves:
+- **Stable identity.** Every **arbor-node** carries an opaque 16-byte `AKey` that survives renames and moves:
   `mv` relinks a name in O(1), the key is unchanged.
   Access paths are resolved by walking the directory tree, amortized by a per-table cache.
 - **Two path kinds.** An `APath` (names only) addresses a whole value in the filesystem;
@@ -59,7 +59,7 @@ It builds on a recent stable Rust toolchain (edition 2024). See [Cargo features]
 ## The data model
 
 An `ArborDb` is one database (a file, or in-memory) holding any number of named **tables**.
-A table is a tree of two node kinds:
+A table is a tree of two kinds of **arbor-node** (an *a-node* for short):
 
 | Node          | Holds                                                       | Identity |
 |---------------|-------------------------------------------------------------|----------|
@@ -286,7 +286,7 @@ See [`examples/timestamps.rs`](crates/arbordb/examples/timestamps.rs).
 ## Permissions & integrity
 
 The `permissions` feature (which turns on `entry-timestamps`) adds user/password authentication,
-per-vnode access control, and tamper detection. A database starts unprotected;
+per-a-node access control, and tamper detection. A database starts unprotected;
 `change_password` on an unprotected handle **promotes** it — minting the master user, a per-user keyring, 
 a random database integrity key, and an Ed25519 signing keypair — and authenticates the caller as master.
 
@@ -298,15 +298,15 @@ a random database integrity key, and an Ed25519 signing keypair — and authenti
   `open_with_authentication(path, user, password)` opens and authenticates in one step;
   opening a protected database without credentials yields a read-only **guest**
   (`is_readonly` reports whether a handle can write).
-- **Access control.** Every vnode has an owner, any number of groups, and a single *graded* right —
+- **Access control.** Every a-node has an owner, any number of groups, and a single *graded* right —
   `None` ⊂ `Access` ⊂ `Modify` ⊂ `Delete` — for its owner, for each of its groups, and for everyone else.
   `Access` reads a file / lists a directory / traverses a directory (there is no separate `walk` right);
   `Modify` adds overwriting a value or an ACL and adding/removing/renaming directory children;
-  `Delete` adds removing the vnode (a cascade needs `Delete` on every descendant). A caller in several of a vnode's
+  `Delete` adds removing the a-node (a cascade needs `Delete` on every descendant). A caller in several of an a-node's
   groups gets the strongest grade any of them is granted. Read a class's grade with `get_acl(path, class)`
   (`class` being `AclClass::{User, Group(name), Other}`) and set it with `set_acl(path, class, rights)`;
-  `add_group` / `del_group` manage which groups a vnode is in, and `owner` / `groups` report its identity.
-  Changing an ACL needs `Modify` on the vnode — there is no separate admin right.
+  `add_group` / `del_group` manage which groups an a-node is in, and `owner` / `groups` report its identity.
+  Changing an ACL needs `Modify` on the a-node — there is no separate admin right.
   The **master user** bypasses all ACLs;
   the **master group** administers users and groups (without bypassing value ACLs);
   the **guest** is strictly read-only (it may only `Access`).
@@ -329,7 +329,7 @@ a random database integrity key, and an Ed25519 signing keypair — and authenti
   Pinning is optional: a database that never exports its key is still fully write-protected (a guest cannot write),
   but its guest reads should be treated as untrusted — reading as a guest is recommended only with a pinned key.
 - **Administration.** `add_user` / `add_group` / `rename_*` / `assign_user_to_group`
-  / `remove_user` (cascades the values it owns) / `remove_group` (unassigns it and strips it from every ACL); per-vnode
+  / `remove_user` (cascades the values it owns) / `remove_group` (unassigns it and strips it from every ACL); per-a-node
   `chown` / `set_acl` / `add_group` / `del_group` / `get_acl` / `owner` / `groups`.
 
 A binary built *without* `permissions` refuses to open a protected database (`AdbError::DatabaseProtected`);
@@ -355,8 +355,8 @@ including across byte-length and sign boundaries.
 | `derive`             | `arbordb-derive`                                                                         | `#[derive(AData)]` and the `#[arbor(...)]` attributes                                                                                 |
 | `parallel`           | `rayon`                                                                                  | parallelize batch operations                                                                                                          |
 | `serde`              | `serde`                                                                                  | `Serialize` / `Deserialize` for public types and `Value`; `store_serde_value` / `load_serde_value` (straight to/from the value codec) |
-| `entry-timestamps`   | `chrono`                                                                                 | per-vnode `created` / `modified` / `accessed` datetimes (out-of-band, ignorable)                                                      |
-| `permissions`        | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `ed25519-dalek`, `getrandom` | user/password auth, per-vnode ACLs, MAC + signature tamper detection                                                                  |
+| `entry-timestamps`   | `chrono`                                                                                 | per-a-node `created` / `modified` / `accessed` datetimes (out-of-band, ignorable)                                                      |
+| `permissions`        | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `ed25519-dalek`, `getrandom` | user/password auth, per-a-node ACLs, MAC + signature tamper detection                                                                  |
 | `bignum`             | both umbrellas below                                                                     | every big-number type, as scalar **and** data                                                                                         |
 | `bignum-as-scalar`   | the three `*-as-scalar`                                                                  | big-number `Scalar` variants + `AValue`                                                                                               |
 | `bignum-as-data`     | the three `*-as-data`                                                                    | big-number `AData` impls (a `Bytes` leaf when not also a scalar)                                                                      |

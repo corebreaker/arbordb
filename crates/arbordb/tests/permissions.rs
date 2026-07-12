@@ -297,7 +297,7 @@ fn chown_transfers_ownership() {
 }
 
 #[test]
-fn add_and_del_group_manage_a_vnodes_groups() {
+fn add_and_del_group_manage_a_nodes_groups() {
     let (_dir, path) = tmp_db();
 
     {
@@ -334,7 +334,7 @@ fn add_and_del_group_manage_a_vnodes_groups() {
         assert!(matches!(w.add_group("f", "staff"), Err(AdbError::PermissionDenied(_))));
     }
 
-    // Alice removes the group again; the vnode belongs to nothing afterwards.
+    // Alice removes the group again; the a-node belongs to nothing afterwards.
     {
         let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
         let t = alice.open_table("data").unwrap();
@@ -358,7 +358,7 @@ fn deleting_needs_the_delete_grade_not_merely_modify() {
         let w = t.write().unwrap();
         w.store_value("f", &leaf(1)).unwrap();
 
-        // Grant `other` Modify: enough to overwrite the value, not to delete the vnode.
+        // Grant `other` Modify: enough to overwrite the value, not to delete the a-node.
         w.set_acl("f", AclClass::Other, Rights::Modify).unwrap();
         w.commit().unwrap();
     }
@@ -426,7 +426,7 @@ fn set_acl_restricts_access_and_get_acl_reflects_it() {
 }
 
 #[test]
-fn kind_and_exists_enforce_access_on_the_target_vnode() {
+fn kind_and_exists_enforce_access_on_the_target_a_node() {
     let (_dir, path) = tmp_db();
 
     // Master stores a file and revokes `other` on it entirely.
@@ -456,7 +456,7 @@ fn kind_and_exists_enforce_access_on_the_target_vnode() {
 }
 
 #[test]
-fn kind_verifies_the_target_vnodes_integrity() {
+fn kind_verifies_the_target_a_nodes_integrity() {
     use redb::{Database, ReadableTable, TableDefinition};
 
     let (_dir, path) = tmp_db();
@@ -494,7 +494,7 @@ fn kind_verifies_the_target_vnodes_integrity() {
         wtx.commit().unwrap();
     }
 
-    // `kind` now verifies the target vnode's own tag, so it catches the tampering
+    // `kind` now verifies the target a-node's own tag, so it catches the tampering
     // exactly as `load_value` does, rather than reporting the kind of altered bytes.
     let master = ArborDb::open_with_authentication(&path, "master", "pw").unwrap();
     let t = master.open_table("docs").unwrap();

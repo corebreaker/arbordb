@@ -44,7 +44,7 @@ pub(in crate::txn) struct DirBuffer {
     /// it is clear, skips the mutex — so a write transaction that never grows a
     /// directory pays nothing.
     dirty:     AtomicBool,
-    /// The buffered directories, keyed by vnode.
+    /// The buffered directories, keyed by a-node.
     dirs:      Mutex<HashMap<AKey, Children>>,
 }
 
@@ -84,7 +84,7 @@ impl DirBuffer {
         result
     }
 
-    /// Drops `akey` from the buffer (its vnode was removed), so it is not flushed —
+    /// Drops `akey` from the buffer (its a-node was removed), so it is not flushed —
     /// a no-op, and lock-free, when nothing is buffered.
     pub(in crate::txn) fn forget(&self, akey: AKey) {
         if self.dirty() {

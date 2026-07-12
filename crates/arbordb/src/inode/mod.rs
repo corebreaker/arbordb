@@ -1,8 +1,8 @@
-//! Per-vnode metadata — created/modified/accessed datetime (and, with the
+//! Per-a-node metadata — created/modified/accessed datetime (and, with the
 //! `permissions` feature, ACLs and an integrity tag) — held out-of-band in the
-//! reserved `$inodes` table, keyed by `(table name, vnode key)`.
+//! reserved `$inodes` table, keyed by `(table name, a-node key)`.
 //!
-//! Keeping this out of the vnode's own entry blob leaves the data-table format
+//! Keeping this out of the a-node's own entry blob leaves the data-table format
 //! untouched: a binary built without `entry-timestamps` never opens `$inodes`, so
 //! it reads and writes a timestamped database and simply ignores the metadata.
 //! It also keeps a deferred access-time flush cheap — it rewrites a ~40-byte inode

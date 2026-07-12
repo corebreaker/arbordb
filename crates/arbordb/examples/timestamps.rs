@@ -1,4 +1,4 @@
-//! Per-vnode created / modified / accessed timestamps with the `entry-timestamps`
+//! Per-a-node created / modified / accessed timestamps with the `entry-timestamps`
 //! feature.
 //!
 //! Timestamps live out-of-band in a reserved side table, so a binary built without
@@ -27,7 +27,7 @@ fn main() -> AdbResult<()> {
 
     let created = {
         let r = table.read()?;
-        let times = r.times("note")?.expect("a timestamped vnode");
+        let times = r.times("note")?.expect("a timestamped a-node");
         println!("created  = {}", times.created());
         println!("modified = {}", times.modified());
 

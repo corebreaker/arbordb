@@ -34,9 +34,9 @@ pub(crate) struct DbInner {
     /// hint — a stale `true` merely takes the slower, still-correct path.
     has_indexes:  AtomicBool,
 
-    /// Buffered vnode access times awaiting a flush to `$inodes`: reads record here
+    /// Buffered a-node access times awaiting a flush to `$inodes`: reads record here
     /// (cheap, in memory) and a committed write or an explicit flush persists them.
-    /// Keyed by `(table, vnode)`, valued by the latest access time (epoch millis).
+    /// Keyed by `(table, a-node)`, valued by the latest access time (epoch millis).
     #[cfg(feature = "entry-timestamps")]
     access_log: Mutex<HashMap<(String, crate::AKey), i64>>,
 }
@@ -108,7 +108,7 @@ impl DbInner {
         Ok(Arc::clone(cache))
     }
 
-    /// Buffers access times for `table`'s nodes, keeping the latest time per vnode.
+    /// Buffers access times for `table`'s nodes, keeping the latest time per a-node.
     /// Called when a read transaction ends; best-effort (a poisoned lock drops the
     /// batch rather than propagating, since access times are advisory).
     #[cfg(feature = "entry-timestamps")]

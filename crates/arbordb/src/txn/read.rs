@@ -49,7 +49,7 @@ use std::collections::HashSet;
 
 /// A read transaction over one table — a consistent, concurrent snapshot.
 ///
-/// Path resolution and hot-vnode reads are amortized through the table's shared
+/// Path resolution and hot a-node reads are amortized through the table's shared
 /// path cache, tagged with the snapshot's `generation` so a stale entry reads as
 /// a miss. The value/filesystem read methods are thin wrappers over the shared
 /// `Grab` surface.
@@ -72,7 +72,7 @@ pub struct ReadTxn {
     #[cfg(feature = "entry-timestamps")]
     inner: Arc<DbInner>,
 
-    /// Access times recorded by content reads in this snapshot, keyed by vnode.
+    /// Access times recorded by content reads in this snapshot, keyed by a-node.
     /// Deposited into the database-wide log on drop.
     #[cfg(feature = "entry-timestamps")]
     access_log: Mutex<HashMap<AKey, i64>>,
@@ -90,12 +90,12 @@ pub struct ReadTxn {
     #[cfg(feature = "permissions")]
     enforced_paths: Mutex<HashMap<APath, AKey>>,
 
-    /// vnodes this principal has been granted `Access` on in this snapshot — so a
+    /// a-nodes this principal has been granted `Access` on in this snapshot — so a
     /// repeated read of the same target skips the ACL re-check.
     #[cfg(feature = "permissions")]
     access_ok: Mutex<HashSet<AKey>>,
 
-    /// vnodes whose stored blob has been integrity-verified in this snapshot — so a
+    /// a-nodes whose stored blob has been integrity-verified in this snapshot — so a
     /// repeated read skips recomputing the (keyed-MAC or signature) tag. Keyed by
     /// `AKey` alone is sound: within one snapshot a key names one immutable blob.
     #[cfg(feature = "permissions")]
@@ -141,7 +141,7 @@ impl ReadTxn {
         })
     }
 
-    /// Whether vnode `akey` has already been `Access`-authorized for this principal
+    /// Whether a-node `akey` has already been `Access`-authorized for this principal
     /// in this snapshot (see [`access_ok`](Self::access_ok)). A poisoned lock reads
     /// as "not yet", so the check simply runs again.
     #[cfg(feature = "permissions")]
@@ -157,7 +157,7 @@ impl ReadTxn {
         }
     }
 
-    /// Whether vnode `akey`'s blob has already been integrity-verified in this
+    /// Whether a-node `akey`'s blob has already been integrity-verified in this
     /// snapshot (see [`verified`](Self::verified)).
     #[cfg(feature = "permissions")]
     fn verify_memoed(&self, akey: AKey) -> bool {
@@ -208,7 +208,7 @@ impl ReadTxn {
     }
 
     /// The entry blob for `akey`, served from the blob cache or read once from the
-    /// engine (and then cached). `None` if the vnode is absent.
+    /// engine (and then cached). `None` if the a-node is absent.
     fn blob_at<R>(&self, table: &R, akey: AKey) -> AdbResult<Option<Arc<Vec<u8>>>>
     where
         R: ReadableTable<u128, EntryBytes>, {
@@ -234,9 +234,9 @@ impl ReadTxn {
         !matches!(self.principal.as_ref(), Principal::Unrestricted)
     }
 
-    /// The per-vnode metadata table, opened lazily on first protected access and
+    /// The per-a-node metadata table, opened lazily on first protected access and
     /// memoised for the snapshot. `None` if it does not exist yet (a database with no
-    /// `$inodes` has no ACLs — every vnode reads as `None`).
+    /// `$inodes` has no ACLs — every a-node reads as `None`).
     #[cfg(feature = "permissions")]
     fn inodes(&self) -> AdbResult<Option<&ReadOnlyTable<&'static [u8], &'static [u8]>>> {
         if let Some(slot) = self.inodes_table.get() {
@@ -258,11 +258,11 @@ impl ReadTxn {
             .as_ref())
     }
 
-    /// Vnode `akey`'s decoded metadata (ACL + both integrity tags), served from the
+    /// A-node `akey`'s decoded metadata (ACL + both integrity tags), served from the
     /// shared inode-bytes cache or read once from `$inodes` and then cached. The
     /// cached bytes are principal-independent; the ACL check and integrity verify that
     /// consume this still run per read on the reading principal. All-`None` if the
-    /// vnode has no inode yet.
+    /// a-node has no inode yet.
     #[cfg(feature = "permissions")]
     fn meta(&self, akey: AKey) -> AdbResult<Meta> {
         // Warm path: decode the cached bytes without touching the engine.
@@ -298,7 +298,7 @@ impl ReadTxn {
         perm::access::authorize(&self.principal, akey, acl.as_ref(), needed)
     }
 
-    /// Checks vnode `akey`'s integrity tag over `blob`, given metadata the caller has
+    /// Checks a-node `akey`'s integrity tag over `blob`, given metadata the caller has
     /// **already decoded** (its ACL and both tags, read once). An authenticated
     /// reader checks the fast keyed MAC; a keyless guest checks the Ed25519 signature
     /// with the public key; an unrestricted handle has nothing to verify.
@@ -358,10 +358,13 @@ impl ReadTxn {
     /// The tamper error naming this snapshot's table.
     #[cfg(feature = "permissions")]
     fn tampered(&self) -> AdbError {
-        AdbError::Tampered(format!("integrity check failed for a vnode in table '{}'", self.table))
+        AdbError::Tampered(format!(
+            "integrity check failed for an a-node in table '{}'",
+            self.table
+        ))
     }
 
-    /// Verifies vnode `akey`'s integrity tag over `blob` — the keyed MAC for an
+    /// Verifies a-node `akey`'s integrity tag over `blob` — the keyed MAC for an
     /// authenticated user, the signature for a guest. A no-op for an unrestricted
     /// handle (a non-protected database has no tags). The ACL and tag come from one
     /// (cache-served) inode decode.
@@ -395,7 +398,7 @@ impl ReadTxn {
                 return Ok(None);
             };
 
-            // A tampered directory blob could redirect a name to another vnode, so
+            // A tampered directory blob could redirect a name to another a-node, so
             // verify each directory descended through (for a keyed principal).
             self.check_tag(akey, &blob, acl.as_ref(), mac, sig)?;
 
@@ -499,9 +502,9 @@ impl ReadTxn {
         grab::ls(self, path)
     }
 
-    /// The created / modified / accessed timestamps of the vnode at `path`, or
-    /// `None` if the vnode is absent or has no recorded metadata yet (for instance
-    /// a vnode last written by a binary built without `entry-timestamps`).
+    /// The created / modified / accessed timestamps of the a-node at `path`, or
+    /// `None` if the a-node is absent or has no recorded metadata yet (for instance
+    /// an a-node last written by a binary built without `entry-timestamps`).
     ///
     /// The `accessed` field reflects committed access times; a read in the current
     /// snapshot is buffered and persisted later (see the crate docs), so it may lag.
@@ -512,9 +515,9 @@ impl ReadTxn {
 
     /// The [`Rights`] the file or directory at `path` grants `class`.
     ///
-    /// Returns [`Rights::None`] when the vnode has no ACL (a non-protected database,
+    /// Returns [`Rights::None`] when the a-node has no ACL (a non-protected database,
     /// the special root, or a node predating protection) or when a
-    /// [`Group`](AclClass::Group) names one the vnode is not in. Errors with
+    /// [`Group`](AclClass::Group) names one the a-node is not in. Errors with
     /// [`ValueNotFound`](AdbError::ValueNotFound) if nothing exists at `path`. Read
     /// the owner's name and the group list with [`owner`](Self::owner) and
     /// [`groups`](Self::groups).
@@ -524,7 +527,7 @@ impl ReadTxn {
     }
 
     /// The name of the owner of the file or directory at `path`, or `None` if the
-    /// vnode is absent or has no ACL. Falls back to the numeric id if the owning user
+    /// a-node is absent or has no ACL. Falls back to the numeric id if the owning user
     /// is no longer in the store.
     #[cfg(feature = "permissions")]
     pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
@@ -532,7 +535,7 @@ impl ReadTxn {
     }
 
     /// The names of the groups the file or directory at `path` belongs to, sorted;
-    /// empty when the vnode is absent, has no ACL, or is in no group.
+    /// empty when the a-node is absent, has no ACL, or is in no group.
     #[cfg(feature = "permissions")]
     pub fn groups(&self, path: impl IntoArborPath) -> AdbResult<Vec<String>> {
         grab::groups(self, path)

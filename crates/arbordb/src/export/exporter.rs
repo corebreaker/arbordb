@@ -94,7 +94,7 @@ impl<P: IntoValuePath> YamlExporter<P> for Value {
 
 /// The [`Value`] a transaction exports for `path`: the whole value stored in the
 /// file there. A directory has no value of its own — its children are separate
-/// vnodes — so it is refused; a path that resolves to nothing is not found. Works
+/// a-nodes — so it is refused; a path that resolves to nothing is not found. Works
 /// for a read snapshot or a writer's own uncommitted state alike.
 fn txn_value(src: &dyn Grab, path: APath) -> AdbResult<Value> {
     match grab::kind(src, &path)? {

@@ -1,4 +1,4 @@
-//! Per-table LRU caches that amortize path resolution and hot-vnode reads.
+//! Per-table LRU caches that amortize path resolution and hot a-node reads.
 //!
 //! Two caches, both keyed by the database **generation** so a snapshot never
 //! reuses another version's resolution:
@@ -37,10 +37,10 @@ const INODE_CAPACITY: usize = 16 * 1024;
 /// The path-resolution cache: an [`APath`] to its `(generation, key)`.
 type PathEntries = LruCache<APath, (u64, AKey)>;
 
-/// The entry-blob cache: a `(generation, key)` to the vnode's entry bytes.
+/// The entry-blob cache: a `(generation, key)` to the a-node's entry bytes.
 type BlobEntries = LruCache<(u64, AKey), Arc<Vec<u8>>>;
 
-/// The inode-bytes cache: a `(generation, key)` to the vnode's raw `$inodes` blob.
+/// The inode-bytes cache: a `(generation, key)` to the a-node's raw `$inodes` blob.
 #[cfg(feature = "permissions")]
 type InodeEntries = LruCache<(u64, AKey), Arc<Vec<u8>>>;
 

@@ -25,14 +25,14 @@ pub(crate) struct MutCursor<'t> {
     txn:   &'t WriteTxn,
     /// The access path of the file this cursor operates on.
     apath: APath,
-    /// The vnode key `fetch_mut` resolved for `apath` — a hint that lets the in-place
+    /// The a-node key `fetch_mut` resolved for `apath` — a hint that lets the in-place
     /// scalar patch skip re-walking the directory tree (validated on use, so a path
     /// removed since falls back to a fresh resolve).
     akey:  AKey,
 }
 
 impl<'t> MutCursor<'t> {
-    /// Opens a cursor over the file at `apath`, whose vnode `fetch_mut` resolved to `akey`.
+    /// Opens a cursor over the file at `apath`, whose a-node `fetch_mut` resolved to `akey`.
     pub(crate) fn open(txn: &'t WriteTxn, apath: APath, akey: AKey) -> Self {
         Self {
             txn,

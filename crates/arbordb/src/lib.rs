@@ -5,10 +5,11 @@
 //! a tree of objects, lists and scalar leaves — serialized into a **single blob**
 //! and navigated **zero-copy**: a dedicated codec reads a field straight out of
 //! the engine's page bytes, without decoding the rest. A *directory* maps child
-//! names to child nodes. Every vnode — file or directory — has an opaque, stable
-//! [`AKey`] identity that survives renames and moves.
+//! names to child **arbor-nodes** (*a-nodes* for short). Every arbor-node — file
+//! or directory — has an opaque, stable [`AKey`] identity that survives renames
+//! and moves.
 //!
-//! A vnode is addressed by an [`APath`](path::APath), a filesystem-like path of
+//! An a-node is addressed by an [`APath`](path::APath), a filesystem-like path of
 //! names (`users/alice`); navigation *inside* a file's value, down to a scalar
 //! leaf, uses a [`VPath`](path::VPath) (names plus list indices). The underlying
 //! storage engine is an implementation detail, never exposed in the public API.
@@ -27,8 +28,8 @@
 //! - [Rooted views](txn::RootedRead) that make every path relative to a fixed root.
 //! - Read-only [JSON / YAML export](export) of a stored value or an in-memory [`Value`] subtree, rendered by a
 //!   hand-written, dependency-free writer.
-//! - Optional per-vnode `created` / `modified` / `accessed` timestamps (`entry-timestamps`), and user/password
-//!   authentication with per-vnode ACLs and MAC + signature tamper detection, verified even for a guest
+//! - Optional per-a-node `created` / `modified` / `accessed` timestamps (`entry-timestamps`), and user/password
+//!   authentication with per-a-node ACLs and MAC + signature tamper detection, verified even for a guest
 //!   (`permissions`).
 //! - An optional big-number scalar/data feature matrix (`bignum`).
 //!

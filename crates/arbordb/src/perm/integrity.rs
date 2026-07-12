@@ -1,6 +1,6 @@
-//! Integrity tags over the control plane and each vnode's value.
+//! Integrity tags over the control plane and each a-node's value.
 //!
-//! Two tamper checks cover a value, over exactly the same bytes — the vnode's
+//! Two tamper checks cover a value, over exactly the same bytes — the a-node's
 //! stored entry *and* its ACL, so tampering with either the data or its
 //! permissions is caught:
 //! - a **keyed BLAKE3 MAC**, keyed by the integrity key `K` (unlocked at authentication), that an authenticated reader
@@ -27,7 +27,7 @@ use blake3::Hasher;
 /// The length of an integrity tag.
 pub(crate) const MAC_LEN: usize = 32;
 
-/// Domain-separation tag for a per-vnode value tag (MAC and signature alike).
+/// Domain-separation tag for a per-a-node value tag (MAC and signature alike).
 const DOMAIN_VALUE: u8 = 1;
 
 /// Domain-separation tag for the control-plane MAC.
@@ -49,7 +49,7 @@ fn field(hasher: &mut Hasher, bytes: &[u8]) {
 }
 
 /// Absorbs the domain-separated, length-framed bytes a value tag binds: the table
-/// name, vnode key, entry blob, and encoded ACL. Shared by the MAC and the
+/// name, a-node key, entry blob, and encoded ACL. Shared by the MAC and the
 /// signature so both cover byte-for-byte the same message.
 fn absorb_value(hasher: &mut Hasher, table: &str, akey: AKey, blob: &[u8], acl: &[u8]) {
     hasher.update(&[DOMAIN_VALUE]);
@@ -59,7 +59,7 @@ fn absorb_value(hasher: &mut Hasher, table: &str, akey: AKey, blob: &[u8], acl: 
     field(hasher, acl);
 }
 
-/// The keyed MAC of vnode `akey`'s stored entry `blob` and its encoded `acl` in
+/// The keyed MAC of a-node `akey`'s stored entry `blob` and its encoded `acl` in
 /// `table` — verified by an authenticated reader (fast, and unforgeable without `K`).
 pub(crate) fn mac_value(key: &[u8], table: &str, akey: AKey, blob: &[u8], acl: &[u8]) -> [u8; MAC_LEN] {
     let mut hasher = keyed(key);
@@ -78,7 +78,7 @@ fn value_digest(table: &str, akey: AKey, blob: &[u8], acl: &[u8]) -> [u8; MAC_LE
     *hasher.finalize().as_bytes()
 }
 
-/// Signs vnode `akey`'s entry `blob` and encoded `acl` with `signer`, producing the
+/// Signs a-node `akey`'s entry `blob` and encoded `acl` with `signer`, producing the
 /// tag a keyless guest verifies with [`verify_value`]. `signer` holds the expanded
 /// signing key, so signing a value never re-derives it from the seed.
 pub(crate) fn sign_value(
@@ -91,7 +91,7 @@ pub(crate) fn sign_value(
     signer.sign(&value_digest(table, akey, blob, acl))
 }
 
-/// Whether `sig` is a valid signature of vnode `akey`'s entry `blob` and encoded
+/// Whether `sig` is a valid signature of a-node `akey`'s entry `blob` and encoded
 /// `acl` under `pubkey` — the check a keyless guest runs on every read.
 pub(crate) fn verify_value(
     pubkey: &[u8; crypto::PUBKEY_LEN],

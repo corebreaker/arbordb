@@ -71,7 +71,7 @@ pub(in crate::txn) fn store_value_into(ctx: &mut Context, path: &APath, value: &
 
 /// Resolves `path` and reads its (verified) entry — the walk-the-tree path shared by
 /// [`resolve_target`] both as its default and as the fallback when a stale hint no
-/// longer names a live vnode.
+/// longer names a live a-node.
 fn resolve_and_read(ctx: &Context, path: &APath) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
     let akey = ctx.resolve(path)?;
     let entry = match akey {
@@ -86,10 +86,10 @@ fn resolve_and_read(ctx: &Context, path: &APath) -> AdbResult<(Option<AKey>, Opt
 /// where that is sound.
 ///
 /// Without access control the hint — from a mutable accessor that already walked the
-/// path — is trusted while it still names a live vnode, so the directory tree is not
+/// path — is trusted while it still names a live a-node, so the directory tree is not
 /// re-walked. Under `permissions`, `ctx.resolve` performs the per-directory `Access`
 /// checks a scalar edit still requires, so the hint is ignored there and the path is
-/// resolved afresh; a stale hint (its vnode gone) likewise falls back, recreating the
+/// resolved afresh; a stale hint (its a-node gone) likewise falls back, recreating the
 /// file at `path` exactly as an un-hinted write does.
 fn resolve_target(ctx: &Context, path: &APath, hint: Option<AKey>) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
     #[cfg(not(feature = "permissions"))]
@@ -110,7 +110,7 @@ fn resolve_target(ctx: &Context, path: &APath, hint: Option<AKey>) -> AdbResult<
 /// re-encode; otherwise the value is decoded, updated, and re-encoded. Creates the
 /// file (and its parents) when it does not exist yet.
 ///
-/// `hint` is a vnode key the caller already resolved for `path` (a mutable accessor
+/// `hint` is an a-node key the caller already resolved for `path` (a mutable accessor
 /// that just walked it), passed on to [`resolve_target`] to skip re-walking the
 /// directory tree where that is sound.
 pub(in crate::txn) fn put_scalar_into(
@@ -186,7 +186,7 @@ pub(in crate::txn) fn patch_scalar(entry: &mut [u8], at: &VPath, scalar: &Scalar
     Ok(true)
 }
 
-/// Removes the vnode at `path` (a non-root path) and its subtree. Returns whether
+/// Removes the a-node at `path` (a non-root path) and its subtree. Returns whether
 /// anything was removed.
 pub(in crate::txn) fn rm_into(ctx: &mut Context, path: &APath) -> AdbResult<bool> {
     let (parent_path, name) = path.split_last().expect("a non-root path has a parent and a name");
@@ -204,7 +204,7 @@ pub(in crate::txn) fn rm_into(ctx: &mut Context, path: &APath) -> AdbResult<bool
         return Ok(false);
     };
 
-    // Deleting a vnode needs `Delete` on it (and, for a directory, on every
+    // Deleting an a-node needs `Delete` on it (and, for a directory, on every
     // descendant the cascade removes). Holding it also authorizes unlinking the
     // name from the parent.
     #[cfg(feature = "permissions")]
@@ -216,7 +216,7 @@ pub(in crate::txn) fn rm_into(ctx: &mut Context, path: &APath) -> AdbResult<bool
     Ok(true)
 }
 
-/// Relinks the vnode at `src` to `dst`, keeping its identity.
+/// Relinks the a-node at `src` to `dst`, keeping its identity.
 pub(in crate::txn) fn mv_into(ctx: &mut Context, src: &APath, dst: &APath) -> AdbResult<()> {
     let (src_parent_path, src_name) = src.split_last().expect("a non-root path has a parent and a name");
     let (dst_parent_path, dst_name) = dst.split_last().expect("a non-root path has a parent and a name");
@@ -369,9 +369,9 @@ pub(in crate::txn) fn ensure_dir(ctx: &mut Context, path: &APath) -> AdbResult<A
     Ok(akey)
 }
 
-/// Removes vnode `akey` and, if it is a directory, its whole subtree.
+/// Removes a-node `akey` and, if it is a directory, its whole subtree.
 pub(in crate::txn) fn cascade_delete(ctx: &mut Context, akey: AKey) -> AdbResult<()> {
-    // Read the vnode borrowed once: a file yields no children (no owned copy of its
+    // Read the a-node borrowed once: a file yields no children (no owned copy of its
     // blob), a directory yields the subtree to recurse into.
     let Some(children) = ctx.cascade_children(akey)? else {
         return Ok(());
@@ -386,7 +386,7 @@ pub(in crate::txn) fn cascade_delete(ctx: &mut Context, akey: AKey) -> AdbResult
     Ok(())
 }
 
-/// Deep-copies vnode `akey` (a file's blob verbatim, a directory recursively) under
+/// Deep-copies a-node `akey` (a file's blob verbatim, a directory recursively) under
 /// a freshly generated key, returning that key.
 pub(in crate::txn) fn deep_copy(ctx: &mut Context, akey: AKey) -> AdbResult<AKey> {
     #[cfg(feature = "permissions")]
@@ -399,12 +399,12 @@ pub(in crate::txn) fn deep_copy(ctx: &mut Context, akey: AKey) -> AdbResult<AKey
     // the stale engine one. A file's blob is always in the engine (files write through).
     match ctx
         .kind(akey)?
-        .ok_or_else(|| AdbError::Corrupt("copying a missing vnode".into()))?
+        .ok_or_else(|| AdbError::Corrupt("copying a missing a-node".into()))?
     {
         EntryKind::File => {
             let entry = ctx
                 .read_verified(akey)?
-                .ok_or_else(|| AdbError::Corrupt("copying a missing vnode".into()))?;
+                .ok_or_else(|| AdbError::Corrupt("copying a missing a-node".into()))?;
 
             ctx.put_entry(fresh, entry.as_slice())?;
         }
@@ -421,7 +421,7 @@ pub(in crate::txn) fn deep_copy(ctx: &mut Context, akey: AKey) -> AdbResult<AKey
     Ok(fresh)
 }
 
-/// Changes the owner of the vnode at `path` to `new_uid`.
+/// Changes the owner of the a-node at `path` to `new_uid`.
 #[cfg(feature = "permissions")]
 pub(in crate::txn) fn chown_into(ctx: &mut Context, path: &APath, new_uid: u32) -> AdbResult<()> {
     let akey = ctx
@@ -439,7 +439,7 @@ pub(in crate::txn) fn chown_into(ctx: &mut Context, path: &APath, new_uid: u32) 
 
     let mut acl = ctx
         .acl(akey)?
-        .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
+        .ok_or_else(|| AdbError::CannotAccess(String::from("this a-node has no ACL")))?;
 
     perm::access::authorize_chown(ctx.principal(), &acl)?;
     acl.set_owner_uid(new_uid);
@@ -448,8 +448,8 @@ pub(in crate::txn) fn chown_into(ctx: &mut Context, path: &APath, new_uid: u32) 
     ctx.reseal_integrity(akey)
 }
 
-/// Mutates the ACL of the vnode at `path` through `apply`, then re-seals its
-/// integrity tags. Requires `Modify` on the vnode; the root ACL is immutable.
+/// Mutates the ACL of the a-node at `path` through `apply`, then re-seals its
+/// integrity tags. Requires `Modify` on the a-node; the root ACL is immutable.
 /// This is the one path behind `set_acl` / `add_group` / `del_group`.
 #[cfg(feature = "permissions")]
 pub(in crate::txn) fn set_acl_into(ctx: &mut Context, path: &APath, apply: impl FnOnce(&mut Acl)) -> AdbResult<()> {
@@ -468,7 +468,7 @@ pub(in crate::txn) fn set_acl_into(ctx: &mut Context, path: &APath, apply: impl 
 
     let mut acl = ctx
         .acl(akey)?
-        .ok_or_else(|| AdbError::CannotAccess(String::from("this vnode has no ACL")))?;
+        .ok_or_else(|| AdbError::CannotAccess(String::from("this a-node has no ACL")))?;
 
     perm::access::authorize(ctx.principal(), akey, Some(&acl), Rights::Modify)?;
     apply(&mut acl);
@@ -477,9 +477,9 @@ pub(in crate::txn) fn set_acl_into(ctx: &mut Context, path: &APath, apply: impl 
     ctx.reseal_integrity(akey)
 }
 
-/// Recursively collects the `(parent, name)` of every top-most vnode owned by
+/// Recursively collects the `(parent, name)` of every top-most a-node owned by
 /// `uid` under directory `dir`. An owned directory is collected whole (and not
-/// descended into); a non-owned directory is descended to find owned vnodes.
+/// descended into); a non-owned directory is descended to find owned a-nodes.
 #[cfg(feature = "permissions")]
 pub(in crate::txn) fn collect_owned(
     ctx: &Context,

@@ -36,13 +36,13 @@ use std::{cell::RefCell, collections::HashSet};
 pub(in super::super) type DataTable<'txn> = redb::Table<'txn, u128, EntryBytes>;
 
 /// The tables a mutation writes through. Bundling the data table with the
-/// (optional) per-vnode metadata table lets every vnode write keep that vnode's
+/// (optional) per-a-node metadata table lets every a-node write keep that a-node's
 /// `$inodes` entry — its timestamps — in step within the same transaction.
 pub(in super::super) struct Context<'txn, 'a> {
-    /// The data table this mutation writes vnode entries through.
+    /// The data table this mutation writes a-node entries through.
     data: &'a mut DataTable<'txn>,
 
-    /// The per-vnode metadata table, kept in step with `data`.
+    /// The per-a-node metadata table, kept in step with `data`.
     #[cfg(feature = "entry-timestamps")]
     inodes: &'a mut InodeTable<'txn>,
 
@@ -50,7 +50,7 @@ pub(in super::super) struct Context<'txn, 'a> {
     #[cfg(feature = "entry-timestamps")]
     table: &'a str,
 
-    /// One timestamp shared by every vnode this mutation touches.
+    /// One timestamp shared by every a-node this mutation touches.
     #[cfg(feature = "entry-timestamps")]
     now: i64,
 
@@ -65,9 +65,9 @@ pub(in super::super) struct Context<'txn, 'a> {
     #[cfg(feature = "permissions")]
     principal: &'a Principal,
 
-    /// vnodes already integrity-verified in this mutation, so a directory touched
+    /// a-nodes already integrity-verified in this mutation, so a directory touched
     /// twice (traversal then a child/kind probe) is MAC-verified once. Invalidated
-    /// whenever a vnode is (re)written or removed. A `RefCell` because the read
+    /// whenever an a-node is (re)written or removed. A `RefCell` because the read
     /// helpers take `&self`; the `Context` is a per-mutation stack local, never
     /// shared across threads.
     #[cfg(feature = "permissions")]
@@ -75,8 +75,8 @@ pub(in super::super) struct Context<'txn, 'a> {
 }
 
 impl<'txn, 'a> Context<'txn, 'a> {
-    /// Bundles the data table with the per-vnode metadata table and one
-    /// timestamp shared by every vnode this mutation touches.
+    /// Bundles the data table with the per-a-node metadata table and one
+    /// timestamp shared by every a-node this mutation touches.
     #[cfg(feature = "permissions")]
     pub(in super::super) fn new(
         data: &'a mut DataTable<'txn>,
@@ -106,7 +106,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         self.verified.borrow_mut().remove(&akey);
     }
 
-    /// Bundles the data table with the per-vnode metadata table and the directory
+    /// Bundles the data table with the per-a-node metadata table and the directory
     /// write-back cache (this build has timestamps but no permission system).
     #[cfg(all(feature = "entry-timestamps", not(feature = "permissions")))]
     pub(in super::super) fn new(
@@ -134,7 +134,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         }
     }
 
-    /// Writes a vnode's entry blob and refreshes its inode — on creation all
+    /// Writes an a-node's entry blob and refreshes its inode — on creation all
     /// three times are set; on overwrite only `modified` moves.
     pub(super) fn put_entry(&mut self, akey: AKey, entry: &[u8]) -> AdbResult<()> {
         self.data.insert(u128::from(akey), entry)?;
@@ -156,7 +156,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
             Principal::User(session) => {
                 let table = self.table;
                 let now = self.now;
-                // The root carries no ACL; every other fresh vnode is owned by the writer.
+                // The root carries no ACL; every other fresh a-node is owned by the writer.
                 let owner = (akey != AKey::ROOT).then_some(session.uid());
 
                 inode::stamp_and_seal(self.inodes, table, akey, now, owner, |acl| {
@@ -172,7 +172,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(())
     }
 
-    /// Removes a vnode's entry blob together with its inode.
+    /// Removes an a-node's entry blob together with its inode.
     pub(super) fn remove_entry(&mut self, akey: AKey) -> AdbResult<()> {
         self.data.remove(u128::from(akey))?;
 
@@ -191,7 +191,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
 
     /// Reads `akey`'s entry, first verifying its integrity tag (for a keyed
     /// principal), so a writer never trusts — nor launders into a fresh tag —
-    /// a blob altered outside the library. `None` if the vnode is absent.
+    /// a blob altered outside the library. `None` if the a-node is absent.
     pub(super) fn read_verified(&self, akey: AKey) -> AdbResult<Option<Vec<u8>>> {
         let entry = read_entry(&*self.data, akey)?;
 
@@ -203,7 +203,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(entry)
     }
 
-    /// Whether vnode `akey` exists — a bare presence probe that neither copies the
+    /// Whether a-node `akey` exists — a bare presence probe that neither copies the
     /// entry nor verifies it (any actual read of its bytes still verifies). Lets a
     /// caller that only needs "is it there?" skip materializing a whole blob.
     pub(super) fn has_entry(&self, akey: AKey) -> AdbResult<bool> {
@@ -221,7 +221,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     /// and hands the **borrowed** entry bytes to `f`. Unlike [`read_verified`], it
     /// never copies the blob into an owned buffer — a read-only navigation (a child
     /// lookup, a kind probe, a directory listing) reads what it needs straight out
-    /// of the engine page and drops the guard. `None` if the vnode is absent.
+    /// of the engine page and drops the guard. `None` if the a-node is absent.
     ///
     /// [`read_verified`]: Self::read_verified
     fn with_entry<R>(&self, akey: AKey, f: impl FnOnce(&[u8]) -> AdbResult<R>) -> AdbResult<Option<R>> {
@@ -263,9 +263,9 @@ impl<'txn, 'a> Context<'txn, 'a> {
     }
 
     /// The filesystem kind of `akey`, verifying its integrity first. `None` if
-    /// the vnode is absent.
+    /// the a-node is absent.
     pub(super) fn kind(&self, akey: AKey) -> AdbResult<Option<EntryKind>> {
-        // A buffered vnode is always a directory (only directories buffer).
+        // A buffered a-node is always a directory (only directories buffer).
         #[cfg(not(feature = "permissions"))]
         if self.dirs.dirty() && self.dirs.read(|dirs| dirs.contains_key(&akey)) {
             return Ok(Some(EntryKind::Dir));
@@ -275,7 +275,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     }
 
     /// Directory `akey`'s children as an owned map, verifying its integrity first
-    /// (empty if the vnode is absent). Errors if `akey` is a file.
+    /// (empty if the a-node is absent). Errors if `akey` is a file.
     pub(super) fn dir_children(&self, akey: AKey) -> AdbResult<BTreeMap<SmolStr, AKey>> {
         // A directory buffered in this transaction is authoritative.
         #[cfg(not(feature = "permissions"))]
@@ -304,7 +304,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     }
 
     /// The child keys to recurse into when cascade-deleting `akey`, read borrowed
-    /// (and verified) in one shot: `None` if the vnode is absent, an empty vec for a
+    /// (and verified) in one shot: `None` if the a-node is absent, an empty vec for a
     /// file, and its children for a directory. Deleting a file therefore never copies
     /// its (possibly large) blob just to learn it has no children.
     pub(super) fn cascade_children(&self, akey: AKey) -> AdbResult<Option<Vec<AKey>>> {
@@ -402,8 +402,8 @@ impl<'txn, 'a> Context<'txn, 'a> {
             return Ok(());
         };
 
-        // Skip a repeat verification of the same vnode within this mutation. The memo
-        // is cleared whenever the vnode is written (see `invalidate_verified`), so it
+        // Skip a repeat verification of the same a-node within this mutation. The memo
+        // is cleared whenever the a-node is written (see `invalidate_verified`), so it
         // never masks a change this transaction makes, and an external tamper is still
         // caught on the first read (a fresh transaction starts with an empty memo).
         if self.verified.borrow().contains(&akey) {
@@ -422,13 +422,13 @@ impl<'txn, 'a> Context<'txn, 'a> {
                 Ok(())
             }
             _ => Err(AdbError::Tampered(format!(
-                "integrity check failed for a vnode in table '{}'",
+                "integrity check failed for an a-node in table '{}'",
                 self.table
             ))),
         }
     }
 
-    /// Reads `akey`'s ACL — a missing one (e.g. a vnode predating protection)
+    /// Reads `akey`'s ACL — a missing one (e.g. an a-node predating protection)
     /// defaults to master-owned — and checks the principal holds the `needed` grade.
     #[cfg(feature = "permissions")]
     pub(super) fn check(&self, akey: AKey, needed: Rights) -> AdbResult<()> {
@@ -438,7 +438,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
     }
 
     /// Checks the principal may delete `akey` and, if it is a directory, every
-    /// vnode beneath it — a cascade delete removes the whole subtree, so each
+    /// a-node beneath it — a cascade delete removes the whole subtree, so each
     /// node in it must be deletable.
     #[cfg(feature = "permissions")]
     pub(super) fn check_deletable(&self, akey: AKey) -> AdbResult<()> {
@@ -453,7 +453,7 @@ impl<'txn, 'a> Context<'txn, 'a> {
         Ok(())
     }
 
-    /// Resolves `path` to a vnode key, checking `Access` on every directory
+    /// Resolves `path` to an a-node key, checking `Access` on every directory
     /// traversed. `None` if a component along the way is missing.
     #[cfg(feature = "permissions")]
     pub(super) fn resolve(&self, path: &APath) -> AdbResult<Option<AKey>> {

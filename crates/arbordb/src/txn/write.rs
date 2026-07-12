@@ -107,9 +107,9 @@ impl WriteTxn {
         }
     }
 
-    /// Resolves `path` and reads the resolved vnode's kind through a **single** data
+    /// Resolves `path` and reads the resolved a-node's kind through a **single** data
     /// table handle — the buffer-aware walk plus a kind probe — so `fetch_mut` opens
-    /// the data table once rather than twice. A buffered vnode is always a directory.
+    /// the data table once rather than twice. A buffered a-node is always a directory.
     #[cfg(not(feature = "permissions"))]
     fn resolve_with_kind(&self, path: &APath) -> AdbResult<(Option<AKey>, Option<EntryKind>)> {
         let data = self.txn.open_table(data_def(&self.table))?;
@@ -184,7 +184,7 @@ impl WriteTxn {
     }
 
     /// Stores a dynamic [`Value`] as a file at `path`, creating parent directories
-    /// as needed. Replaces whatever was there: a file overwrite keeps the vnode's
+    /// as needed. Replaces whatever was there: a file overwrite keeps the a-node's
     /// identity; a directory is removed with its whole subtree first.
     pub fn store_value(&self, path: impl IntoArborPath, value: &Value) -> AdbResult<()> {
         self.store_value_at(&path.into_arbor_path()?, value)
@@ -219,10 +219,10 @@ impl WriteTxn {
     /// decode, no re-encode — otherwise the value is decoded, updated, and re-encoded.
     /// Registered indexes are maintained across either path.
     ///
-    /// `hint` is a vnode key the caller already resolved for `path` — a mutable
+    /// `hint` is an a-node key the caller already resolved for `path` — a mutable
     /// accessor from [`fetch_mut`](Self::fetch_mut) supplies one so the common in-place
     /// patch skips re-walking the directory tree; it is trusted only while it still
-    /// names a live vnode (see [`table::put_scalar_into`]).
+    /// names a live a-node (see [`table::put_scalar_into`]).
     pub(crate) fn put_scalar_at(&self, path: &APath, hint: Option<AKey>, at: &VPath, scalar: Scalar) -> AdbResult<()> {
         self.reindex_around(std::slice::from_ref(path), |ctx| {
             table::put_scalar_into(ctx, path, hint, at, &scalar)
@@ -236,7 +236,7 @@ impl WriteTxn {
     pub fn fetch_mut<'t, A: AMut<'t>>(&'t self, path: impl IntoArborPath) -> AdbResult<Option<A>> {
         let apath = path.into_arbor_path()?;
 
-        // Presence check without decoding the value — resolve the vnode and read its
+        // Presence check without decoding the value — resolve the a-node and read its
         // kind alone. The resolved key is handed to the cursor as a hint, so an
         // in-place scalar patch through it need not walk the directory tree again.
         //
@@ -269,7 +269,7 @@ impl WriteTxn {
         Ok(Some(A::open(cursor, VPath::root())))
     }
 
-    /// Verifies vnode `akey`'s integrity tag over `entry` and its current ACL, so a
+    /// Verifies a-node `akey`'s integrity tag over `entry` and its current ACL, so a
     /// writer's own read-back (through [`load_value_at`](Self::load_value_at) and the
     /// mutable accessor) detects a blob altered outside the library rather than
     /// silently returning — or re-sealing over — it. A no-op unless this handle is an
@@ -300,7 +300,7 @@ impl WriteTxn {
         match mac {
             Some(mac) if perm::integrity::ct_eq(&mac, &expected) => Ok(()),
             _ => Err(AdbError::Tampered(format!(
-                "integrity check failed for a vnode in table '{}'",
+                "integrity check failed for an a-node in table '{}'",
                 self.table
             ))),
         }
@@ -350,7 +350,7 @@ impl WriteTxn {
                 return Ok(None);
             };
 
-            // A tampered directory blob could redirect a name to another vnode, so
+            // A tampered directory blob could redirect a name to another a-node, so
             // verify each directory descended through.
             self.check_mac(akey, &entry, acl.as_ref(), mac)?;
 
@@ -442,8 +442,8 @@ impl WriteTxn {
 
     /// Grants `rights` to `class` on the file or directory at `path`. For a
     /// [`Group`](AclClass::Group) this inserts or updates that group's entry — adding
-    /// the vnode to the group if needed — and setting a group to [`Rights::None`]
-    /// removes it. Requires `Modify` on the vnode; the root's ACL cannot be changed.
+    /// the a-node to the group if needed — and setting a group to [`Rights::None`]
+    /// removes it. Requires `Modify` on the a-node; the root's ACL cannot be changed.
     #[cfg(feature = "permissions")]
     pub fn set_acl(&self, path: impl IntoArborPath, class: AclClass, rights: Rights) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
@@ -468,7 +468,7 @@ impl WriteTxn {
     /// Adds the file or directory at `path` to `group`, granting that group
     /// [`Access`](Rights::Access) unless it already has an entry (whose grade is
     /// then kept). Use [`set_acl`](Self::set_acl) to grant a stronger grade.
-    /// Requires `Modify` on the vnode.
+    /// Requires `Modify` on the a-node.
     #[cfg(feature = "permissions")]
     pub fn add_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
@@ -482,7 +482,7 @@ impl WriteTxn {
     }
 
     /// Removes the file or directory at `path` from `group` (a no-op if it is not a
-    /// member). Requires `Modify` on the vnode.
+    /// member). Requires `Modify` on the a-node.
     #[cfg(feature = "permissions")]
     pub fn del_group(&self, path: impl IntoArborPath, group: &str) -> AdbResult<()> {
         let path = path.into_arbor_path()?;
@@ -506,8 +506,8 @@ impl WriteTxn {
         self.reindex_around(std::slice::from_ref(&path), |ctx| table::rm_into(ctx, &path))
     }
 
-    /// Moves the vnode at `src` to `dst`, keeping its identity (a relink, not a
-    /// copy — so `mv` is O(1) and any accessor holding the vnode's `AKey` stays
+    /// Moves the a-node at `src` to `dst`, keeping its identity (a relink, not a
+    /// copy — so `mv` is O(1) and any accessor holding the a-node's `AKey` stays
     /// valid). Creates `dst`'s parent directories and replaces an existing `dst`.
     /// Errors if `dst` is `src` itself or a descendant of it.
     pub fn mv(&self, src: impl IntoArborPath, dst: impl IntoArborPath) -> AdbResult<()> {
@@ -516,7 +516,7 @@ impl WriteTxn {
 
         if dst.names().starts_with(src.names()) {
             return Err(AdbError::CannotAccess(String::from(
-                "cannot move a vnode onto itself or into a descendant",
+                "cannot move an a-node onto itself or into a descendant",
             )));
         }
 
@@ -542,7 +542,7 @@ impl WriteTxn {
 
         if dst.names().starts_with(src.names()) {
             return Err(AdbError::CannotAccess(String::from(
-                "cannot copy a vnode onto itself or into a descendant",
+                "cannot copy an a-node onto itself or into a descendant",
             )));
         }
 
@@ -706,8 +706,8 @@ impl WriteTxn {
         grab::ls(self, path)
     }
 
-    /// The created / modified / accessed timestamps of the vnode at `path`, or
-    /// `None` if the vnode is absent or has no recorded metadata yet.
+    /// The created / modified / accessed timestamps of the a-node at `path`, or
+    /// `None` if the a-node is absent or has no recorded metadata yet.
     #[cfg(feature = "entry-timestamps")]
     pub fn times(&self, path: impl IntoArborPath) -> AdbResult<Option<NodeTimestamps>> {
         grab::times(self, path)
@@ -721,7 +721,7 @@ impl WriteTxn {
     }
 
     /// The name of the owner of the file or directory at `path`, or `None` if the
-    /// vnode is absent or has no ACL.
+    /// a-node is absent or has no ACL.
     #[cfg(feature = "permissions")]
     pub fn owner(&self, path: impl IntoArborPath) -> AdbResult<Option<String>> {
         grab::owner(self, path)
@@ -1067,7 +1067,7 @@ mod tests {
     }
 
     #[test]
-    fn a_correct_scalar_hint_patches_the_hinted_vnode() {
+    fn a_correct_scalar_hint_patches_the_hinted_a_node() {
         let db = ArborDb::create_in_memory().unwrap();
         let table = db.open_table("t").unwrap();
         let alice = APath::parse("users/alice").unwrap();
@@ -1101,7 +1101,7 @@ mod tests {
             let w = table.write().unwrap();
             w.store_value("users/alice", &user(30)).unwrap();
 
-            // A hint that names no live vnode (as a cursor's key would after the path
+            // A hint that names no live a-node (as a cursor's key would after the path
             // was removed) is not trusted: the write resolves the path afresh and still
             // lands on the real file, exactly as the un-hinted path does.
             let stale = AKey::generate();

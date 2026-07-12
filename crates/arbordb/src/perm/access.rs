@@ -1,13 +1,13 @@
-//! The value-access authorizer: may a principal exercise a graded right on a vnode?
+//! The value-access authorizer: may a principal exercise a graded right on an a-node?
 //!
 //! - The **master user** and an **unrestricted** (non-protected) handle bypass ACLs.
 //! - The **guest** is strictly read-only: it may only [`Access`](Rights::Access) (read/traverse), never `Modify` or
 //!   `Delete`, whatever the ACL says.
-//! - The **root** vnode is special — everyone may access it, any non-guest may create children in it, and its ACL is
+//! - The **root** a-node is special — everyone may access it, any non-guest may create children in it, and its ACL is
 //!   immutable (never stored).
-//! - A vnode with **no ACL** (e.g. one predating protection) is reachable only by the master user or a **master-group**
-//!   member.
-//! - Otherwise the caller's effective grade (owner, then the strongest of the groups it shares with the vnode, then
+//! - An a-node with **no ACL** (e.g. one predating protection) is reachable only by the master user or a
+//!   **master-group** member.
+//! - Otherwise the caller's effective grade (owner, then the strongest of the groups it shares with the a-node, then
 //!   other) must include the grade the operation needs. Membership of the master or super *group* grants no bypass
 //!   here.
 
@@ -19,10 +19,10 @@ use crate::{
     AKey,
 };
 
-/// Checks that `principal` may exercise the `needed` grade on vnode `akey` governed
-/// by `acl` (`None` when the vnode has no ACL yet).
+/// Checks that `principal` may exercise the `needed` grade on a-node `akey` governed
+/// by `acl` (`None` when the a-node has no ACL yet).
 pub(crate) fn authorize(principal: &Principal, akey: AKey, acl: Option<&Acl>, needed: Rights) -> AdbResult<()> {
-    // The guest is read-only, whatever the ACL or the vnode says: it may only access.
+    // The guest is read-only, whatever the ACL or the a-node says: it may only access.
     if matches!(principal, Principal::Guest { .. }) && needed > Rights::Access {
         return Err(denied(needed));
     }
@@ -40,7 +40,7 @@ pub(crate) fn authorize(principal: &Principal, akey: AKey, acl: Option<&Acl>, ne
     }
 
     match acl {
-        // A vnode with no ACL is reachable only by the master user (handled above)
+        // An a-node with no ACL is reachable only by the master user (handled above)
         // or a master-group member.
         None => {
             if matches!(principal, Principal::User(session) if session.in_master_group()) {
@@ -68,7 +68,7 @@ pub(crate) fn authorize(principal: &Principal, akey: AKey, acl: Option<&Acl>, ne
     }
 }
 
-/// Checks that `principal` may change a vnode's **owner**. The `Modify` grade alone
+/// Checks that `principal` may change an a-node's **owner**. The `Modify` grade alone
 /// is not enough — only the master user, a master-group member, or the current owner
 /// may chown.
 pub(crate) fn authorize_chown(principal: &Principal, acl: &Acl) -> AdbResult<()> {
