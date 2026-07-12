@@ -5,7 +5,7 @@
 
 use arbordb::{
     acl::{AclClass, Rights},
-    data::{AValue, Scalar},
+    data::{AValue, LeafMut, Scalar},
     perm::PublicKey,
     AdbError,
     ArborDb,
@@ -393,6 +393,63 @@ fn chown_transfers_ownership() {
             w.store_value("f", &leaf(3)),
             Err(AdbError::PermissionDenied(_))
         ));
+    }
+}
+
+#[test]
+fn an_edit_then_chmod_in_one_transaction_seals_the_edited_bytes() {
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        db.add_user("alice", "a", false).unwrap();
+        db.add_user("bob", "b", false).unwrap();
+    }
+
+    // Alice creates a file, then — in one later transaction — edits its value in place
+    // (buffered by the write-back cache) and changes its ACL. The chmod re-seals the
+    // integrity tag, which must cover the buffered edit, not the stale on-disk bytes.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+
+        {
+            let w = t.write().unwrap();
+            w.store_value("f", &leaf(1)).unwrap();
+            w.commit().unwrap();
+        }
+
+        {
+            let w = t.write().unwrap();
+            {
+                // A same-width scalar overwrite buffers the edited entry (not re-sealed yet).
+                let f: LeafMut<'_, i64> = w.fetch_mut("f").unwrap().unwrap();
+                f.set(&2).unwrap();
+            } // the accessor borrows the txn, so drop it before the chmod and commit
+
+            // The chmod re-seals `f`'s integrity tag over its current (buffered) bytes.
+            w.set_acl("f", AclClass::Other, Rights::None).unwrap();
+            w.commit().unwrap();
+        }
+    }
+
+    // Reopened (buffer and verified-memo both empty), the on-disk seal verifies over the
+    // edited bytes: Alice reads back the edit rather than hitting a `Tampered` error.
+    {
+        let alice = ArborDb::open_with_authentication(&path, "alice", "a").unwrap();
+        let t = alice.open_table("data").unwrap();
+        let r = t.read().unwrap();
+
+        assert_eq!(r.load::<i64>("f").unwrap(), Some(2));
+    }
+
+    // And the chmod took effect too: Bob (neither owner nor in a permitted group) is denied.
+    {
+        let bob = ArborDb::open_with_authentication(&path, "bob", "b").unwrap();
+        let t = bob.open_table("data").unwrap();
+        let r = t.read().unwrap();
+
+        assert!(matches!(r.load::<i64>("f"), Err(AdbError::PermissionDenied(_))));
     }
 }
 

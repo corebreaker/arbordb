@@ -87,6 +87,14 @@ pub struct ReadTxn {
     /// on every read. It is sound because a read snapshot's data and ACLs are fixed
     /// and this handle's principal never changes, so a path resolved (with its
     /// traversal authorized) once stays so for the snapshot's life.
+    ///
+    /// These per-snapshot memos (this map and the `access_ok`/`verified` sets below)
+    /// are intentionally uncapped, unlike the shared, capacity-bounded [`PathCache`]
+    /// LRUs: a read transaction is a bounded-lifetime snapshot, so they grow only with
+    /// the distinct paths and a-nodes it actually touches and are freed in full when it
+    /// drops. A read handle is therefore not meant to be held open indefinitely while
+    /// walking unboundedly many distinct paths; a workload that does should scope its
+    /// reads into shorter snapshots.
     #[cfg(feature = "permissions")]
     enforced_paths: Mutex<HashMap<APath, AKey>>,
 

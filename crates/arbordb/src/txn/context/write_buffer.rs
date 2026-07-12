@@ -31,7 +31,7 @@ use smol_str::SmolStr;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Mutex,
     },
 };
@@ -59,6 +59,13 @@ pub(in crate::txn) struct WriteBuffer {
     files_dirty: AtomicBool,
     /// The buffered file entry blobs (tag + value blob), keyed by a-node.
     files:       Mutex<HashMap<AKey, Vec<u8>>>,
+    /// A monotonic count of structural changes to the directory tree — every
+    /// `name → child` relink (a child link or unlink) bumps it. A mutable cursor
+    /// captures it when opened and its resolved-key hint is trusted only while the
+    /// count is unchanged, so an interleaved `mv`/`rm`/`store` that could repoint the
+    /// cursor's path invalidates the hint rather than silently patching a relinked
+    /// a-node (see `resolve_target`).
+    structure:   AtomicU64,
 }
 
 impl WriteBuffer {
@@ -70,6 +77,7 @@ impl WriteBuffer {
             dirs:        Mutex::new(HashMap::new()),
             files_dirty: AtomicBool::new(false),
             files:       Mutex::new(HashMap::new()),
+            structure:   AtomicU64::new(0),
         }
     }
 
@@ -159,6 +167,21 @@ impl WriteBuffer {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(&akey);
         }
+    }
+
+    // -- Structural-change counter -------------------------------------------
+
+    /// The current structural-change count. A mutable cursor captures it at
+    /// `fetch_mut`, and its resolved-key hint is trusted only while the count is
+    /// unchanged (see `resolve_target`).
+    pub(in crate::txn) fn structure_epoch(&self) -> u64 {
+        self.structure.load(Ordering::Relaxed)
+    }
+
+    /// Records a structural change — a `name → child` relink — so any cursor hint
+    /// captured before it is no longer trusted.
+    pub(in crate::txn) fn bump_structure(&self) {
+        self.structure.fetch_add(1, Ordering::Relaxed);
     }
 
     // -- Shared --------------------------------------------------------------

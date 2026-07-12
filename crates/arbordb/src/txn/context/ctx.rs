@@ -374,6 +374,22 @@ impl<'txn, 'a> Context<'txn, 'a> {
         self.dirs.active()
     }
 
+    /// The transaction's structural-change count (see [`WriteBuffer::structure_epoch`]).
+    /// A mutable cursor's key hint is trusted only while it is unchanged, so an
+    /// interleaved relink invalidates the hint (see [`resolve_target`]).
+    ///
+    /// [`resolve_target`]: super::table::resolve_target
+    #[cfg(not(feature = "permissions"))]
+    pub(super) fn structure_epoch(&self) -> u64 {
+        self.dirs.structure_epoch()
+    }
+
+    /// Bumps the structural-change count after a `name → child` relink, invalidating
+    /// any cursor hint captured before it.
+    pub(super) fn bump_structure(&self) {
+        self.dirs.bump_structure();
+    }
+
     /// Buffers `map` as directory `akey`'s whole child-map (a fresh or replaced
     /// directory), to be encoded and written once at commit.
     pub(super) fn buffer_dir(&self, akey: AKey, map: BTreeMap<SmolStr, AKey>) {
@@ -553,8 +569,17 @@ impl<'txn, 'a> Context<'txn, 'a> {
     #[cfg(feature = "permissions")]
     pub(super) fn reseal_integrity(&mut self, akey: AKey) -> AdbResult<()> {
         if let Principal::User(session) = self.principal {
-            let Some(entry) = read_entry(&*self.data, akey)? else {
-                return Ok(());
+            // Read the current entry bytes buffer-first: a file edited earlier in this
+            // transaction lives in the write-back cache, not yet in the engine, and the
+            // seal must cover those pending bytes, not the stale on-disk ones. No
+            // integrity re-check here — the stored tags are exactly what this call is
+            // about to recompute (they no longer match the just-changed ACL).
+            let entry = match self.dirs.file_get(akey) {
+                Some(buffered) => buffered,
+                None => match read_entry(&*self.data, akey)? {
+                    Some(entry) => entry,
+                    None => return Ok(()),
+                },
             };
 
             let acl = read_acl(&*self.inodes, self.table, akey)?

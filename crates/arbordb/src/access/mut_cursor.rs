@@ -26,18 +26,27 @@ pub(crate) struct MutCursor<'t> {
     /// The access path of the file this cursor operates on.
     apath: APath,
     /// The a-node key `fetch_mut` resolved for `apath` — a hint that lets the in-place
-    /// scalar patch skip re-walking the directory tree (validated on use, so a path
-    /// removed since falls back to a fresh resolve).
+    /// scalar patch skip re-walking the directory tree. Passed on only while the
+    /// transaction's structural-change count still matches [`epoch`](Self::epoch), so a
+    /// path removed or relinked since falls back to a fresh resolve.
     akey:  AKey,
+    /// The transaction's structural-change count when this cursor was opened. The key
+    /// hint is passed to the in-place scalar patch only while this still matches the
+    /// transaction's current count — an interleaved `mv`/`rm`/`store` bumps it, so the
+    /// write re-resolves `apath` afresh instead of trusting a hint the relink may have
+    /// repointed.
+    epoch: u64,
 }
 
 impl<'t> MutCursor<'t> {
-    /// Opens a cursor over the file at `apath`, whose a-node `fetch_mut` resolved to `akey`.
-    pub(crate) fn open(txn: &'t WriteTxn, apath: APath, akey: AKey) -> Self {
+    /// Opens a cursor over the file at `apath`, whose a-node `fetch_mut` resolved to
+    /// `akey` at structural-change count `epoch`.
+    pub(crate) fn open(txn: &'t WriteTxn, apath: APath, akey: AKey, epoch: u64) -> Self {
         Self {
             txn,
             apath,
             akey,
+            epoch,
         }
     }
 
@@ -84,7 +93,8 @@ impl Reader for MutCursor<'_> {
 
 impl Writer for MutCursor<'_> {
     fn put_scalar(&self, at: &VPath, scalar: Scalar) -> AdbResult<()> {
-        self.txn.put_scalar_at(&self.apath, Some(self.akey), at, scalar)
+        self.txn
+            .put_scalar_at(&self.apath, Some((self.akey, self.epoch)), at, scalar)
     }
 
     fn ensure_container(&self, at: &VPath, list: bool) -> AdbResult<()> {

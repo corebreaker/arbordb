@@ -225,14 +225,30 @@ impl WriteTxn {
     /// decode, no re-encode — otherwise the value is decoded, updated, and re-encoded.
     /// Registered indexes are maintained across either path.
     ///
-    /// `hint` is an a-node key the caller already resolved for `path` — a mutable
-    /// accessor from [`fetch_mut`](Self::fetch_mut) supplies one so the common in-place
-    /// patch skips re-walking the directory tree; it is trusted only while it still
-    /// names a live a-node (see [`table::put_scalar_into`]).
-    pub(crate) fn put_scalar_at(&self, path: &APath, hint: Option<AKey>, at: &VPath, scalar: Scalar) -> AdbResult<()> {
+    /// `hint` is an a-node key the caller already resolved for `path`, paired with the
+    /// transaction's structural-change count at that moment — a mutable accessor from
+    /// [`fetch_mut`](Self::fetch_mut) supplies one so the common in-place patch skips
+    /// re-walking the directory tree; it is trusted only while that count is unchanged,
+    /// so an interleaved relink of `path` drops it (see [`table::put_scalar_into`]).
+    pub(crate) fn put_scalar_at(
+        &self,
+        path: &APath,
+        hint: Option<(AKey, u64)>,
+        at: &VPath,
+        scalar: Scalar,
+    ) -> AdbResult<()> {
         self.reindex_around(std::slice::from_ref(path), |ctx| {
             table::put_scalar_into(ctx, path, hint, at, &scalar)
         })
+    }
+
+    /// The transaction's structural-change count — every `name → child` relink bumps
+    /// it. A mutable accessor from [`fetch_mut`](Self::fetch_mut) captures it when
+    /// opened and passes its key hint to the in-place scalar patch only while the count
+    /// is unchanged, so an interleaved `mv`/`rm`/`store` makes the write re-resolve the
+    /// path instead of trusting a hint the relink may have repointed.
+    pub(crate) fn structure_epoch(&self) -> u64 {
+        self.dirs.structure_epoch()
     }
 
     /// Opens a mutable accessor over the file at `path`, or `None` if absent. A scalar
@@ -260,7 +276,10 @@ impl WriteTxn {
             _ => return Ok(None),
         };
 
-        let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath, akey));
+        // Capture the structural-change count now, so a scalar patch through the cursor
+        // trusts its `akey` hint only while no interleaved relink has repointed `apath`.
+        let epoch = self.structure_epoch();
+        let cursor: Arc<dyn Writer + 't> = Arc::new(MutCursor::open(self, apath, akey, epoch));
 
         Ok(Some(A::open(cursor, VPath::root())))
     }
@@ -1113,8 +1132,10 @@ mod tests {
             // would carry. Resolved through the transaction's own (cache-aware) surface
             // so it sees the just-stored file whose parent directory is still buffered.
             let akey = Grab::resolve(&w, &alice).unwrap().unwrap();
+            let epoch = w.structure_epoch();
 
-            w.put_scalar_at(&alice, Some(akey), &age, Scalar::I64(31)).unwrap();
+            w.put_scalar_at(&alice, Some((akey, epoch)), &age, Scalar::I64(31))
+                .unwrap();
             w.commit().unwrap();
         }
 
@@ -1137,11 +1158,49 @@ mod tests {
             // was removed) is not trusted: the write resolves the path afresh and still
             // lands on the real file, exactly as the un-hinted path does.
             let stale = AKey::generate();
-            w.put_scalar_at(&alice, Some(stale), &age, Scalar::I64(31)).unwrap();
+            w.put_scalar_at(&alice, Some((stale, w.structure_epoch())), &age, Scalar::I64(31))
+                .unwrap();
             w.commit().unwrap();
         }
 
         let r = table.read().unwrap();
         assert_eq!(r.get_as::<i64>("users/alice", "age").unwrap(), Some(31));
+    }
+
+    #[test]
+    fn a_relinked_target_invalidates_the_scalar_hint() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+        let src = APath::parse("a/b").unwrap();
+        let root = VPath::root();
+
+        {
+            let w = table.write().unwrap();
+            // A leaf file, the shape a `LeafMut` cursor edits (its scalar patch targets
+            // the root `VPath`).
+            w.store::<i64>("a/b", &30).unwrap();
+
+            // The hint a mutable cursor would carry: the file's key and the
+            // structural-change count at the moment it was resolved.
+            let akey = Grab::resolve(&w, &src).unwrap().unwrap();
+            let epoch = w.structure_epoch();
+
+            // `mv` relinks that key to `c/d`; since an `AKey` is stable across renames
+            // the hinted key is still live, but `a/b` no longer resolves to it. The
+            // bumped structural-change count invalidates the hint, so the write
+            // re-resolves `a/b` afresh — recreating the file there — instead of silently
+            // patching the moved `c/d` entry the hint still names.
+            w.mv("a/b", "c/d").unwrap();
+            w.put_scalar_at(&src, Some((akey, epoch)), &root, Scalar::I64(99))
+                .unwrap();
+
+            w.commit().unwrap();
+        }
+
+        let r = table.read().unwrap();
+        // The moved original is untouched...
+        assert_eq!(r.load::<i64>("c/d").unwrap(), Some(30));
+        // ...and `a/b` was recreated with the new scalar.
+        assert_eq!(r.load::<i64>("a/b").unwrap(), Some(99));
     }
 }

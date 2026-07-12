@@ -85,15 +85,27 @@ fn resolve_and_read(ctx: &Context, path: &APath) -> AdbResult<(Option<AKey>, Opt
 /// Resolves the target file for a scalar write, honouring a caller's key `hint`
 /// where that is sound.
 ///
-/// Without access control the hint — from a mutable accessor that already walked the
-/// path — is trusted while it still names a live a-node, so the directory tree is not
-/// re-walked. Under `permissions`, `ctx.resolve` performs the per-directory `Access`
-/// checks a scalar edit still requires, so the hint is ignored there and the path is
-/// resolved afresh; a stale hint (its a-node gone) likewise falls back, recreating the
-/// file at `path` exactly as an un-hinted write does.
-fn resolve_target(ctx: &Context, path: &APath, hint: Option<AKey>) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
+/// The `hint` is an a-node key a mutable accessor resolved for `path`, paired with the
+/// transaction's structural-change count at that moment. Without access control it is
+/// trusted only while that count is unchanged: a path resolves through `name → child`
+/// links alone, so an unchanged count means `path` still resolves to the hinted a-node
+/// and the directory tree need not be re-walked. An interleaved `mv`/`rm`/`store` bumps
+/// the count — since an `AKey` is stable across renames a moved a-node stays live, but
+/// `path` no longer resolves to it — so the hint is dropped and the path re-resolved
+/// afresh (recreating the file if `path` is now gone), never silently patching an
+/// a-node the hint's identity was relinked to elsewhere.
+///
+/// Under `permissions`, `ctx.resolve` performs the per-directory `Access` checks a
+/// scalar edit still requires, so the hint is ignored there and the path is always
+/// resolved afresh.
+pub(super) fn resolve_target(
+    ctx: &Context,
+    path: &APath,
+    hint: Option<(AKey, u64)>,
+) -> AdbResult<(Option<AKey>, Option<Vec<u8>>)> {
     #[cfg(not(feature = "permissions"))]
-    if let Some(key) = hint
+    if let Some((key, epoch)) = hint
+        && epoch == ctx.structure_epoch()
         && let Some(entry) = ctx.read_verified(key)?
     {
         return Ok((Some(key), Some(entry)));
@@ -111,12 +123,13 @@ fn resolve_target(ctx: &Context, path: &APath, hint: Option<AKey>) -> AdbResult<
 /// file (and its parents) when it does not exist yet.
 ///
 /// `hint` is an a-node key the caller already resolved for `path` (a mutable accessor
-/// that just walked it), passed on to [`resolve_target`] to skip re-walking the
-/// directory tree where that is sound.
+/// that just walked it), paired with the transaction's structural-change count at that
+/// moment, passed on to [`resolve_target`] to skip re-walking the directory tree while
+/// that count is unchanged.
 pub(in crate::txn) fn put_scalar_into(
     ctx: &mut Context,
     path: &APath,
-    hint: Option<AKey>,
+    hint: Option<(AKey, u64)>,
     at: &VPath,
     scalar: &Scalar,
 ) -> AdbResult<()> {
@@ -334,6 +347,10 @@ pub(in crate::txn) fn flush_buffered(
 /// the parent's cached child-map is mutated in place (O(1)); otherwise the whole
 /// directory is read, edited, and rewritten.
 pub(in crate::txn) fn link_child(ctx: &mut Context, parent: AKey, name: &str, child: AKey) -> AdbResult<()> {
+    // A relink repoints which a-node a path resolves to, so bump the structural-change
+    // count that invalidates a mutable cursor's stale key hint (see `resolve_target`).
+    ctx.bump_structure();
+
     if ctx.buffering() {
         return ctx.dir_link(parent, name, child);
     }
@@ -346,6 +363,10 @@ pub(in crate::txn) fn link_child(ctx: &mut Context, parent: AKey, name: &str, ch
 
 /// Removes the `name` link from directory `parent` (in place when buffering).
 pub(in crate::txn) fn unlink_child(ctx: &mut Context, parent: AKey, name: &str) -> AdbResult<()> {
+    // A relink repoints which a-node a path resolves to, so bump the structural-change
+    // count that invalidates a mutable cursor's stale key hint (see `resolve_target`).
+    ctx.bump_structure();
+
     if ctx.buffering() {
         return ctx.dir_unlink(parent, name);
     }
