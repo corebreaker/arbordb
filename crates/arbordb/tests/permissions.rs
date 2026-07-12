@@ -426,6 +426,83 @@ fn set_acl_restricts_access_and_get_acl_reflects_it() {
 }
 
 #[test]
+fn kind_and_exists_enforce_access_on_the_target_vnode() {
+    let (_dir, path) = tmp_db();
+
+    // Master stores a file and revokes `other` on it entirely.
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("m").unwrap();
+        let t = db.open_table("data").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("secret", &leaf(7)).unwrap();
+        w.set_acl("secret", AclClass::Other, Rights::None).unwrap();
+        w.commit().unwrap();
+    }
+
+    // The guest can traverse the root but holds no `Access` on `secret`, so it can
+    // neither learn the file's kind nor probe its existence — the same denial a
+    // `load` raises, so existence cannot be leaked past a `Rights::None` ACL.
+    {
+        let guest = ArborDb::open(&path).unwrap();
+        let r = guest.open_table("data").unwrap().read().unwrap();
+
+        assert!(matches!(r.kind("secret"), Err(AdbError::PermissionDenied(_))));
+        assert!(matches!(r.exists("secret"), Err(AdbError::PermissionDenied(_))));
+
+        // A path that genuinely does not exist still reports absence, not a denial.
+        assert_eq!(r.kind("ghost").unwrap(), None);
+        assert!(!r.exists("ghost").unwrap());
+    }
+}
+
+#[test]
+fn kind_verifies_the_target_vnodes_integrity() {
+    use redb::{Database, ReadableTable, TableDefinition};
+
+    let (_dir, path) = tmp_db();
+
+    {
+        let db = ArborDb::create(&path).unwrap().change_password("pw").unwrap();
+        let t = db.open_table("docs").unwrap();
+        let w = t.write().unwrap();
+        w.store_value("note", &leaf(42)).unwrap();
+        w.commit().unwrap();
+    }
+
+    // Flip a byte inside the file's own blob; its leading tag still marks it a file,
+    // so the parent directory entry stays intact and `resolve` still finds it.
+    {
+        let docs: TableDefinition<u128, &[u8]> = TableDefinition::new("docs");
+        let raw = Database::open(&path).unwrap();
+        let wtx = raw.begin_write().unwrap();
+        {
+            let mut table = wtx.open_table(docs).unwrap();
+
+            let mut victim: Option<(u128, Vec<u8>)> = None;
+            for row in table.iter().unwrap() {
+                let (key, value) = row.unwrap();
+                let bytes = value.value().to_vec();
+                if bytes.first() == Some(&1u8) {
+                    victim = Some((key.value(), bytes));
+                }
+            }
+
+            let (key, mut bytes) = victim.expect("a file entry to tamper with");
+            *bytes.last_mut().unwrap() ^= 0x01;
+            table.insert(key, bytes.as_slice()).unwrap();
+        }
+        wtx.commit().unwrap();
+    }
+
+    // `kind` now verifies the target vnode's own tag, so it catches the tampering
+    // exactly as `load_value` does, rather than reporting the kind of altered bytes.
+    let master = ArborDb::open_with_authentication(&path, "master", "pw").unwrap();
+    let t = master.open_table("docs").unwrap();
+    let r = t.read().unwrap();
+    assert!(matches!(r.kind("note"), Err(AdbError::Tampered(_))));
+}
+
+#[test]
 fn removing_a_user_deletes_the_values_it_owns() {
     let (_dir, path) = tmp_db();
 

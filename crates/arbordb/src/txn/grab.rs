@@ -279,6 +279,13 @@ pub(crate) fn get_as<V: AValue>(
 }
 
 /// The filesystem kind (file or directory) at `path`, or `None` if absent.
+///
+/// Under the `permissions` feature this is a full read of the target vnode, not a
+/// cheap stat: it requires `Rights::Access` on the vnode *itself* (not merely the
+/// traversal right on its ancestors, which `resolve` already checks) and verifies
+/// the vnode's own integrity tag. So it can neither probe the existence or kind of a
+/// vnode the caller may not read, nor report a tampered kind tag — matching the
+/// guarantees of `load`/`fetch`/`get`.
 pub(crate) fn kind(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Option<EntryKind>> {
     let path = path.into_arbor_path()?;
 
@@ -286,19 +293,38 @@ pub(crate) fn kind(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Option
         return Ok(None);
     };
 
-    match src.entry_blob(akey)? {
-        Some(blob) => Ok(Some(get_entry_kind(&blob)?)),
-        None => Ok(None),
-    }
+    #[cfg(feature = "permissions")]
+    src.authorize(akey, Rights::Access)?;
+
+    let Some(blob) = src.entry_blob(akey)? else {
+        return Ok(None);
+    };
+
+    #[cfg(feature = "permissions")]
+    src.verify(akey, &blob)?;
+
+    Ok(Some(get_entry_kind(&blob)?))
 }
 
 /// Whether a file or directory exists at `path`.
+///
+/// Shares `kind`'s access rules: under `permissions` this reports `Err` rather than
+/// `Ok(false)` for a vnode the caller lacks `Rights::Access` on, so existence cannot
+/// be probed past an ACL that denies access (same behavior as a `load` on it).
 pub(crate) fn exists(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<bool> {
     Ok(kind(src, path)?.is_some())
 }
 
 /// Lists the direct children of the directory at `path`, as `(name, kind)` pairs
 /// in name order. Errors if `path` names a file.
+///
+/// Scope note (`permissions`): the directory itself is ACL-checked (`Rights::Access`)
+/// and integrity-verified, but each child's reported `EntryKind` is read from that
+/// child's own entry *without* re-authorizing or verifying the child — a listing
+/// deliberately avoids paying a full ACL + MAC check per entry. A child kind reported
+/// here therefore does not carry the tamper/authorization guarantee that a direct
+/// `load`/`fetch`/`get`/`kind` on that child does: those run the per-vnode checks and
+/// will catch a tampered child entry this listing does not.
 pub(crate) fn ls(src: &dyn Grab, path: impl IntoArborPath) -> AdbResult<Vec<Entry>> {
     let path = path.into_arbor_path()?;
 

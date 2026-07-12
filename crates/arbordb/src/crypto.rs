@@ -11,7 +11,7 @@
 //! (write) a value; the guest holds neither and is read-only.
 
 use crate::error::{AdbError, AdbResult};
-use argon2::Argon2;
+use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     aead::{Aead, KeyInit},
     XChaCha20Poly1305,
@@ -79,10 +79,32 @@ pub(crate) fn verify(pubkey: &[u8; PUBKEY_LEN], msg: &[u8], sig: &[u8; SIG_LEN])
     verifying.verify_strict(msg, &Signature::from_bytes(sig)).is_ok()
 }
 
+/// Argon2id memory cost, in kibibytes (19 MiB).
+const KDF_M_COST: u32 = 19 * 1024;
+
+/// Argon2id time cost (number of passes).
+const KDF_T_COST: u32 = 2;
+
+/// Argon2id parallelism (number of lanes).
+const KDF_P_COST: u32 = 1;
+
 /// Derives a 32-byte key-encryption key from `password` and `salt` (Argon2id).
+///
+/// The cost parameters (`KDF_M_COST` / `KDF_T_COST` / `KDF_P_COST`) are pinned
+/// explicitly rather than taken from `Argon2::default()`: this KDF is the sole
+/// barrier between a stolen database file and the wrapped integrity key and signing
+/// seed, so its security margin must not depend on a library default that a future
+/// dependency bump could silently change. The chosen values match the current
+/// OWASP-recommended Argon2id baseline (m = 19 MiB, t = 2, p = 1) and reproduce the
+/// key `Argon2::default()` derived, so existing databases stay readable.
 fn derive_kek(password: &str, salt: &[u8]) -> AdbResult<[u8; 32]> {
+    let params = Params::new(KDF_M_COST, KDF_T_COST, KDF_P_COST, None)
+        .map_err(|e| AdbError::CannotAccess(format!("invalid KDF parameters: {e}")))?;
+
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
     let mut kek = [0u8; 32];
-    Argon2::default()
+    argon
         .hash_password_into(password.as_bytes(), salt, &mut kek)
         .map_err(|e| AdbError::CannotAccess(format!("key derivation failed: {e}")))?;
 
