@@ -20,6 +20,11 @@ mod value;
 ))]
 mod bignum;
 
+#[cfg(any(feature = "rational-as-scalar", feature = "rational-as-data"))]
+pub mod rational;
+
+pub(crate) use self::encode::encode_data;
+
 pub use self::{
     bytes::Bytes,
     definition::AData,
@@ -32,5 +37,3 @@ pub use self::{
     seq::{Seq, SeqMut},
     value::AValue,
 };
-
-pub(crate) use self::encode::encode_data;

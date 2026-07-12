@@ -109,7 +109,7 @@ scalar_value!(num_bigint::BigInt, BigInt, "bigint");
 scalar_value!(num_bigfloat::BigFloat, BigFloat, "bigfloat");
 
 #[cfg(feature = "rational-as-scalar")]
-scalar_value!(num_rational::BigRational, Rational, "rational");
+scalar_value!(super::rational::BigRational, Rational, "rational");
 
 // Platform-dependent integer widths are normalised to a fixed width so the
 // on-disk format is portable.
@@ -245,7 +245,7 @@ scalar_adata!(num_bigint::BigInt);
 scalar_adata!(num_bigfloat::BigFloat);
 
 #[cfg(all(feature = "rational-as-scalar", feature = "rational-as-data"))]
-scalar_adata!(num_rational::BigRational);
+scalar_adata!(super::rational::BigRational);
 
 #[cfg(test)]
 mod tests {

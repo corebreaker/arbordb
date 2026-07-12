@@ -16,7 +16,7 @@ use num_bigint::BigInt;
 use num_bigfloat::{BigFloat, INF_NEG, INF_POS, NAN as FLOAT_NAN, ZERO as FLOAT_ZERO};
 
 #[cfg(feature = "rational-as-scalar")]
-use num_rational::BigRational;
+use super::rational::BigRational;
 
 mod tag {
     pub(super) const NULL: u8 = 0;
