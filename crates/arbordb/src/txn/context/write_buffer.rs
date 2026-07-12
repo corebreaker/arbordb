@@ -122,6 +122,12 @@ impl WriteBuffer {
     /// transaction. Clones them out so the lock is not held across the caller's use;
     /// a buffered file is being actively edited, so the copy is cheap relative to the
     /// re-encode (and, under `permissions`, the signature) it defers.
+    ///
+    /// Note this clones on *every* call, not once per edit: the target workload is a
+    /// burst of edits (each `file_put` supersedes the last) within one transaction,
+    /// not reads (see the module doc). A future caller that instead looped *reads* over
+    /// a value freshly buffered but not yet flushed would re-clone its full blob each
+    /// time, and should cache the returned bytes itself rather than re-calling here.
     pub(in crate::txn) fn file_get(&self, akey: AKey) -> Option<Vec<u8>> {
         if !self.files_dirty() {
             return None;
