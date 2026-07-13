@@ -388,3 +388,105 @@ impl<'de, 'a> VariantAccess<'de> for VariantReader<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{codec, value::Value};
+
+    use serde::Deserialize;
+    use std::collections::{BTreeMap, HashMap};
+
+    /// An enum with one variant of each shape, used to drive the enum error paths. Its
+    /// payloads are never read — every case here rejects before a variant is built.
+    #[allow(dead_code)]
+    #[derive(Deserialize, Debug)]
+    enum Shape {
+        Unit,
+        Newtype(i64),
+        Tuple(i64, i64),
+        Struct { a: u32 },
+    }
+
+    #[test]
+    fn an_enum_from_a_non_string_leaf_is_rejected() {
+        let blob = codec::encode(&Value::Leaf(Scalar::U64(5)));
+
+        assert!(from_blob::<Shape>(&blob).is_err());
+    }
+
+    #[test]
+    fn an_enum_from_a_multi_field_object_is_rejected() {
+        let blob = codec::encode(&Value::Node(BTreeMap::from([
+            (String::from("a"), Value::Leaf(Scalar::I64(1))),
+            (String::from("b"), Value::Leaf(Scalar::I64(2))),
+        ])));
+
+        assert!(from_blob::<Shape>(&blob).is_err());
+    }
+
+    #[test]
+    fn an_enum_from_a_list_is_rejected() {
+        let blob = codec::encode(&Value::List(vec![Value::Leaf(Scalar::I64(1))]));
+
+        assert!(from_blob::<Shape>(&blob).is_err());
+    }
+
+    #[test]
+    fn a_non_unit_variant_stored_without_a_payload_is_rejected() {
+        // A bare name is the unit shape; a newtype/tuple/struct variant needs a payload.
+        for name in ["Newtype", "Tuple", "Struct"] {
+            let blob = codec::encode(&Value::Leaf(Scalar::Str(String::from(name))));
+
+            assert!(from_blob::<Shape>(&blob).is_err(), "{name} wrongly accepted");
+        }
+    }
+
+    #[test]
+    fn a_scalar_with_no_serde_primitive_is_rejected() {
+        let blob = codec::encode(&Value::Leaf(Scalar::Uuid(uuid::Uuid::nil())));
+
+        assert!(from_blob::<Value>(&blob).is_err());
+    }
+
+    #[test]
+    fn a_float_map_key_is_parsed() {
+        assert_eq!(
+            f32::deserialize(MapKeyDeserializer {
+                key: "1.5"
+            })
+            .unwrap(),
+            1.5
+        );
+        assert_eq!(
+            f64::deserialize(MapKeyDeserializer {
+                key: "2.5"
+            })
+            .unwrap(),
+            2.5
+        );
+    }
+
+    #[test]
+    fn a_malformed_map_key_is_rejected() {
+        assert!(
+            u32::deserialize(MapKeyDeserializer {
+                key: "not-a-number"
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_map_reports_its_remaining_size() {
+        // Deserializing into a `HashMap` pre-reserves capacity via `size_hint`.
+        let blob = codec::encode(&Value::Node(BTreeMap::from([
+            (String::from("a"), Value::Leaf(Scalar::I64(1))),
+            (String::from("b"), Value::Leaf(Scalar::I64(2))),
+        ])));
+
+        let back: HashMap<String, i64> = from_blob(&blob).unwrap();
+
+        assert_eq!(back.len(), 2);
+    }
+}

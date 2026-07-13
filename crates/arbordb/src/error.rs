@@ -175,3 +175,16 @@ impl serde::de::Error for AdbError {
         AdbError::Serde(msg.to_string())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_wraps_a_source_error_opaquely() {
+        let err = AdbError::engine(std::io::Error::other("boom"));
+
+        assert!(matches!(err, AdbError::Engine(_)));
+        assert!(err.to_string().contains("storage engine error"));
+    }
+}

@@ -35,6 +35,21 @@ fn by_age(name: &str, unique: bool) -> IndexDef {
 }
 
 #[test]
+fn table_name_and_ensure_indexes_from_a_type() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("members").unwrap();
+
+    assert_eq!(table.name(), "members");
+
+    // `ensure_indexes` creates every index the type declares, idempotently by name.
+    table.ensure_indexes::<Member>("members/*").unwrap();
+    assert!(table.has_index("by_age").unwrap());
+
+    table.ensure_indexes::<Member>("members/*").unwrap();
+    assert!(table.has_index("by_age").unwrap());
+}
+
+#[test]
 fn create_ensure_and_delete_declared_indexes() {
     let db = ArborDb::create_in_memory().unwrap();
     let table = db.open_table("t").unwrap();
@@ -56,6 +71,30 @@ fn create_ensure_and_delete_declared_indexes() {
 
     // A second drop is a no-op.
     assert_eq!(table.delete_indexes::<Member>().unwrap(), 0);
+}
+
+#[test]
+fn dropping_an_index_with_entries_clears_its_key_block() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+    table.create_indexes::<Member>("members/*").unwrap();
+
+    // Store indexed data so the index holds physical entries to sweep.
+    {
+        let w = table.write().unwrap();
+        w.store::<Member>("members/a", &member("a", 30)).unwrap();
+        w.store::<Member>("members/b", &member("b", 40)).unwrap();
+        w.commit().unwrap();
+    }
+    assert_eq!(table.read().unwrap().find::<Member>("by_age", &[]).unwrap().len(), 2);
+
+    // Dropping the index scans its id block and removes every entry.
+    assert_eq!(table.delete_indexes::<Member>().unwrap(), 1);
+    assert!(!table.has_index("by_age").unwrap());
+    assert!(matches!(
+        table.read().unwrap().find::<Member>("by_age", &[]),
+        Err(AdbError::IndexNotFound { .. })
+    ));
 }
 
 #[test]

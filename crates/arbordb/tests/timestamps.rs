@@ -229,3 +229,11 @@ fn a_committed_write_flushes_buffered_access_times() {
         "a later committed write flushes buffered access times"
     );
 }
+
+#[test]
+fn flushing_access_times_is_a_noop_when_nothing_was_read() {
+    let db = ArborDb::create_in_memory().unwrap();
+
+    // No reads have buffered an access time, so the flush drains an empty batch.
+    db.flush_access_times().unwrap();
+}

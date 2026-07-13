@@ -214,5 +214,9 @@ mod tests {
         let mut broken = sig;
         broken[0] ^= 0x01;
         assert!(!verify(&pubkey, b"a signed message", &broken));
+
+        // A byte string that is not a valid curve point fails to verify — the
+        // malformed key is rejected up front rather than panicking.
+        assert!(!verify(&[0xFF; PUBKEY_LEN], b"a signed message", &sig));
     }
 }

@@ -96,3 +96,54 @@ impl Reader for ArchivedReader {
         Ok(view.root().navigate(at)?.is_some())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{codec, value::Value};
+
+    use std::collections::BTreeMap;
+
+    fn vp(s: &str) -> VPath {
+        VPath::parse(s).unwrap()
+    }
+
+    fn reader(value: &Value) -> ArchivedReader {
+        ArchivedReader::new(Arc::new(codec::encode(value)), 0).unwrap()
+    }
+
+    #[test]
+    fn archived_reader_navigates_a_stored_value() {
+        let value = Value::Node(BTreeMap::from([
+            (String::from("n"), Value::Leaf(Scalar::I64(5))),
+            (
+                String::from("xs"),
+                Value::List(vec![Value::Leaf(Scalar::I64(1)), Value::Leaf(Scalar::I64(2))]),
+            ),
+        ]));
+
+        let r = reader(&value);
+
+        assert_eq!(r.scalar_at(&vp("n")).unwrap(), Some(Scalar::I64(5)));
+        assert_eq!(r.kind_at(&vp("n")).unwrap(), Some(NodeKind::Leaf));
+        assert_eq!(r.kind_at(&vp("xs")).unwrap(), Some(NodeKind::List));
+        assert_eq!(r.kind_at(&VPath::root()).unwrap(), Some(NodeKind::Object));
+        assert_eq!(r.len_at(&vp("xs")).unwrap(), 2);
+        assert_eq!(
+            r.keys_at(&VPath::root()).unwrap(),
+            vec![String::from("n"), String::from("xs")]
+        );
+        assert!(r.exists_at(&vp("n")).unwrap());
+
+        // A path that leads nowhere: scalar/kind report `None`, length/keys error.
+        let missing = vp("nope");
+        assert!(r.scalar_at(&missing).unwrap().is_none());
+        assert!(r.kind_at(&missing).unwrap().is_none());
+        assert!(!r.exists_at(&missing).unwrap());
+        assert!(r.len_at(&missing).is_err());
+        assert!(r.keys_at(&missing).is_err());
+
+        // A truncated offset past the entry is rejected at construction.
+        assert!(ArchivedReader::new(Arc::new(codec::encode(&value)), 9999).is_err());
+    }
+}

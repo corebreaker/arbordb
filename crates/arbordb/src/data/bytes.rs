@@ -68,3 +68,28 @@ impl From<Bytes> for Vec<u8> {
         bytes.0
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_scalar_rejects_a_non_bytes_scalar() {
+        assert!(matches!(
+            Bytes::from_scalar(&Scalar::I64(1)),
+            Err(AdbError::TypeMismatch {
+                expected: "bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn converts_to_and_from_a_vec() {
+        let bytes: Bytes = vec![1u8, 2, 3].into();
+        assert_eq!(bytes, Bytes(vec![1, 2, 3]));
+
+        let raw: Vec<u8> = bytes.into();
+        assert_eq!(raw, vec![1, 2, 3]);
+    }
+}

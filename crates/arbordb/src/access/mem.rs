@@ -97,3 +97,102 @@ impl Writer for MemWriter {
         Ok(self.value.borrow_mut().remove_value(at))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    fn vp(s: &str) -> VPath {
+        VPath::parse(s).unwrap()
+    }
+
+    /// Builds `{ n: 5, xs: [1] }` through the writer methods.
+    fn built() -> MemWriter {
+        let w = MemWriter::new();
+        w.put_scalar(&vp("n"), Scalar::I64(5)).unwrap();
+        w.ensure_container(&vp("xs"), true).unwrap();
+        w.put_scalar(&vp("xs[0]"), Scalar::I64(1)).unwrap();
+
+        w
+    }
+
+    #[test]
+    fn mem_writer_reads_back_what_it_built() {
+        let w = built();
+
+        assert_eq!(w.scalar_at(&vp("n")).unwrap(), Some(Scalar::I64(5)));
+        assert_eq!(w.kind_at(&vp("n")).unwrap(), Some(NodeKind::Leaf));
+        assert_eq!(w.kind_at(&VPath::root()).unwrap(), Some(NodeKind::Object));
+        assert_eq!(w.len_at(&vp("xs")).unwrap(), 1);
+        assert_eq!(
+            w.keys_at(&VPath::root()).unwrap(),
+            vec![String::from("n"), String::from("xs")]
+        );
+        assert!(w.exists_at(&vp("n")).unwrap());
+        assert!(!w.exists_at(&vp("missing")).unwrap());
+
+        // A leaf has no scalar-less container; a container has no scalar.
+        assert!(w.scalar_at(&vp("xs")).unwrap().is_none());
+
+        // Error branches: length of a non-list, keys of a non-object, and both absent.
+        assert!(w.len_at(&vp("n")).is_err());
+        assert!(w.len_at(&vp("missing")).is_err());
+        assert!(w.keys_at(&vp("n")).is_err());
+        assert!(w.keys_at(&vp("missing")).is_err());
+
+        // `ensure_container` is a no-op when the right kind already sits there.
+        w.ensure_container(&vp("xs"), true).unwrap();
+        w.ensure_container(&vp("obj"), false).unwrap();
+        w.ensure_container(&vp("obj"), false).unwrap();
+        assert_eq!(w.kind_at(&vp("obj")).unwrap(), Some(NodeKind::Object));
+
+        assert!(w.remove(&vp("n")).unwrap());
+        assert!(!w.exists_at(&vp("n")).unwrap());
+
+        assert_eq!(built().into_value().get_value("n"), Some(Value::Leaf(Scalar::I64(5))));
+    }
+
+    // The production `Arc<dyn Writer>` wraps a `Send + Sync` cursor; here it wraps a
+    // single-threaded `MemWriter` purely to exercise the forwarding impls in one place.
+    #[allow(clippy::arc_with_non_send_sync)]
+    #[test]
+    fn boxed_and_arced_handles_forward_every_method() {
+        // A `Box<dyn Writer>` forwards the Reader and Writer methods to the inner value.
+        let boxed: Box<dyn Writer> = Box::new(built());
+        boxed.put_scalar(&vp("m"), Scalar::I64(7)).unwrap();
+        boxed.ensure_container(&vp("ys"), false).unwrap();
+        assert_eq!(boxed.scalar_at(&vp("m")).unwrap(), Some(Scalar::I64(7)));
+        assert_eq!(boxed.kind_at(&vp("m")).unwrap(), Some(NodeKind::Leaf));
+        assert_eq!(boxed.len_at(&vp("xs")).unwrap(), 1);
+        assert!(!boxed.keys_at(&VPath::root()).unwrap().is_empty());
+        assert!(boxed.exists_at(&vp("m")).unwrap());
+        assert!(boxed.remove(&vp("m")).unwrap());
+
+        // An `Arc<dyn Writer>` forwards the same way (the accessor's shared shape).
+        let arced: Arc<dyn Writer> = Arc::new(built());
+        arced.put_scalar(&vp("z"), Scalar::I64(1)).unwrap();
+        arced.ensure_container(&vp("zs"), true).unwrap();
+        assert_eq!(arced.scalar_at(&vp("z")).unwrap(), Some(Scalar::I64(1)));
+        assert_eq!(arced.kind_at(&vp("z")).unwrap(), Some(NodeKind::Leaf));
+        assert_eq!(arced.len_at(&vp("zs")).unwrap(), 0);
+        assert!(!arced.keys_at(&VPath::root()).unwrap().is_empty());
+        assert!(arced.exists_at(&vp("z")).unwrap());
+        assert!(arced.remove(&vp("z")).unwrap());
+
+        // A `Box`/`Arc` of a bare `dyn Reader` forwards the read methods too.
+        let boxed_reader: Box<dyn Reader> = Box::new(built());
+        assert_eq!(boxed_reader.scalar_at(&vp("n")).unwrap(), Some(Scalar::I64(5)));
+        assert_eq!(boxed_reader.kind_at(&vp("n")).unwrap(), Some(NodeKind::Leaf));
+        assert_eq!(boxed_reader.len_at(&vp("xs")).unwrap(), 1);
+        assert_eq!(boxed_reader.keys_at(&VPath::root()).unwrap().len(), 2);
+        assert!(boxed_reader.exists_at(&vp("n")).unwrap());
+
+        let arced_reader: Arc<dyn Reader> = Arc::new(built());
+        assert_eq!(arced_reader.scalar_at(&vp("n")).unwrap(), Some(Scalar::I64(5)));
+        assert_eq!(arced_reader.kind_at(&vp("n")).unwrap(), Some(NodeKind::Leaf));
+        assert_eq!(arced_reader.len_at(&vp("xs")).unwrap(), 1);
+        assert_eq!(arced_reader.keys_at(&VPath::root()).unwrap().len(), 2);
+        assert!(arced_reader.exists_at(&vp("n")).unwrap());
+    }
+}

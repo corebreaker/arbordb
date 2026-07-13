@@ -102,3 +102,17 @@ pub(crate) fn require(meta: &mut redb::Table<'_, &'static str, &'static [u8]>, n
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_compiled;
+
+    #[test]
+    fn is_compiled_maps_each_known_feature_and_rejects_the_rest() {
+        // The two recognised names return this build's `cfg!` value; anything else is
+        // unknown and therefore never "compiled in".
+        assert_eq!(is_compiled("permissions"), cfg!(feature = "permissions"));
+        assert_eq!(is_compiled("entry-timestamps"), cfg!(feature = "entry-timestamps"));
+        assert!(!is_compiled("some-unknown-feature"));
+    }
+}

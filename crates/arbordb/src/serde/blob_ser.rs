@@ -583,3 +583,31 @@ impl Serializer for KeySerializer {
         Err(bad_key())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_float_key_stringifies() {
+        assert_eq!(KeySerializer.serialize_f32(1.5).unwrap(), "1.5");
+        assert_eq!(KeySerializer.serialize_f64(2.5).unwrap(), "2.5");
+    }
+
+    #[test]
+    fn a_structural_key_is_rejected() {
+        // Every non-string-like shape a key could take must be refused uniformly.
+        assert!(KeySerializer.serialize_bytes(b"x").is_err());
+        assert!(KeySerializer.serialize_none().is_err());
+        assert!(KeySerializer.serialize_unit().is_err());
+        assert!(KeySerializer.serialize_unit_struct("U").is_err());
+        assert!(KeySerializer.serialize_newtype_variant("E", 0, "V", &1i32).is_err());
+        assert!(KeySerializer.serialize_seq(Some(1)).is_err());
+        assert!(KeySerializer.serialize_tuple(2).is_err());
+        assert!(KeySerializer.serialize_tuple_struct("T", 2).is_err());
+        assert!(KeySerializer.serialize_tuple_variant("E", 0, "V", 2).is_err());
+        assert!(KeySerializer.serialize_map(None).is_err());
+        assert!(KeySerializer.serialize_struct("S", 1).is_err());
+        assert!(KeySerializer.serialize_struct_variant("E", 0, "V", 1).is_err());
+    }
+}

@@ -756,4 +756,60 @@ mod tests {
         assert!(!root.set_value("xs[1][5]", leaf(3)));
         assert_eq!(root.get_value("xs[1]"), None);
     }
+
+    #[test]
+    fn node_kind_reflects_the_root_shape() {
+        assert_eq!(leaf(1).node_kind(), crate::NodeKind::Leaf);
+        assert_eq!(Value::new_empty_list().node_kind(), crate::NodeKind::List);
+        assert_eq!(Value::new_empty_node().node_kind(), crate::NodeKind::Object);
+    }
+
+    #[test]
+    fn remove_value_drops_subtrees_by_kind() {
+        let mut root = Value::new_empty_node();
+        root.set_value("a/b", leaf(1));
+        root.set_value("a/c", leaf(2));
+        root.set_value("xs[0]/field", leaf(10)); // xs[0] is an object
+        root.set_value("xs[1]", leaf(20));
+
+        // Remove a named entry, descending through "a".
+        assert!(root.remove_value("a/b"));
+        assert!(root.get_value("a/b").is_none());
+        assert_eq!(root.get_value("a/c"), Some(leaf(2)));
+
+        // Descend through a list index to remove a nested field.
+        assert!(root.remove_value("xs[0]/field"));
+        assert!(root.get_value("xs[0]/field").is_none());
+
+        // Remove a list element by index.
+        assert!(root.remove_value("xs[1]"));
+        assert!(root.get_value("xs[1]").is_none());
+
+        // Out-of-range index: a no-op.
+        assert!(!root.remove_value("xs[9]"));
+
+        // Wrong kind: a name into a list, an index into a vnode.
+        assert!(!root.remove_value("xs/name"));
+        assert!(!root.remove_value("a[0]"));
+
+        // A path that leads nowhere.
+        assert!(!root.remove_value("nope/here"));
+
+        // An unparsable path is a no-op.
+        assert!(!root.remove_value("a["));
+
+        // The root path resets to the default null leaf.
+        assert!(root.remove_value(""));
+        assert_eq!(root, Value::default());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn serde_value_bridge_round_trips() {
+        let value = Value::from_serde_value(&7i64).unwrap();
+        assert_eq!(value, Value::Leaf(Scalar::I64(7)));
+
+        let back: i64 = value.to_serde_value().unwrap();
+        assert_eq!(back, 7);
+    }
 }
