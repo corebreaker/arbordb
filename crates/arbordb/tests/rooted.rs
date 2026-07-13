@@ -51,6 +51,103 @@ fn rooted_read_and_write_forward_relative_paths() {
     assert_eq!(r.get_as::<i64>("users/carol", "age").unwrap(), Some(40));
 }
 
+#[test]
+fn rooted_write_forwards_every_operation() {
+    use arbordb::{
+        data::{Leaf, LeafMut},
+        entry::EntryKind,
+        export::{JsonExporter, YamlExporter},
+    };
+
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        let root = w.rooted("data").unwrap();
+        assert_eq!(root.root().to_string(), "data");
+
+        // A nested view is rooted relative to this one.
+        let nested = root.rooted("inner").unwrap();
+        assert_eq!(nested.root().to_string(), "data/inner");
+
+        root.store("n", &5i64).unwrap();
+        root.store_value("v", &user(30)).unwrap();
+        root.mkdir("dir").unwrap();
+
+        assert!(root.exists("dir").unwrap());
+        assert_eq!(root.kind("dir").unwrap(), Some(EntryKind::Dir));
+        assert_eq!(root.kind("n").unwrap(), Some(EntryKind::File));
+
+        {
+            let leaf: LeafMut<'_, i64> = root.fetch_mut("n").unwrap().unwrap();
+            leaf.set(&6).unwrap();
+        }
+
+        assert_eq!(root.load::<i64>("n").unwrap(), Some(6));
+        assert_eq!(root.load_value("v").unwrap(), Some(user(30)));
+        assert_eq!(root.get_as::<i64>("v", "age").unwrap(), Some(30));
+        assert!(root.get("v", "age").unwrap().is_some());
+
+        {
+            let leaf: Leaf<'static, i64> = root.fetch("n").unwrap().unwrap();
+            assert_eq!(leaf.get().unwrap(), 6);
+        }
+
+        let names: Vec<String> = root.ls("").unwrap().into_iter().map(|e| e.name().to_string()).collect();
+        assert!(names.contains(&String::from("n")));
+
+        root.cp("v", "v2").unwrap();
+        assert!(root.exists("v2").unwrap());
+        root.mv("v2", "v3").unwrap();
+        assert!(!root.exists("v2").unwrap());
+        assert!(root.exists("v3").unwrap());
+        assert!(root.rm("v3").unwrap());
+        assert!(!root.rm("v3").unwrap());
+
+        assert!(root.export_to_json("v", None).unwrap().contains("age"));
+        assert!(root.export_to_yaml("v").unwrap().contains("age"));
+
+        w.commit().unwrap();
+    }
+
+    // The read view forwards the same relative paths.
+    let r = table.read().unwrap();
+    let root = r.rooted("data").unwrap();
+
+    assert_eq!(root.load::<i64>("n").unwrap(), Some(6));
+    assert_eq!(root.load_value("v").unwrap(), Some(user(30)));
+    assert_eq!(root.kind("v").unwrap(), Some(EntryKind::File));
+    assert!(root.get("v", "age").unwrap().is_some());
+
+    {
+        let leaf: Leaf<'static, i64> = root.fetch("n").unwrap().unwrap();
+        assert_eq!(leaf.get().unwrap(), 6);
+    }
+
+    assert!(root.export_to_json("v", None).unwrap().contains("age"));
+    assert!(root.export_to_yaml("v").unwrap().contains("age"));
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn rooted_views_forward_serde_values() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        let root = w.rooted("data").unwrap();
+        root.store_serde_value("s", &7i64).unwrap();
+        assert_eq!(root.load_serde_value::<i64>("s").unwrap(), Some(7));
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+    let root = r.rooted("data").unwrap();
+    assert_eq!(root.load_serde_value::<i64>("s").unwrap(), Some(7));
+}
+
 #[cfg(feature = "derive")]
 mod scoped {
     use arbordb::{AData, ArborDb};
@@ -101,5 +198,44 @@ mod scoped {
                 age: 30
             }]
         );
+    }
+
+    #[test]
+    fn rooted_write_view_queries_under_its_root() {
+        let db = ArborDb::create_in_memory().unwrap();
+        let table = db.open_table("t").unwrap();
+
+        table.create_indexes::<Profile>("*/profile").unwrap();
+
+        {
+            let w = table.write().unwrap();
+            w.store::<Profile>(
+                "alice/profile",
+                &Profile {
+                    age: 30
+                },
+            )
+            .unwrap();
+            w.store::<Profile>(
+                "bob/profile",
+                &Profile {
+                    age: 40
+                },
+            )
+            .unwrap();
+
+            // A write view rooted at `alice` sees only the profile under it, reading the
+            // transaction's own uncommitted index state.
+            let alice = w.rooted("alice").unwrap();
+            assert_eq!(
+                alice.find::<Profile>("by_age", &[]).unwrap(),
+                vec![Profile {
+                    age: 30
+                }]
+            );
+            assert_eq!(alice.query("by_age").run::<Profile>().unwrap().len(), 1);
+
+            w.commit().unwrap();
+        }
     }
 }

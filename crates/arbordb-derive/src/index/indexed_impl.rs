@@ -18,10 +18,12 @@ pub(crate) fn indexed_impl(
     for index in indexes {
         for column in index.columns() {
             if !fields.iter().any(|field| field.ident() == column.field()) {
+                // no-coverage:start — attribute-validation error (invalid input never compiles)
                 return Err(Error::new(
                     column.field().span(),
                     format!("index column `{col}` is not a field of `{name}`", col = column.field()),
                 ));
+                // no-coverage:stop
             }
         }
     }

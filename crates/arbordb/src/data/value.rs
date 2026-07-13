@@ -109,7 +109,7 @@ scalar_value!(num_bigint::BigInt, BigInt, "bigint");
 scalar_value!(num_bigfloat::BigFloat, BigFloat, "bigfloat");
 
 #[cfg(feature = "rational-as-scalar")]
-scalar_value!(num_rational::BigRational, Rational, "rational");
+scalar_value!(super::rational::BigRational, Rational, "rational");
 
 // Platform-dependent integer widths are normalised to a fixed width so the
 // on-disk format is portable.
@@ -245,7 +245,7 @@ scalar_adata!(num_bigint::BigInt);
 scalar_adata!(num_bigfloat::BigFloat);
 
 #[cfg(all(feature = "rational-as-scalar", feature = "rational-as-data"))]
-scalar_adata!(num_rational::BigRational);
+scalar_adata!(super::rational::BigRational);
 
 #[cfg(test)]
 mod tests {
@@ -326,5 +326,33 @@ mod tests {
         // native scalar, not as a `Bytes` leaf.
         let r = table.read().unwrap();
         assert_eq!(r.load::<BigInt>("x").unwrap(), Some(big));
+    }
+
+    #[test]
+    fn from_scalar_owned_default_forwards_to_from_scalar() {
+        // `usize` does not override `from_scalar_owned`, so it exercises the default.
+        assert_eq!(<usize as AValue>::from_scalar_owned(Scalar::U64(9)).unwrap(), 9);
+    }
+
+    #[test]
+    fn a_scalar_owns_itself_from_an_owned_scalar() {
+        assert_eq!(Scalar::from_scalar_owned(Scalar::I32(5)).unwrap(), Scalar::I32(5));
+    }
+
+    #[test]
+    fn a_scalar_value_rejects_a_mismatched_scalar() {
+        assert!(matches!(
+            i64::from_scalar(&Scalar::Bool(true)),
+            Err(AdbError::TypeMismatch {
+                expected: "i64",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn an_option_reads_from_an_owned_scalar() {
+        assert_eq!(Option::<i32>::from_scalar_owned(Scalar::Null).unwrap(), None);
+        assert_eq!(Option::<i32>::from_scalar_owned(Scalar::I32(3)).unwrap(), Some(3));
     }
 }

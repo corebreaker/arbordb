@@ -21,29 +21,35 @@ pub(crate) fn convert_impl(
 
     // Index columns name a struct's fields; a delegated type exposes none.
     if let Some(index) = container.indexes().first() {
+        // no-coverage:start — attribute-validation error (invalid input never compiles)
         return Err(Error::new_spanned(
             index.name(),
             "`#[arbor(index(...))]` is incompatible with `from`/`into`/`try_from`",
         ));
+        // no-coverage:stop
     }
 
     // The on-disk form is the `into` target — required so the value can be stored.
     let Some(into_ty) = container.store_as() else {
+        // no-coverage:start — attribute-validation error (invalid input never compiles)
         let probe = container.load_from().or(container.try_load_from()).expect("delegates");
 
         return Err(Error::new_spanned(
             probe,
             "`from`/`try_from` needs a matching `into` to store the value",
         ));
+        // no-coverage:stop
     };
 
     // The load source is exactly one of `from` / `try_from`.
     let load_body = match (container.load_from(), container.try_load_from()) {
         (Some(_), Some(try_ty)) => {
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             return Err(Error::new_spanned(
                 try_ty,
                 "`from` and `try_from` are mutually exclusive",
             ));
+            // no-coverage:stop
         }
 
         (Some(from_ty), None) => quote! {
@@ -60,10 +66,12 @@ pub(crate) fn convert_impl(
         },
 
         (None, None) => {
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             return Err(Error::new_spanned(
                 into_ty,
                 "`into` needs a matching `from` or `try_from` to load the value",
             ));
+            // no-coverage:stop
         }
     };
 

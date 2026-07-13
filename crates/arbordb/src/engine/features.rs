@@ -68,6 +68,7 @@ where
     T: ReadableTable<&'static str, &'static [u8]>, {
     for name in list(meta)? {
         if !is_compiled(&name) {
+            // no-coverage:start — only a build lacking a required feature reaches this
             if name == "permissions" {
                 return Err(AdbError::DatabaseProtected);
             }
@@ -75,6 +76,7 @@ where
             return Err(AdbError::FeatureRequired {
                 feature: name
             });
+            // no-coverage:stop
         }
     }
 
@@ -101,4 +103,18 @@ pub(crate) fn require(meta: &mut redb::Table<'_, &'static str, &'static [u8]>, n
     meta.insert(META_REQUIRED_FEATURES_KEY, buf.as_slice())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_compiled;
+
+    #[test]
+    fn is_compiled_maps_each_known_feature_and_rejects_the_rest() {
+        // The two recognised names return this build's `cfg!` value; anything else is
+        // unknown and therefore never "compiled in".
+        assert_eq!(is_compiled("permissions"), cfg!(feature = "permissions"));
+        assert_eq!(is_compiled("entry-timestamps"), cfg!(feature = "entry-timestamps"));
+        assert!(!is_compiled("some-unknown-feature"));
+    }
 }

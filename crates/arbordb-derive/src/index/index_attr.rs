@@ -36,7 +36,9 @@ impl IndexAttr {
         let columns = columns.ok_or_else(|| Error::new(span, "index requires `columns(...)`"))?;
 
         if columns.is_empty() {
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             return Err(Error::new(span, "index requires at least one column"));
+            // no-coverage:stop
         }
 
         Ok(IndexAttr {

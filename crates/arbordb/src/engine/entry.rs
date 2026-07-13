@@ -101,3 +101,40 @@ pub(crate) fn entry_split(entry: &[u8]) -> AdbResult<(EntryKind, &[u8])> {
 
     Ok((kind, payload))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_exposes_its_name_and_kind() {
+        let entry = Entry::new(String::from("x"), EntryKind::File);
+
+        assert_eq!(entry.name(), "x");
+        assert_eq!(entry.kind(), EntryKind::File);
+    }
+
+    #[test]
+    fn reading_the_kind_rejects_an_empty_or_unknown_tag() {
+        assert!(get_entry_kind(&[]).is_err());
+        assert!(get_entry_kind(&[42]).is_err());
+        assert!(entry_split(&[]).is_err());
+        assert!(entry_split(&[42, 1, 2]).is_err());
+    }
+
+    #[test]
+    fn a_built_entry_splits_back_into_its_kind_and_payload() {
+        let dir = dir_entry(&[9, 9]);
+        let (dir_kind, dir_payload) = entry_split(&dir).unwrap();
+        assert_eq!(dir_kind, EntryKind::Dir);
+        assert_eq!(dir_payload, &[9, 9]);
+
+        let file = file_entry(&[1, 2, 3]);
+        let (file_kind, file_payload) = entry_split(&file).unwrap();
+        assert_eq!(file_kind, EntryKind::File);
+        assert_eq!(file_payload, &[1, 2, 3]);
+
+        let one = file_entry(&[1]);
+        assert_eq!(get_entry_kind(&one).unwrap(), EntryKind::File);
+    }
+}

@@ -46,6 +46,7 @@ impl RenameRule {
             "SCREAMING_SNAKE_CASE" => Self::ScreamingSnake,
             "kebab-case" => Self::Kebab,
             "SCREAMING-KEBAB-CASE" => Self::ScreamingKebab,
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             other => {
                 return Err(Error::new(
                     lit.span(),
@@ -55,7 +56,7 @@ impl RenameRule {
                          SCREAMING-KEBAB-CASE"
                     ),
                 ));
-            }
+            } // no-coverage:stop
         };
 
         Ok(rule)

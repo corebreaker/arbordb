@@ -118,7 +118,9 @@ impl DbInner {
         }
 
         let Ok(mut log) = self.access_log.lock() else {
+            // no-coverage:start — only runs if a lock was poisoned by a panicking holder
             return;
+            // no-coverage:stop
         };
 
         for (akey, when) in entries {
@@ -133,7 +135,9 @@ impl DbInner {
     pub(crate) fn drain_access_log(&self) -> Vec<((String, crate::AKey), i64)> {
         match self.access_log.lock() {
             Ok(mut log) => log.drain().collect(),
+            // no-coverage:start — only runs if a lock was poisoned by a panicking holder
             Err(_) => Vec::new(),
+            // no-coverage:stop
         }
     }
 }

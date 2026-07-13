@@ -187,4 +187,19 @@ mod tests {
             "-90.5"
         );
     }
+
+    #[cfg(feature = "bigint-as-scalar")]
+    #[test]
+    fn big_integer_renders_verbatim() {
+        assert_eq!(render(Scalar::BigInt(num_bigint::BigInt::from(-42))), "-42");
+    }
+
+    #[cfg(feature = "rational-as-scalar")]
+    #[test]
+    fn rational_renders_as_num_over_den() {
+        let rational =
+            crate::data::rational::BigRational::new(num_bigint::BigInt::from(1), num_bigint::BigInt::from(3));
+
+        assert_eq!(render(Scalar::Rational(rational)), "\"1/3\"");
+    }
 }

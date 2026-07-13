@@ -105,7 +105,9 @@ impl ContainerAttrs {
                     return Ok(());
                 }
 
+                // no-coverage:start — attribute-validation error (invalid input never compiles)
                 Err(meta.error("unknown arbor container attribute"))
+                // no-coverage:stop
             })?;
         }
 

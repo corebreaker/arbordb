@@ -107,23 +107,29 @@ fn other_variant<'a>(variants: &'a [VariantInfo<'a>], repr: &EnumRepr) -> SynRes
 
     match (others.next(), others.next()) {
         (None, _) => Ok(None),
+        // no-coverage:start — attribute-validation error (invalid input never compiles)
         (Some(_), Some(second)) => Err(Error::new(
             second.ident().span(),
             "at most one variant may be `#[arbor(other)]`",
         )),
+        // no-coverage:stop
         (Some(first), None) => {
             if repr.is_untagged() {
+                // no-coverage:start — attribute-validation error (invalid input never compiles)
                 return Err(Error::new(
                     first.ident().span(),
                     "`#[arbor(other)]` is not supported on untagged enums",
                 ));
+                // no-coverage:stop
             }
 
             if !first.is_unit() {
+                // no-coverage:start — attribute-validation error (invalid input never compiles)
                 return Err(Error::new(
                     first.ident().span(),
                     "an `#[arbor(other)]` variant must be a unit variant",
                 ));
+                // no-coverage:stop
             }
 
             Ok(Some(first.ident()))

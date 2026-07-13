@@ -279,3 +279,11 @@ fn reads_stay_coherent_across_commits() {
         assert_eq!(r.get_as::<u32>("x", "age").unwrap(), Some(2));
     }
 }
+
+#[test]
+fn a_fresh_database_is_neither_protected_nor_read_only() {
+    let db = ArborDb::create_in_memory().unwrap();
+
+    assert!(!db.is_protected().unwrap());
+    assert!(!db.is_readonly());
+}

@@ -167,3 +167,40 @@ impl Inode {
         self.sig.replace(sig);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::codec::put_bytes;
+
+    /// Builds an inode blob of `[count:u8]` then `[tag:u8][len-prefixed body]` sections.
+    fn blob(sections: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut out = vec![sections.len() as u8];
+        for (tag, body) in sections {
+            out.push(*tag);
+            put_bytes(&mut out, body);
+        }
+
+        out
+    }
+
+    #[test]
+    fn an_unknown_section_is_kept_verbatim_across_a_round_trip() {
+        // A section tag this build does not know is copied through untouched, so
+        // another feature's metadata survives a decode/encode cycle.
+        let original = blob(&[(200, &[1, 2, 3])]);
+        let inode = Inode::decode(&original).unwrap();
+
+        assert_eq!(inode.encode(), original);
+    }
+
+    #[cfg(feature = "permissions")]
+    #[test]
+    fn a_bad_length_mac_or_signature_section_is_rejected() {
+        use super::super::constants::{SECTION_MAC, SECTION_SIG};
+
+        // A MAC is 32 bytes and a signature 64; a shorter body is corruption.
+        assert!(Inode::decode(&blob(&[(SECTION_MAC, &[1, 2, 3])])).is_err());
+        assert!(Inode::decode(&blob(&[(SECTION_SIG, &[1, 2, 3])])).is_err());
+    }
+}

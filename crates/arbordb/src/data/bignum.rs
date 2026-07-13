@@ -28,7 +28,7 @@ use num_bigint::BigInt;
 use num_bigfloat::{BigFloat, INF_NEG, INF_POS, NAN, ZERO};
 
 #[cfg(all(not(feature = "rational-as-scalar"), feature = "rational-as-data"))]
-use num_rational::BigRational;
+use super::rational::BigRational;
 
 /// Reads the single `Bytes` leaf a big-number value was stored as.
 fn load_leaf_bytes<R: Reader>(reader: &R, at: &VPath) -> AdbResult<Vec<u8>> {
@@ -197,10 +197,12 @@ mod tests {
             num_bigint::BigInt::from(0),
             num_bigint::BigInt::from(1),
         ));
+
         store_then_load(BigRational::new(
             num_bigint::BigInt::from(1),
             num_bigint::BigInt::from(3),
         ));
+
         store_then_load(BigRational::new(
             num_bigint::BigInt::from(-7),
             num_bigint::BigInt::from(2),

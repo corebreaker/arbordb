@@ -250,5 +250,107 @@ mod tests {
 
         // A non-scalar is rejected when the target is a `Scalar`.
         assert!(serde_json::from_str::<Scalar>("[1,2]").is_err());
+
+        // A map is rejected too (the other structural shape).
+        assert!(serde_json::from_str::<Scalar>("{}").is_err());
+    }
+
+    #[test]
+    fn non_serde_scalars_serialize_as_their_string_form() {
+        let cases = [
+            Scalar::Uuid(uuid::Uuid::nil()),
+            Scalar::Date(chrono::NaiveDate::from_ymd_opt(2026, 6, 21).unwrap()),
+            Scalar::Time(chrono::NaiveTime::from_hms_opt(1, 2, 3).unwrap()),
+            Scalar::DateTime(
+                chrono::NaiveDate::from_ymd_opt(1970, 1, 1)
+                    .unwrap()
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap()
+                    .and_utc(),
+            ),
+            Scalar::Duration(chrono::TimeDelta::seconds(5)),
+        ];
+
+        for scalar in cases {
+            let json = serde_json::to_value(&scalar).unwrap();
+
+            assert!(json.is_string(), "{scalar:?} should serialize as a JSON string");
+        }
+    }
+
+    #[cfg(feature = "bigint-as-scalar")]
+    #[test]
+    fn a_big_integer_serializes_as_a_string() {
+        let json = serde_json::to_value(Scalar::BigInt(num_bigint::BigInt::from(42))).unwrap();
+
+        assert_eq!(json, serde_json::Value::String(String::from("42")));
+    }
+
+    #[cfg(feature = "bigfloat-as-scalar")]
+    #[test]
+    fn a_big_float_serializes_as_a_string() {
+        let json = serde_json::to_value(Scalar::BigFloat(num_bigfloat::BigFloat::from_f64(1.5))).unwrap();
+
+        assert!(json.is_string());
+    }
+
+    #[cfg(feature = "rational-as-scalar")]
+    #[test]
+    fn a_rational_serializes_as_a_string() {
+        let rational =
+            crate::data::rational::BigRational::new(num_bigint::BigInt::from(1), num_bigint::BigInt::from(3));
+        let json = serde_json::to_value(Scalar::Rational(rational)).unwrap();
+
+        assert!(json.is_string());
+    }
+
+    #[test]
+    fn the_value_visitor_states_what_it_expects() {
+        struct Show;
+
+        impl std::fmt::Display for Show {
+            fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                serde::de::Visitor::expecting(&super::ValueVisitor, f)
+            }
+        }
+
+        assert_eq!(Show.to_string(), "any ArborDb value (a scalar, a sequence, or a map)");
+    }
+
+    #[test]
+    fn a_char_deserializes_to_a_string_leaf() {
+        use serde::{de::IntoDeserializer, Deserialize};
+
+        let de = IntoDeserializer::<serde::de::value::Error>::into_deserializer('z');
+        let value = Value::deserialize(de).unwrap();
+
+        assert_eq!(value, Value::Leaf(Scalar::Str(String::from("z"))));
+    }
+
+    #[test]
+    fn borrowed_bytes_deserialize_to_a_bytes_leaf() {
+        use serde::Deserialize;
+
+        let de = serde::de::value::BytesDeserializer::<serde::de::value::Error>::new(b"ab");
+        let value = Value::deserialize(de).unwrap();
+
+        assert_eq!(value, Value::Leaf(Scalar::Bytes(vec![b'a', b'b'])));
+    }
+
+    #[test]
+    fn a_none_visits_to_null() {
+        let value: Value = serde::de::Visitor::visit_none::<serde::de::value::Error>(super::ValueVisitor).unwrap();
+
+        assert_eq!(value, Value::Leaf(Scalar::Null));
+    }
+
+    #[test]
+    fn a_some_visits_to_its_inner_value() {
+        use serde::de::IntoDeserializer;
+
+        let de = IntoDeserializer::<serde::de::value::Error>::into_deserializer(7u64);
+        let value: Value = serde::de::Visitor::visit_some(super::ValueVisitor, de).unwrap();
+
+        assert_eq!(value, Value::Leaf(Scalar::U64(7)));
     }
 }

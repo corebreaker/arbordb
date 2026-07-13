@@ -20,7 +20,7 @@ use num_bigint::{BigInt, Sign};
 use num_bigfloat::BigFloat;
 
 #[cfg(feature = "rational-as-scalar")]
-use num_rational::BigRational;
+use crate::data::rational::BigRational;
 
 /// Type tags. Their relative order fixes the (arbitrary but deterministic)
 /// ordering between distinct scalar types; within a type the body decides.
@@ -294,7 +294,7 @@ fn encode_bigfloat(out: &mut Vec<u8>, v: &BigFloat) {
 }
 
 /// Computes the canonical continued-fraction terms `[a0, a1, …]` of `numer/denom`
-/// (with `denom > 0`, as a `BigRational` guarantees). `a0` is the floor of the
+/// (with `denom > 0`, as a `[BigRational]` guarantees). `a0` is the floor of the
 /// value; every later term is ≥ 1 and the last is ≥ 2, so the expansion — and the
 /// encoding built from it — is unique per value.
 #[cfg(feature = "rational-as-scalar")]

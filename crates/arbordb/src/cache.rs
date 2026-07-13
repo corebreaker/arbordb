@@ -169,6 +169,8 @@ impl PathCache {
 
     /// Maps a poisoned cache lock to an [`AdbError`].
     fn poisoned<T>(_: PoisonError<T>) -> AdbError {
+        // no-coverage:start — only runs if a lock was poisoned by a panicking holder
         AdbError::CannotAccess(String::from("a cache lock was poisoned"))
+        // no-coverage:stop
     }
 }

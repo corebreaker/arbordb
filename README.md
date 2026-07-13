@@ -1,3 +1,9 @@
+[![Crates.io]](https://crates.io/crates/arbordb)
+[![Docs.rs]](https://docs.rs/arbordb/)
+[![CircleCI]](https://circleci.com/gh/corebreaker/arbordb/tree/main)
+[![Coverage Status]](https://coveralls.io/github/corebreaker/arbordb?branch=main)
+
+
 # ArborDb
 
 A pure-Rust, typed, transactional, indexed document store, layered over an embedded key-value engine.
@@ -12,8 +18,8 @@ It is the successor to [StratoDb](https://github.com/corebreaker/stratodb): same
 but a different storage strategy — one blob per value, navigated in place,
 rather than shredding every scalar into its own keyed node.
 
-> **Status:** under active development, pre-1.0.
-> The public API and on-disk format are not yet stable, and the crate is not yet published on crates.io.
+> **Status:** 1.0 — feature-complete, with a stable public API and on-disk format.
+> Not yet published on crates.io; depend on it by git until the release lands.
 > See [Project status](#project-status).
 
 ---
@@ -23,6 +29,9 @@ rather than shredding every scalar into its own keyed node.
 - **One blob per value, read zero-copy.** A value is serialized into a single blob laid out with offset tables;
   ArborDb's own codec (an rkyv-style but bespoke,
   unaligned reader) navigates to a field and reads it in place — no decode of the whole value, no alignment requirement.
+- **Partial reads that don't scale with the value.** Reaching one field or one list element is a jump straight
+  to it, so it stays ~flat as the value grows — where a decode-the-whole-blob store grows linearly
+  (over 500× behind at 10 240 list elements). See [Benchmarks](#benchmarks).
 - **A virtual filesystem.** A table is a tree of **directories** and **files**.
   Filesystem operations — `ls` / `mv` / `cp` / `mkdir` / `rm` — sit alongside `store` / `load` / `get`.
 - **Stable identity.** Every **arbor-node** carries an opaque 16-byte `AKey` that survives renames and moves:
@@ -45,7 +54,7 @@ rather than shredding every scalar into its own keyed node.
 
 ## Installation
 
-Not yet on crates.io. Depend on it by git while it is under development:
+Not yet on crates.io. Depend on it by git until the 1.0 release is published:
 
 ```toml
 [dependencies]
@@ -355,8 +364,8 @@ including across byte-length and sign boundaries.
 | `derive`             | `arbordb-derive`                                                                         | `#[derive(AData)]` and the `#[arbor(...)]` attributes                                                                                 |
 | `parallel`           | `rayon`                                                                                  | parallelize batch operations                                                                                                          |
 | `serde`              | `serde`                                                                                  | `Serialize` / `Deserialize` for public types and `Value`; `store_serde_value` / `load_serde_value` (straight to/from the value codec) |
-| `entry-timestamps`   | `chrono`                                                                                 | per-a-node `created` / `modified` / `accessed` datetimes (out-of-band, ignorable)                                                      |
-| `permissions`        | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `ed25519-dalek`, `getrandom` | user/password auth, per-a-node ACLs, MAC + signature tamper detection                                                                  |
+| `entry-timestamps`   | `chrono`                                                                                 | per-a-node `created` / `modified` / `accessed` datetimes (out-of-band, ignorable)                                                     |
+| `permissions`        | `entry-timestamps`, `argon2`, `chacha20poly1305`, `blake3`, `ed25519-dalek`, `getrandom` | user/password auth, per-a-node ACLs, MAC + signature tamper detection                                                                 |
 | `bignum`             | both umbrellas below                                                                     | every big-number type, as scalar **and** data                                                                                         |
 | `bignum-as-scalar`   | the three `*-as-scalar`                                                                  | big-number `Scalar` variants + `AValue`                                                                                               |
 | `bignum-as-data`     | the three `*-as-data`                                                                    | big-number `AData` impls (a `Bytes` leaf when not also a scalar)                                                                      |
@@ -381,6 +390,105 @@ Nothing is on by default.
 
 ---
 
+## Benchmarks
+
+ArborDb is measured against the databases in its own class — typed, indexed document stores
+(**native_db**, its predecessor **StratoDb**, **PoloDB**) — and against the bare key-value engines it is
+built on or compared to (**redb** + `bincode`/`rkyv`, **sled**, **fjall**, **persy**, **jammdb**, **canopydb**,
+**heed**/LMDB). Every backend runs the *same* operations on the *same* record with the same harness.
+The short version: **among document stores ArborDb leads on nearly every operation, and against the bare
+engines it matches them on point operations and beats them outright the moment a read is partial.**
+
+The record shared by every backend:
+
+```rust
+struct User { name: String, age: u32, email: String, score: i64, active: bool }
+```
+
+### The headline — partial reads don't scale with the value
+
+This is the design's whole point. A value is one blob with offset tables, so reaching **one field** or **one
+list element** is a jump straight to it (an O(log n) field lookup, an O(1) element jump) that reads it in
+place. A flat-blob store has no partial decode: to read one field it must deserialize the *whole* record. So
+ArborDb stays **flat as the value grows** while the flat blob grows linearly.
+
+**Read one field of an *N*-field record** (`wide`, on-disk):
+
+| Fields in record | ArborDb    | redb + bincode | StratoDb |
+|------------------|------------|----------------|----------|
+| 8                | **375 ns** | 826 ns         | 1.63 µs  |
+| 32               | **1.43 µs**| 3.55 µs        | 2.96 µs  |
+| 128              | **1.40 µs**| 12.1 µs        | 3.22 µs  |
+
+**Read one element of an *N*-element list** (`lists`, one `Vec` field, on-disk):
+
+| List length | ArborDb    | StratoDb | redb + bincode |
+|-------------|------------|----------|----------------|
+| 256         | **374 ns** | 1.91 µs  | 9.56 µs        |
+| 1 024       | **1.36 µs**| 4.11 µs  | 74.0 µs        |
+| 10 240      | **1.38 µs**| 9.82 µs  | 714 µs         |
+
+ArborDb's cost is essentially constant across a 40× range of data, while decoding the whole blob costs more
+the bigger the value gets — **8.6× behind at 128 fields, and over 500× behind at 10 240 list elements**.
+(`redb + rkyv`, also zero-copy, jumps in place too but must first copy the whole unaligned engine blob into an
+aligned buffer, where ArborDb borrows the page in place — so it lands between ArborDb and `redb + bincode`.)
+
+### Among document stores, ArborDb leads
+
+The `typed` axis runs every redb-backed layer **in-memory**, isolating what each typed layer adds over the raw
+engine (one `User` record):
+
+| Operation                       | ArborDb     | StratoDb | native_db | raw redb + bincode\* |
+|---------------------------------|-------------|----------|-----------|----------------------|
+| `get` (read + full decode)      | **693 ns**  | 1.17 µs  | 1.32 µs   | 665 ns               |
+| `insert`                        | **15.2 µs** | 20.4 µs  | 17.0 µs   | 12.4 µs              |
+| `update_score` (one field)      | **16.1 µs** | 18.7 µs  | 18.2 µs   | 12.7 µs              |
+| `remove`                        | 15.3 µs     | 16.3 µs  | **12.0 µs** | 11.2 µs            |
+| `bulk_insert` (1 000 in one txn)| **2.30 ms** | 2.41 ms  | 5.96 ms   | 367 µs               |
+
+\* raw redb is the bare engine ArborDb is built on, with no typed / indexed / document layer — the *floor*,
+not a competing product.
+
+ArborDb is the fastest of the typed document stores on every operation but `remove`, and its full-decode read
+rides **within ~4 % of the raw engine** while beating native_db by 1.9× and StratoDb by 1.7×. Its
+`bulk_insert` is **2.6× faster than native_db**, the closest similar project.
+
+### Partial writes — the same-width leaf patch
+
+Overwriting a scalar with one of the same byte width patches the blob's bytes **in place** — no decode, no
+re-encode. On `update_score` (a fixed-width `i64`) that puts ArborDb ahead of every other typed document store
+(16.1 µs vs native_db's 18.2 µs and StratoDb's 18.7 µs). This is a *targeted* win: a variable-width or
+structural edit re-encodes the one blob, so updating one element of a large packed list trades write cost for
+the read speed above — a deliberate design tradeoff, not a free lunch.
+
+### Secondary-index queries
+
+The `indexed` axis, in-memory, on a 1 000-row dataset:
+
+| Query                              | ArborDb  | native_db | StratoDb | redb hand-rolled\* |
+|------------------------------------|----------|-----------|----------|--------------------|
+| `find_by_age` (point, 10 hits)     | 6.62 µs  | 6.37 µs   | 10.0 µs  | 3.45 µs            |
+| `find_by_email` (point, 1 hit)     | 2.54 µs  | 2.50 µs   | 3.04 µs  | 1.12 µs            |
+| `scan_by_age_desc` (1 000 rows)    | 483 µs   | 386 µs    | 815 µs   | 237 µs             |
+
+\* a secondary index maintained by hand directly on redb — no query abstraction; the floor.
+
+ArborDb **matches native_db** on point lookups (within ~4 %) and beats StratoDb by up to 1.7×; native_db leads
+the full reverse scan.
+
+### How to read these numbers
+
+- **They are indicative medians from a single machine.** Treat the *ratios* and the *scaling shape*
+  (flat vs linear) as the durable signal, not the absolute times.
+- **Axes aren't cross-comparable.** `typed` / `indexed` run in-memory; `wide` / `lists` run on-disk. Compare
+  within an axis; redb appears in both to calibrate the gap.
+- **Durability is relaxed where possible** so fsync latency doesn't dominate and flatten everything, and it
+  differs per engine — compare within a durability class.
+- **The bulk-insert cost is ~O(N²) by design.** Inserting N files under one directory re-links each into that
+  directory's blob, which grows; this is a real property of the filesystem model, not a harness artifact.
+
+---
+
 ## Project status
 
 | Area                                                                        | State |
@@ -399,12 +507,18 @@ Nothing is on by default.
 | Continuous integration                                                      |   ✅   |
 | JSON / YAML export (read-only)                                              |   ✅   |
 
-ArborDb is under active development:
-the capabilities marked ✅ are implemented and tested, but the on-disk format and public API are not yet stable
-and the crate is not yet released.
+ArborDb has reached its 1.0 milestone:
+every capability marked ✅ is implemented and tested, and the public API and on-disk format are stable.
+The crate is not yet published on crates.io — depend on it by git until the release lands.
 
 ---
 
 ## License
 
 Licensed under the [MIT License](LICENSE).
+
+
+[Crates.io]: https://img.shields.io/crates/v/arbordb?style=for-the-badge
+[CircleCI]: https://img.shields.io/circleci/build/github/corebreaker/arbordb/main?style=for-the-badge
+[Coverage Status]: https://img.shields.io/coveralls/github/corebreaker/arbordb/main?style=for-the-badge
+[Docs.rs]: https://img.shields.io/docsrs/arbordb?style=for-the-badge

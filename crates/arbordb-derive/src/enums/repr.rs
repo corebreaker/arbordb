@@ -44,12 +44,16 @@ impl EnumRepr {
             (Some(tag), None, false) => Ok(Self::Internal {
                 tag: tag.to_string()
             }),
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             (None, Some(_), false) => Err(Error::new(name.span(), "`content` requires `tag`")),
+            // no-coverage:stop
             (None, None, true) => Ok(Self::Untagged),
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             (_, _, true) => Err(Error::new(
                 name.span(),
                 "`untagged` cannot be combined with `tag`/`content`",
             )),
+            // no-coverage:stop
         }
     }
 

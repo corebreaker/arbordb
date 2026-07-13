@@ -40,7 +40,9 @@ impl Parse for Item {
                 Ok(Item::Columns(columns.into_iter().collect()))
             }
             "unique" => Ok(Item::Unique),
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             _ => Err(Error::new(key.span(), "expected `name`, `columns`, or `unique`")),
+            // no-coverage:stop
         }
     }
 }

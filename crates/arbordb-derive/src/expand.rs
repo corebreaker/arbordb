@@ -22,18 +22,22 @@ pub(super) fn expand(input: &DeriveInput) -> SynResult<proc_macro2::TokenStream>
         Data::Enum(data) => {
             // Index columns name a struct's fields; an enum exposes none.
             if let Some(index) = container.indexes().first() {
+                // no-coverage:start — attribute-validation error (invalid input never compiles)
                 return Err(syn::Error::new_spanned(
                     index.name(),
                     "`#[arbor(index(...))]` is not supported on enums",
                 ));
+                // no-coverage:stop
             }
 
             enums::expand_enum(input, data, &container, &generics)
         }
+        // no-coverage:start — a union never reaches the value model (invalid input never compiles)
         Data::Union(_) => Err(syn::Error::new_spanned(
             &input.ident,
             "#[derive(AData)] does not support unions",
         )),
+        // no-coverage:stop
     }
 }
 

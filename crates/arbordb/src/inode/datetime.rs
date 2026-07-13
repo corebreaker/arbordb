@@ -60,3 +60,26 @@ impl NodeTimestamps {
         self.accessed = accessed;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessors_and_setters_round_trip_each_field() {
+        let t0 = DateTime::<Utc>::from_timestamp(0, 0).unwrap();
+        let t1 = DateTime::<Utc>::from_timestamp(1, 0).unwrap();
+
+        let mut times = NodeTimestamps::new(t0, t0, t0);
+        assert_eq!(times.created(), t0);
+        assert_eq!(times.modified(), t0);
+        assert_eq!(times.accessed(), t0);
+
+        times.set_created(t1);
+        times.set_modified(t1);
+        times.set_accessed(t1);
+        assert_eq!(times.created(), t1);
+        assert_eq!(times.modified(), t1);
+        assert_eq!(times.accessed(), t1);
+    }
+}

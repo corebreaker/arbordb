@@ -69,7 +69,9 @@ impl ArborDb {
             return perm::store::is_protected(self.inner.db());
         }
 
+        // no-coverage:start — the non-permissions fallback, dead under this feature build
         Ok(false)
+        // no-coverage:stop
     }
 
     /// Whether this handle is read-only: it holds no write key, so every write is
@@ -83,7 +85,9 @@ impl ArborDb {
             return matches!(self.principal.as_ref(), Principal::Guest { .. });
         }
 
+        // no-coverage:start — the non-permissions fallback, dead under this feature build
         false
+        // no-coverage:stop
     }
 
     /// Bootstraps the metadata table then wraps the engine handle. A protected

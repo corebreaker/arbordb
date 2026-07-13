@@ -202,7 +202,9 @@ impl ReadTxn {
         let opened = match self.txn.open_table(data_def(&self.table)) {
             Ok(table) => Some(table),
             Err(TableError::TableDoesNotExist(_)) => None,
+            // no-coverage:start — a non-"missing table" engine error is an I/O-level failure
             Err(err) => return Err(err.into()),
+            // no-coverage:stop
         };
 
         // On a race another thread may have set it first; keep whichever won.
@@ -254,7 +256,9 @@ impl ReadTxn {
         let opened = match self.txn.open_table(INODES_TABLE) {
             Ok(table) => Some(table),
             Err(TableError::TableDoesNotExist(_)) => None,
+            // no-coverage:start — a non-"missing table" engine error is an I/O-level failure
             Err(err) => return Err(err.into()),
+            // no-coverage:stop
         };
 
         let _ = self.inodes_table.set(opened);
@@ -638,7 +642,9 @@ impl Grab for ReadTxn {
         let index_table = match self.txn.open_table(INDEX_TABLE) {
             Ok(table) => table,
             Err(TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            // no-coverage:start — a non-"missing table" engine error is an I/O-level failure
             Err(err) => return Err(err.into()),
+            // no-coverage:stop
         };
 
         scan::scan_prefix(&index_table, entry.id(), cols, entry.def().unique())
@@ -728,7 +734,9 @@ impl Grab for ReadTxn {
         let inodes = match self.txn.open_table(INODES_TABLE) {
             Ok(inodes) => inodes,
             Err(TableError::TableDoesNotExist(_)) => return Ok(None),
+            // no-coverage:start — a non-"missing table" engine error is an I/O-level failure
             Err(err) => return Err(err.into()),
+            // no-coverage:stop
         };
 
         read_timestamps(&inodes, &self.table, akey)

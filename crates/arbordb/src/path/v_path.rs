@@ -349,4 +349,24 @@ mod tests {
         // Text after a closed index must start a new bracketed index.
         assert!(VPath::parse("a[0]x").is_err());
     }
+
+    #[test]
+    fn len_is_empty_and_join() {
+        let p = VPath::parse("a/b[3]").unwrap();
+        assert_eq!(p.len(), 3);
+        assert!(!p.is_empty());
+
+        assert_eq!(VPath::root().len(), 0);
+        assert!(VPath::root().is_empty());
+
+        // `join` merges segment lists (distinct from `/`, which appends name-wise).
+        let joined = VPath::parse("a").unwrap().join(&VPath::parse("b[0]").unwrap());
+        assert_eq!(joined.to_string(), "a/b[0]");
+
+        // `/=` also applies when the left side is a `&mut VPath`.
+        let mut base = VPath::parse("a").unwrap();
+        let mut via_ref: &mut VPath = &mut base;
+        via_ref /= "b";
+        assert_eq!(base.to_string(), "a/b");
+    }
 }

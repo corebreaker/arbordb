@@ -232,4 +232,13 @@ mod tests {
 
         assert_eq!(format!("{p:?}"), "APath(\"a/b\")");
     }
+
+    #[test]
+    fn push_name_normalizes_dot_and_dotdot() {
+        let base = APath::parse("a/b").unwrap();
+
+        assert_eq!(base.child_name(".."), APath::parse("a").unwrap());
+        assert_eq!(base.child_name("."), base);
+        assert_eq!(base.len(), 2);
+    }
 }
