@@ -54,9 +54,11 @@ pub(crate) fn bootstrap_metadata(db: &Database) -> AdbResult<()> {
 
         match current {
             Some(version) if version > FORMAT_VERSION => {
+                // no-coverage:start — only a file written by a newer build reaches this
                 return Err(AdbError::SchemaMismatch(format!(
                     "on-disk format version {version} is newer than this build's {FORMAT_VERSION}"
                 )));
+                // no-coverage:stop
             }
             Some(_) => {}
             None => {

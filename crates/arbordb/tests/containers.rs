@@ -238,6 +238,28 @@ fn pushing_a_container_through_a_mut_accessor_materializes_it() {
 }
 
 #[test]
+fn read_accessors_over_the_wrong_kind_report_an_error() {
+    let db = ArborDb::create_in_memory().unwrap();
+    let table = db.open_table("t").unwrap();
+
+    {
+        let w = table.write().unwrap();
+        w.store::<i64>("scalar", &5).unwrap();
+        w.commit().unwrap();
+    }
+
+    let r = table.read().unwrap();
+
+    // A read list accessor over a scalar: the codec reports no list vnode.
+    let seq: Seq<'static, i64> = r.fetch("scalar").unwrap().unwrap();
+    assert!(seq.len().is_err());
+
+    // A read map accessor over a scalar: the codec reports no object vnode.
+    let map: Map<'static, i64> = r.fetch("scalar").unwrap().unwrap();
+    assert!(map.keys().is_err());
+}
+
+#[test]
 fn mut_accessors_over_the_wrong_kind_report_an_error() {
     let db = ArborDb::create_in_memory().unwrap();
     let table = db.open_table("t").unwrap();

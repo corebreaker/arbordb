@@ -68,6 +68,7 @@ where
     T: ReadableTable<&'static str, &'static [u8]>, {
     for name in list(meta)? {
         if !is_compiled(&name) {
+            // no-coverage:start — only a build lacking a required feature reaches this
             if name == "permissions" {
                 return Err(AdbError::DatabaseProtected);
             }
@@ -75,6 +76,7 @@ where
             return Err(AdbError::FeatureRequired {
                 feature: name
             });
+            // no-coverage:stop
         }
     }
 

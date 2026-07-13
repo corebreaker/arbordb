@@ -241,7 +241,9 @@ impl<'a> ArchivedNode<'a> {
             LEAF => Ok(NodeKind::Leaf),
             LIST => Ok(NodeKind::List),
             NODE => Ok(NodeKind::Object),
+            // no-coverage:start — a bad tag byte means a corrupted blob, not a normal path
             other => Err(AdbError::Corrupt(format!("unknown value vnode tag {other}"))),
+            // no-coverage:stop
         }
     }
 
@@ -249,7 +251,9 @@ impl<'a> ArchivedNode<'a> {
     pub(crate) fn scalar(&self) -> AdbResult<Scalar> {
         let off = self.off as usize;
         if read_u8(self.blob, off)? != LEAF {
+            // no-coverage:start — callers check the kind first; this guards a codec misuse
             return Err(AdbError::Corrupt("a scalar was read from a non-leaf vnode".into()));
+            // no-coverage:stop
         }
 
         let body = self
