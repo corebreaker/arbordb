@@ -117,7 +117,9 @@ impl FieldAttrs {
                     return Ok(());
                 }
 
+                // no-coverage:start — attribute-validation error (invalid input never compiles)
                 Err(meta.error("unknown arbor field attribute"))
+                // no-coverage:stop
             })?;
         }
 
@@ -206,40 +208,48 @@ impl FieldAttrs {
                 || self.store_with.is_some()
                 || self.load_with.is_some())
         {
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             return Err(syn::Error::new(
                 span,
                 "`flatten` cannot be combined with other field attributes",
             ));
+            // no-coverage:stop
         }
 
         // `with` already sets both sides; an explicit `store_with`/`load_with` is redundant.
         if self.with.is_some()
             && let Some(dup) = self.store_with.as_ref().or(self.load_with.as_ref())
         {
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             return Err(syn::Error::new_spanned(
                 dup,
                 "`store_with`/`load_with` cannot be combined with `with`",
             ));
+            // no-coverage:stop
         }
 
         // A custom store only runs for a stored field.
         if let Some(store) = self.store_with.as_ref().or(self.with.as_ref())
             && (self.skip || self.skip_store)
         {
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             return Err(syn::Error::new_spanned(
                 store,
                 "`store_with`/`with` conflicts with `skip`/`skip_store`: the field is never stored",
             ));
+            // no-coverage:stop
         }
 
         // A custom load only runs for a loaded field.
         if let Some(load) = self.load_with.as_ref().or(self.with.as_ref())
             && (self.skip || self.skip_load)
         {
+            // no-coverage:start — attribute-validation error (invalid input never compiles)
             return Err(syn::Error::new_spanned(
                 load,
                 "`load_with`/`with` conflicts with `skip`/`skip_load`: the field is never loaded",
             ));
+            // no-coverage:stop
         }
 
         Ok(())

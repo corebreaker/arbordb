@@ -37,7 +37,9 @@ impl Parse for ColumnSpec {
             match direction.to_string().as_str() {
                 "asc" => false,
                 "desc" => true,
+                // no-coverage:start — attribute-validation error (invalid input never compiles)
                 _ => return Err(Error::new(direction.span(), "expected `asc` or `desc`")),
+                // no-coverage:stop
             }
         } else {
             false

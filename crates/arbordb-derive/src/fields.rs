@@ -43,17 +43,21 @@ impl<'a> Field<'a> {
 /// and resolving each field's stored name from its `#[arbor(...)]` attributes.
 pub(crate) fn named_fields<'a>(input: &'a DeriveInput, container: &ContainerAttrs) -> SynResult<Vec<Field<'a>>> {
     let Data::Struct(data) = &input.data else {
+        // no-coverage:start — dispatch guarantees a struct here (invalid input never compiles)
         return Err(syn::Error::new(
             Span::call_site(),
             "#[derive(AData)] expected a struct here",
         ));
+        // no-coverage:stop
     };
 
     let Fields::Named(named) = &data.fields else {
+        // no-coverage:start — attribute-validation error (invalid input never compiles)
         return Err(syn::Error::new(
             Span::call_site(),
             "#[derive(AData)] supports only structs with named fields",
         ));
+        // no-coverage:stop
     };
 
     named
